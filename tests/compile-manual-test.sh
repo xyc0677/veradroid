@@ -302,4 +302,34 @@ run 'APP_PREFAULT_MB=0; compile_prefault; wait'
 [ "$(grep -c prefault: $T/log)" = 2 ] || fail "p1: files read again after done"
 echo "p1 ok: prefault retried after a memory skip, each odex read once"
 
+# b8: host without unzip: large base.apk (>= COMPILE_BIG_APK_MB) still detected as big, and on 512 MB an existing
+#     verify-at-runtime odex is never upgraded to speed (both pw6/k49 and legacy)
+mkdir -p $T/minbin
+for u in sh awk sed head wc stat tr cut date grep tail sort cat rm mv cp mkdir; do
+    up=$(command -v $u 2>/dev/null) && [ -x "$up" ] && ln -sf "$up" $T/minbin/$u
+done
+for lc in $C $(pwd)/host/legacy/boot/lib/compile.sh; do
+    reset; mkdir -p $T/sys/data/app/com.big.nounzip-1
+    dd if=/dev/zero of=$T/sys/data/app/com.big.nounzip-1/base.apk bs=1048576 count=2 2>/dev/null
+    out=$(PATH=$T/bin:$T/minbin W=$T/w SYS=$T/sys COMPILE_BIG_APK_MB=2 sh -c '
+        . "$0" 2>/dev/null
+        command -v unzip >/dev/null 2>&1 && exit 9
+        lowmem_ram() { return 0; }
+        odex_filter() { echo interpret-only; }
+        echo "$(compile_dex_mb com.big.nounzip) $(compile_pkg_mode com.big.nounzip speed)"' "$lc")
+    [ "$out" = "120 verify-at-runtime" ] || fail "b8 ($lc): big apk without unzip -> '$out', want '120 verify-at-runtime'"
+    echo tiny > $T/sys/data/app/com.big.nounzip-1/base.apk
+    rm -f $T/w/compile.dexmb.com.big.nounzip
+    out=$(PATH=$T/bin:$T/minbin W=$T/w SYS=$T/sys sh -c '
+        . "$0" 2>/dev/null
+        command -v unzip >/dev/null 2>&1 && exit 9
+        lowmem_ram() { return 0; }
+        odex_filter() { echo verify-at-runtime; }
+        compile_needed com.big.nounzip && echo need || echo keep
+        compile_pkg_mode com.big.nounzip speed' "$lc" | tr '\n' ' ')
+    [ "$out" = "keep verify-at-runtime " ] || fail "b8 ($lc): verify-at-runtime without unzip -> '$out', want 'keep verify-at-runtime '"
+done
+rm -rf $T/sys/data/app/com.big.nounzip-1 $T/minbin
+echo "b8 ok: missing unzip falls back to APK size and preserves verify-at-runtime on 512 MB"
+
 echo "compile-manual: ok"

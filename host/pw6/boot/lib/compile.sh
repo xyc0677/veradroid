@@ -93,11 +93,24 @@ compile_done_filter() { # filter [target]
 compile_dex_mb() { # pkg -> MB（读不出来返回 1）；按安装目录 + base.apk 时间缓存在 $W
     cdm_d=$(app_dir "$1") || return 1
     cdm_a=$SYS/data/app/$cdm_d/base.apk
+    [ -f "$cdm_a" ] || return 1
     cdm_k="$cdm_d $(stat -c %Y "$cdm_a" 2>/dev/null)"; cdm_c=$W/compile.dexmb.$1
     if [ -f "$cdm_c" ] && [ "$(head -n 1 "$cdm_c")" = "$cdm_k" ]; then sed -n 2p "$cdm_c"; return 0; fi
-    command -v unzip >/dev/null 2>&1 || return 1
-    cdm_m=$(unzip -l "$cdm_a" 2>/dev/null | awk '$4 ~ /^classes[0-9]*\.dex$/ { s += $1 } END { print int(s / 1048576) }')
-    case "$cdm_m" in ''|*[!0-9]*) return 1 ;; esac
+    cdm_m=
+    if command -v unzip >/dev/null 2>&1; then
+        cdm_m=$(unzip -l "$cdm_a" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $NF ~ /^classes[0-9]*\.dex$/ { s += $1; n++ } END { if (n) print int(s / 1048576) }')
+    fi
+    case "$cdm_m" in ''|*[!0-9]*)
+        # 宿主没有 unzip（或 ZIP64 大包 unzip -l 读不出来）时按 APK 体积保守兜底：
+        # 多 dex 大应用（番茄小说等）APK >= COMPILE_BIG_APK_MB（默认 80 MB）时未压缩 dex 往往 > 120 MB
+        cdm_apk=$( { stat -c %s "$cdm_a" 2>/dev/null || wc -c < "$cdm_a" 2>/dev/null; } | awk '$1 ~ /^[0-9]+$/ { print int($1 / 1048576) }')
+        case "$cdm_apk" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$cdm_apk" -ge "${COMPILE_BIG_APK_MB:-80}" ] || return 1
+        cdm_m=$((cdm_apk * 3 / 2))
+        [ "$cdm_m" -lt "${COMPILE_BIG_DEX_MB:-120}" ] && cdm_m=${COMPILE_BIG_DEX_MB:-120}
+        echo "$cdm_m"
+        return 0 ;;
+    esac
     printf '%s\n%s\n' "$cdm_k" "$cdm_m" > "$cdm_c" 2>/dev/null
     echo "$cdm_m"
 }
@@ -137,7 +150,13 @@ compile_prof_back() { # pkg：编成了（odex 是 speed-profile）就只删存�
 #   verify-at-runtime：74 s 编完，dex2oat 峰值 256 MB，交换区几乎没动、0 次失败；之后打开番茄 dex 从 odex 里映射
 #     （97 MB 是可以随时丢掉再读回的文件页），可用内存一直在 225 MB 左右、交换只用 10 MB。
 # 代价：类的校验挪到运行时（和没有 odex 时一样），只是不再占匿名内存。
-compile_low_big() { lowmem_ram && [ "${COMPILE_BIG_LOW:-on}" != off ] && compile_big "$1"; }
+# 缺 unzip（或读不出 dex 大小）的 512 MB 设备上，当前已是 verify-at-runtime 的应用保持原过滤器，绝不升回 455 MB 峰值的 speed
+compile_low_big() {
+    lowmem_ram && [ "${COMPILE_BIG_LOW:-on}" != off ] || return 1
+    compile_big "$1" && return 0
+    { ! command -v unzip >/dev/null 2>&1 || [ -n "$(app_dir "$1" 2>/dev/null)" ]; } &&
+        ! compile_dex_mb "$1" >/dev/null && [ "$(odex_filter "$1")" = verify-at-runtime ]
+}
 compile_light_filter() { if compile_low_big "$1"; then echo verify-at-runtime; else echo interpret-only; fi; }
 compile_pkg_mode() { # pkg mode
     [ "$2" = speed ] && compile_low_big "$1" && { echo verify-at-runtime; return 0; }
