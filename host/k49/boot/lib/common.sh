@@ -4,6 +4,26 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH; export PATH   # 系统自带的 curl/t
 VD=${VD:-/mnt/base-us/veradroid}          # 程序目录（一律走 ext4 的 /mnt/base-us，不走 /mnt/us 的 FUSE）
 SYS=/mnt/base-us/system/veradroid          # 数据：rootfs、data、日志、设置（书库不扫 system/）
 SYSTEM_IMG=/mnt/base-us/veradroid-sys.img   # vfat /mnt/base-us 上的 ext4 系统盘（PW5 等）
+# 4.1.15-lab126 内核机型（PW4 / Oasis 2 / Oasis 3 / KT4）启用了 CONFIG_VMSPLIT_2G（2G/2G 分割）：默认的 8 MB 栈自顶向下 mmap
+# 把 libart.so 放在 0x73xxxxxx–0x77xxxxxx，压在未设 ro.vd.artbase 的镜像启动地址 0x70000000（boot.art）上。容器里的进程由
+# container.sh 用 ulimit -s unlimited 换成自底向上布局；宿主进容器跑的 am / pm / settings / cmd（app_process）也必须一致，否则
+# root 身份的 app_process 会因 mmap 冲突触发 libart PruneDalvikCache() 把整个 /data/dalvik-cache/arm 清零！
+# 带 ro.vd.artbase 的镜像用默认 8 MB 栈（自顶向下）；4.9 / 5.15 内核机型（3G/1G 或 64 位内核）直接返回 no-op。
+vd_art_stack() {   # [build.prop]
+    case "$(uname -r)" in 3.*|4.1.*) ;; *) return 0 ;; esac
+    vas_bp=${1:-}
+    if [ -z "$vas_bp" ]; then
+        vas_p=$(cat "${W:-/dev/shm/veradroid}/pid" 2>/dev/null || true)
+        if [ -n "$vas_p" ] && [ -f "/proc/$vas_p/root/system/build.prop" ]; then
+            vas_bp=/proc/$vas_p/root/system/build.prop
+        else
+            vas_bp=${SYS:-/mnt/base-us/system/veradroid}/rootfs/system/build.prop
+        fi
+    fi
+    if grep -q '^ro.vd.artbase=' "$vas_bp" 2>/dev/null; then ulimit -s 8192 2>/dev/null || true
+    else ulimit -s unlimited 2>/dev/null || true; fi
+}
+vd_art_stack
 # 日志 / 标记 / 备份的位置（veradroid/logs、state、backup）和根目录旧文件的搬迁：tidy.sh
 [ -f "$VD/boot/lib/tidy.sh" ] && . "$VD/boot/lib/tidy.sh"
 # 更新前备份的设置和“已备份的数据”（列出 / 删除）：backup.sh

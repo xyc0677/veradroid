@@ -601,6 +601,20 @@ binder_repair() {
     return 1
 }
 
+# 确保 /data/dalvik-cache 与 32 位镜像的 /data/dalvik-cache/arm 目录存在且权限为 0711 0:0：
+# 若此前因栈布局冲突触发过 PruneDalvikCache() 或目录缺失，zygote 开机 patchoat 重定位 boot.art 时必须能直接写入。
+dalvik_cache_dirs() {   # [rootfs]
+    dcd_r=${1:-$R}
+    mkdir -p "$dcd_r/data/dalvik-cache"
+    chown 0:0 "$dcd_r/data/dalvik-cache" 2>/dev/null || true
+    chmod 0711 "$dcd_r/data/dalvik-cache" 2>/dev/null || true
+    if [ -d "$dcd_r/system/framework/arm" ]; then
+        mkdir -p "$dcd_r/data/dalvik-cache/arm"
+        chown 0:0 "$dcd_r/data/dalvik-cache/arm" 2>/dev/null || true
+        chmod 0711 "$dcd_r/data/dalvik-cache/arm" 2>/dev/null || true
+    fi
+}
+
 # 在新命名空间里执行（由 veradroid.sh --in-ns 调用）
 run_in_ns() {
     TOUCH=$1 KEYS=$2 PTKEYS=$3
@@ -751,6 +765,12 @@ run_in_ns() {
         cd $R && pivot_root . old && cd / && umount -l /old && rmdir /old 2>/dev/null
         exec /init
     fi
+    dalvik_cache_dirs "$R"
+    # 启动镜像（boot.art / boot*.oat，约 70 MB）未设 ro.vd.artbase 时编在 0x70000000 起。4.1.15-lab126 内核（PW4 / Oasis 2 / Oasis 3 / KT4）
+    # 是 2G/2G 分割（CONFIG_VMSPLIT_2G），默认的自顶向下 mmap 把 libart.so 放在 0x73xxxxxx–0x77xxxxxx，压在启动镜像要的地址上：
+    # zygote 开机 patchoat 重定位崩溃降级为无镜像模式，dex2oat 全部因缺 boot*.{art,oat} 失败。栈不限大小时内核改用自底向上布局
+    # （库从 TASK_SIZE/3 ≈ 0x2a000000 往上放），空出 0x70000000；带 ro.vd.artbase 的镜像用默认 8 MB 栈；4.9+ 内核为 no-op（lib/common.sh）。
+    vd_art_stack $R/system/build.prop
     if [ -n "$HOSTNS" ]; then
         cd $R && exec chroot $R /init --second-stage
     fi
