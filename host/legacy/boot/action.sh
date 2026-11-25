@@ -105,6 +105,7 @@ frontlight() {
     esac
     if [ $want = off ]; then
         [ "$cur" -gt 0 ] && echo "$cur" > $W/fl.saved
+        [ "$(lipc-get-prop $p flAuto 2>/dev/null)" = 1 ] && lipc-set-prop -i $p flAuto 0 2>/dev/null
         lipc-set-prop -i $p flIntensity 0
         # PW2 / Voyage / PW3（Oasis 1 同代）：powerd 的 0 档不是关灯，最低一档还亮（KOReader：canTurnFrontlightOff = false）。
         # 机型文件给了 FL_LIPC0_DIM=1 时再把 sysfs 亮度写 0（memory.sh 开机时写 $W/fl.conf）
@@ -116,6 +117,7 @@ frontlight() {
         [ "$cur" -gt 0 ] && return 0
         n=$(cat $W/fl.saved 2>/dev/null)
         case "$n" in ''|*[!0-9]*|0) max=$(lipc-get-prop $p flMaxIntensity 2>/dev/null); n=$(( ${max:-24} / 2 )) ;; esac
+        [ "$(lipc-get-prop $p flAuto 2>/dev/null)" = 1 ] && lipc-set-prop -i $p flAuto 0 2>/dev/null
         lipc-set-prop -i $p flIntensity "$n"
     fi
 }

@@ -50,4 +50,23 @@ for h in pw6 k49; do
     P=$T/p PATH=$T/bin:$PATH sh -c 't() { :; }; status_write() { :; }; . '$T'/ls.sh; light_set 3'
     [ "$(cat $T/p/flIntensity)" = 3 ] || fail "$h: level not set without flAuto"
 done
+# action.sh frontlight() 同样在开关前光前关闭 flAuto（且 lighton 在已亮早退时不误关）(#14)
+mkdir -p $T/w
+for h in pw6 k49 legacy; do
+    sh -n host/$h/boot/action.sh || fail "syntax host/$h/boot/action.sh"
+    awk '/^frontlight\(\)/,/^}/' host/$h/boot/action.sh > $T/fl.sh
+    # lighton when cur > 0: early return, flAuto stays 1
+    rm -f $T/p/* $T/set.log $T/w/*; echo 1 > $T/p/flAuto; echo 8 > $T/p/flIntensity; echo 24 > $T/p/flMaxIntensity
+    P=$T/p W=$T/w PATH=$T/bin:$PATH sh -c '. '$T'/fl.sh; frontlight lighton'
+    [ "$(cat $T/p/flAuto)" = 1 ] && [ ! -e $T/set.log ] || fail "$h: lighton when already on touched flAuto"
+    # frontlight toggle off when cur > 0: turns flAuto=0 BEFORE flIntensity=0
+    P=$T/p W=$T/w PATH=$T/bin:$PATH sh -c '. '$T'/fl.sh; frontlight frontlight'
+    [ "$(cat $T/p/flAuto)" = 0 ] && [ "$(cat $T/p/flIntensity)" = 0 ] || fail "$h: frontlight off did not disable flAuto or intensity"
+    head -1 $T/set.log | grep -q '^flAuto=0$' || fail "$h: frontlight off must disable flAuto before flIntensity"
+    # frontlight toggle on when cur = 0 and flAuto = 1: turns flAuto=0 BEFORE restoring saved intensity
+    rm -f $T/set.log; echo 1 > $T/p/flAuto
+    P=$T/p W=$T/w PATH=$T/bin:$PATH sh -c '. '$T'/fl.sh; frontlight frontlight'
+    [ "$(cat $T/p/flAuto)" = 0 ] && [ "$(cat $T/p/flIntensity)" = 8 ] || fail "$h: frontlight on did not disable flAuto or restore intensity"
+    head -1 $T/set.log | grep -q '^flAuto=0$' || fail "$h: frontlight on must disable flAuto before flIntensity"
+done
 echo "light-auto-test: OK"
