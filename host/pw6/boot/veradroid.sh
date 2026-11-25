@@ -126,7 +126,7 @@ keepawake_heal 2>/dev/null
 
 # 把输出接回系统盘上的日志（之前为了让 stop.sh 能卸载系统盘挪到了 /tmp）。系统盘没挂上时不接：exec 重定向失败会让整个脚本退出，
 # 也不要在镜像下面的裸目录里建一个日志文件。
-log_reopen() { if [ ! -f "$SYSTEM_IMG" ] || grep -q " $SYS " /proc/mounts; then exec >>$LOG 2>&1; fi; }
+log_reopen() { if [ -d "$SYS" ] && { [ ! -f "$SYSTEM_IMG" ] || grep -q " $SYS " /proc/mounts; } && : >>"$LOG" 2>/dev/null; then exec >>$LOG 2>&1; fi; }
 open_app() { echo "$APP" > $X/ctl/app.tmp && mv -f $X/ctl/app.tmp $X/ctl/app; t "open: $APP"; }
 
 start_helpers() {
@@ -169,15 +169,44 @@ P=$(cat $W/pid 2>/dev/null)
 # 而“启动”看到 Android 还在（冻着或在跑）就只解冻 / 打开应用——那个 Android 要是已经坏了（system_server / surfaceflinger 没了、
 # 容器 init 早就退出而 pid 号被别的进程用了），解冻出来还是坏的，怎么点都一样。现在先看一眼：坏了就和更新脚本一样完整停掉再冷启动。
 android_unusable() { # 输出原因；能用时什么都不输出
-    au_c=$(cat /proc/$P/comm 2>/dev/null)
-    [ "$au_c" = init ] || { echo "pid $P is '$au_c', not the container's init"; return 0; }
+    au_proc=${AU_PROC:-/proc}
+    au_c=$(cat $au_proc/$P/comm 2>/dev/null)
+    [ "$au_c" = init ] || { rm -f $W/unusable.since; echo "pid $P is '$au_c', not the container's init"; return 0; }
     [ -f $W/booted ] || return 0                   # 还在开机：不判断
-    au_l=$(cat $FZ/cgroup.procs 2>/dev/null); [ -n "$au_l" ] || au_l=$(ns_pids 2>/dev/null)
-    [ -n "$au_l" ] || return 0
-    au_ss=; au_sf=
-    for au_p in $au_l; do
-        case "$(cat /proc/$au_p/comm 2>/dev/null)" in system_server) au_ss=1 ;; surfaceflinger) au_sf=1 ;; esac
+    au_w=0
+    while :; do
+        au_l=$(cat $FZ/cgroup.procs 2>/dev/null); [ -n "$au_l" ] || au_l=$(ns_pids 2>/dev/null)
+        [ -n "$au_l" ] || return 0
+        au_ss=; au_sf=; au_zy=
+        for au_p in $au_l; do
+            case "$(cat $au_proc/$au_p/comm 2>/dev/null)" in
+                system_server) au_ss=1 ;;
+                surfaceflinger) au_sf=1 ;;
+                zygote|zygote64|main) au_zy=1 ;;
+            esac
+        done
+        if [ -n "$au_ss" ] && [ -n "$au_sf" ]; then
+            rm -f $W/unusable.since
+            return 0
+        fi
+        # 未冻结且 zygote 存活：可能正在软重启 system_server（10–40 秒窗口），宽限期内不误判为坏死拆机
+        if [ ! -f $W/frozen ] && [ ! -f $W/saver_frozen ] && [ -n "$au_zy" ]; then
+            au_now=$(cut -d. -f1 "${AU_UPTIME:-$au_proc/uptime}" 2>/dev/null)
+            case "$au_now" in ''|*[!0-9]*) au_now=$(date +%s) ;; esac
+            au_since=$(cat $W/unusable.since 2>/dev/null)
+            case "$au_since" in ''|*[!0-9]*) au_since=$au_now; echo "$au_since" > $W/unusable.since 2>/dev/null ;; esac
+            [ "$au_now" -lt "$au_since" ] && { au_since=$au_now; echo "$au_since" > $W/unusable.since 2>/dev/null; }
+            if [ $((au_now - au_since)) -lt "${UNUSABLE_GRACE_S:-45}" ]; then
+                if [ $au_w -lt "${UNUSABLE_WAIT_S:-3}" ]; then
+                    au_w=$((au_w + 1)); sleep 1; continue
+                fi
+                t "android (pid $P): core service restarting under zygote ($((au_now - au_since))s < ${UNUSABLE_GRACE_S:-45}s grace), deferring cold restart" >&2
+                return 0
+            fi
+        fi
+        break
     done
+    rm -f $W/unusable.since
     [ -n "$au_ss" ] || echo "system_server is gone"
     [ -n "$au_sf" ] || echo "surfaceflinger is gone"
     return 0
@@ -190,7 +219,16 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null && ! { [ -d $W/starting ] && vd_lock_al
         splash "VeraDroid 上次运行出了问题，正在重新启动…" 36 || eips 1 2 "VeraDroid: restarting after a problem" >/dev/null 2>&1
         exec >>/tmp/veradroid-stop.log 2>&1
         VD_STOP_REASON="start: android not usable ($au_why)" sh $VD/boot/stop.sh >/dev/null 2>&1
-        storage_mount; log_reopen
+        if storage_mount; then
+            log_reopen
+        elif [ -d "$SYS" ] && grep -q " $SYS " /proc/mounts; then
+            log_reopen
+        else
+            t "storage_mount failed after stopping unusable android; backing up /tmp/veradroid-stop.log to start.log"
+            au_sl=${VD_START_LOG:-/mnt/base-us/veradroid/logs/start.log}
+            mkdir -p "${au_sl%/*}" 2>/dev/null
+            [ -s /tmp/veradroid-stop.log ] && tail -c 32768 /tmp/veradroid-stop.log >> "$au_sl" 2>/dev/null
+        fi
         P=
     fi
 fi
