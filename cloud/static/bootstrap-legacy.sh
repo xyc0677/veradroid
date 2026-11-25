@@ -439,6 +439,7 @@ vd_sys_room_free() {
     echo $(( ${vr_f:-0} + ${vr_o:-0} ))
 }
 vd_sys_grow_online() { # 目标 MB；0 = 文件系统已经扩到目标
+    case "$(uname -r)" in 3.*|4.1.*) return 1 ;; esac   # 同 storage.sh st_online_ok：4.1 在线 resize2fs 会空转卡死，3.0 只有 ext3
     vg_l=$(img_loops); [ "$(echo "$vg_l" | grep -c .)" = 1 ] || return 1
     [ "$(awk -v m="$SYS" '$2 == m { print $3 }' /proc/mounts | tail -1)" = ext4 ] || return 1
     vg_r=$(command -v resize2fs 2>/dev/null) || { [ -x "$VD/bin/resize2fs" ] && vg_r=$VD/bin/resize2fs; } || return 1
@@ -489,15 +490,20 @@ vd_sys_room_early() {
     vr_why=
     case "$(stat -f -c %T /mnt/base-us 2>/dev/null)" in vfat|msdos|fat) [ "$vr_to" -le 4095 ] || vr_why="FAT 上系统盘最大 4 GB" ;; esac
     [ -z "$vr_why" ] && [ $(( vr_to - vr_img + 256 + vr_dl )) -gt "${vr_k:-0}" ] && vr_why="Kindle 剩余空间只有 ${vr_k:-?} MB"
-    grep -q '^STORAGE_AUTO=0' "$SYS/settings.conf" 2>/dev/null && [ -z "$vr_why" ] && vr_why="自动扩容已关闭"
+    grep -q '^STORAGE_AUTO=0' "$SYS/settings.conf" 2>/dev/null && [ -z "$vr_why" ] && vr_why="自动扩容已关闭" || true
+    case "$(uname -r)" in
+        3.*|4.1.*) if [ -z "$vr_why" ]; then vr_why="4.1/3.0 内核不支持运行中在线扩容"; fi ;;
+    esac
     if [ -z "$vr_why" ]; then
         vp_step dl "系统盘空间不够，先扩大到 $vr_to MB" "在线扩大，不用停 Android，几秒钟"
         if vd_sys_grow_online "$vr_to"; then
             vlog "space (early): system disk grown online $vr_img -> $vr_to MB, free now $(vd_sys_room_free)M"
             [ "$(vd_sys_room_free)" -ge "$vr_need" ] && return 0
         else vr_why="在线扩大没有成功"; vlog "space (early): online grow $vr_img -> $vr_to MB failed"; fi
+    else
+        vlog "space (early): skip online grow $vr_img -> $vr_to MB ($vr_why)"
     fi
-    DIE_CODE=21 die "系统盘空间不够：这次更新需要约 ${vr_need} MB，系统盘里只有 ${vr_free} MB（${vr_why:-扩大后还是不够}）。还没有下载和备份，什么都没改。可以在 设置 → 存储空间 里把系统盘扩大，或删掉不用的应用后再更新"
+    DIE_CODE=21 die "系统盘空间不够：这次更新需要约 ${vr_need} MB，系统盘里只有 ${vr_free} MB（${vr_why:-扩大后还是不够}）。还没有下载和备份，什么都没改。可以在 设置 → 存储空间 里把系统盘扩大（离线扩容），或停止 Android 后扩容，或删掉不用的应用后再更新"
 }
 # END vd_sys_room_early
 
