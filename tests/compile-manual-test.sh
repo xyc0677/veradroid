@@ -332,4 +332,43 @@ done
 rm -rf $T/sys/data/app/com.big.nounzip-1 $T/minbin
 echo "b8 ok: missing unzip falls back to APK size and preserves verify-at-runtime on 512 MB"
 
+# b9: 512 MB large app already at verify-at-runtime: non-kOatUpToDate status (Needed / kOatNeeded / BootImageOutOfDate)
+#     is NOT re-queued by compile_scan or compile_cmd all, while invalid and NeedsRelocation / kOatNeedsRelocation ARE
+D=com.duokan.einkreader
+reset; allspeed; : > $T/lowmem; echo 243 > $T/dex.$D; echo verify-at-runtime > $T/filter.$D
+echo "$D Needed" > $T/stale
+run 'compile_scan'
+[ -s $T/w/compile.queue ] && fail "b9 (pw6): Needed verify-at-runtime was queued by compile_scan: $(cat $T/w/compile.queue)"
+run 'compile_cmd all'
+[ -s $T/w/compile.queue ] && fail "b9 (pw6): Needed verify-at-runtime was queued by compile_cmd all"
+[ "$(st code)" = nothing ] || fail "b9 (pw6): compile_cmd all code '$(st code)', want nothing"
+for bad in invalid NeedsRelocation kOatNeedsRelocation; do
+    reset; allspeed; : > $T/lowmem; echo 243 > $T/dex.$D; echo verify-at-runtime > $T/filter.$D
+    echo "$D $bad" > $T/stale
+    run 'compile_scan'
+    grep -qx "$D stale" $T/w/compile.queue || fail "b9 (pw6): $bad verify-at-runtime not queued: $(cat $T/w/compile.queue 2>/dev/null)"
+done
+# legacy compile_scan as well
+LC=$(pwd)/host/legacy/boot/lib/compile.sh
+for st_case in "kOatNeeded:skip" "kOatBootImageOutOfDate:skip" "invalid:queue" "kOatNeedsRelocation:queue"; do
+    st_v=${st_case%:*}; st_want=${st_case#*:}
+    reset; allspeed; echo verify-at-runtime > $T/filter.$D
+    PATH=$T/bin:$PATH W=$T/w X=$T/x SYS=$T/sys T=$T D=$D ST=$st_v sh -c '
+        . "$0" 2>/dev/null
+        t() { echo "$*" >> $T/log; }
+        lowmem_ram() { return 0; }
+        odex_filter() { cat $T/filter.$1 2>/dev/null; }
+        compile_dex_mb() { [ "$1" = "$D" ] && echo 243 || echo 10; }
+        compile_fix_invalid() { :; }
+        compile_stale_pkgs() { echo "$D $ST"; }
+        compile_kick() { :; }
+        compile_scan' "$LC"
+    if [ "$st_want" = skip ]; then
+        [ -s $T/w/compile.queue ] && fail "b9 (legacy): $st_v verify-at-runtime was queued: $(cat $T/w/compile.queue)"
+    else
+        grep -qx "$D force" $T/w/compile.queue || fail "b9 (legacy): $st_v verify-at-runtime not force-queued: $(cat $T/w/compile.queue 2>/dev/null)"
+    fi
+done
+echo "b9 ok: verify-at-runtime not endlessly re-queued on Needed, still repaired on invalid / NeedsRelocation"
+
 echo "compile-manual: ok"

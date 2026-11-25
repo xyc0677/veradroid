@@ -222,6 +222,12 @@ compile_stale_pkgs() {
         p != "" { l = $0; gsub(/[ \t]/, "", l); b = b l }
         END { flush() }' | sort -u -k1,1
 }
+# 512 MB 大应用的目标本来就是 verify-at-runtime：7.1 的 dumpsys package dexopt 对它仍可能报 Needed 等非 kOatUpToDate 状态；
+# 只要当前 odex 已经是 verify-at-runtime，且不是损坏/缺失（invalid）或待重定位（NeedsRelocation），就不重复重编
+compile_stale_skip() { # pkg status
+    case "$2" in invalid|NeedsRelocation|kOatNeedsRelocation) return 1 ;; esac
+    compile_low_big "$1" && [ "$(odex_filter "$1")" = verify-at-runtime ]
+}
 compile_scan() { # 所有还没编好的数据区应用排队
     # 换了版本：以前记的 fail 不再算（同一个安装失败两次就不再自动编；0.8.8 的 compile_held 把 $f 改坏、给安装让路的
     # 中断被记成 fail，KO3 用户诊断：微信读书因此一直没编，升级以后也不会再试）。timeout / capped 保留。
@@ -235,10 +241,11 @@ compile_scan() { # 所有还没编好的数据区应用排队
     # kOatNeedsRelocation（启动镜像换了地址）只要 patchoat（几秒）：不带 -f 让 PackageManager 自己挑最省的办法（stale）；
     # 以前一律 -f 整个重编（微信读书 speed 约 341 s），用户这时打开它，编译被停、odex 已经没了，就一直解释执行
     compile_stale_pkgs | while read -r p st; do
+        compile_stale_skip "$p" "$st" && continue
         grep -q "^$p\$" $W/compile.stale 2>/dev/null && continue
         echo "$p" >> $W/compile.stale
         compile_needed "$p" stale || continue
-        t "compile: $p compiled code not usable ($st), $( [ "$st" = NeedsRelocation ] && echo relocating || echo recompiling)"
+        t "compile: $p compiled code not usable ($st), $( { [ "$st" = NeedsRelocation ] || [ "$st" = kOatNeedsRelocation ]; } && echo relocating || echo recompiling)"
         compile_enqueue "$p" stale
     done
     [ -s $CQ ] && compile_kick
@@ -789,7 +796,8 @@ compile_one() { # pkg mode [force|stale]
     [ "$mode" = speed-profile ] && compile_prof_back "$pkg"
     # stale 不带 -f：PackageManager 只做了它认为需要的（relocation = patchoat）。之后还不是 UpToDate / 过滤器不对才整个重编
     if [ -z "$cflag" ] && [ ! -s $W/compile.abort ] && grep -q Success $W/compile.out && alive $W/pid; then
-        if compile_stale_pkgs | grep -q "^$pkg " || ! compile_done_filter "$(odex_filter "$pkg")" "$mode"; then
+        cs_st=$(compile_stale_pkgs | awk -v p="$pkg" '$1 == p { print ($2 != "" ? $2 : "other"); exit }')
+        if { [ -n "$cs_st" ] && ! compile_stale_skip "$pkg" "$cs_st"; } || ! compile_done_filter "$(odex_filter "$pkg")" "$mode"; then
             t "compile: $pkg still not usable after a plain dexopt, full recompile"
             compile_pm_start "$pkg" $W/compile.out -m $mode -f $pkg
             compile_babysit $cp_ "$pkg"; compile_pm_wait; rc=$?
@@ -962,6 +970,7 @@ compile_cmd() {
         if [ "$1" = all ]; then
             for p in $(data_pkgs); do compile_enqueue "$p"; done
             compile_stale_pkgs | while read -r p st; do
+                compile_stale_skip "$p" "$st" && continue
                 grep -q "^$p\( \|\$\)" $CQ 2>/dev/null && continue
                 compile_needed "$p" stale || continue
                 t "compile: $p compiled code not usable ($st), queued by the manual start"

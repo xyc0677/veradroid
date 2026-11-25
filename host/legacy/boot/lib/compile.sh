@@ -164,6 +164,12 @@ compile_stale_pkgs() {
         p != "" { l = $0; gsub(/[ \t]/, "", l); b = b l }
         END { flush() }' | sort -u
 }
+# 512 MB 大应用的目标本来就是 verify-at-runtime：7.1 的 dumpsys package dexopt 对它仍可能报 kOatNeeded 等非 kOatUpToDate 状态；
+# 只要当前 odex 已经是 verify-at-runtime，且不是损坏/缺失（invalid）或待重定位（kOatNeedsRelocation），就不在每次开机重复强制重编
+compile_stale_skip() { # pkg status
+    case "$2" in invalid|NeedsRelocation|kOatNeedsRelocation) return 1 ;; esac
+    compile_low_big "$1" && [ "$(odex_filter "$1")" = verify-at-runtime ]
+}
 # 完全没有可用 odex 的应用（dumpsys 里 "status: invalid[]"：以前 dex2oat 根本起不来时装的应用、编译被打断留下的半截 odex）：
 # 不等充电，开机后马上在后台补一个 interpret-only（PW4 模拟器上微信读书 107 秒），每次开机最多一次。speed 照旧只在充电时编。
 compile_invalid_pkgs() {
@@ -200,6 +206,7 @@ compile_scan() { # 所有还没编好的数据区应用排队
     compile_fix_invalid
     for p in $(data_pkgs); do compile_enqueue "$p"; done
     compile_stale_pkgs | while read -r p st; do
+        compile_stale_skip "$p" "$st" && continue
         grep -q "^$p\$" $W/compile.stale 2>/dev/null && continue
         echo "$p" >> $W/compile.stale
         # 记下 Android 给的真实状态（kOatBootImageOutOfDate / kOatDexOutOfDate / kOatNeedsRelocation / invalid）：
