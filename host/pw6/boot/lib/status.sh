@@ -2,14 +2,24 @@
 # 状态：桌面和面板要显示的东西（电量、前光、色温、Wi-Fi、反色），写进 $X/ctl/status。只在被问时写，不定时轮询（省电）。
 status_write() {
     p=com.lab126.powerd
-    bat=$(lipc-get-prop $p battLevel 2>/dev/null)
-    chg=$(lipc-get-prop $p isCharging 2>/dev/null)
+    bat=; chg=
+    for _bd in /sys/class/power_supply/*; do
+        [ "$(cat $_bd/type 2>/dev/null)" = Battery ] && [ -r $_bd/capacity ] || continue
+        bat=$(cat $_bd/capacity 2>/dev/null)
+        case "$(cat $_bd/status 2>/dev/null)" in Charging) chg=1 ;; *) chg=0 ;; esac
+        break
+    done
+    [ -n "$bat" ] || bat=$(lipc-get-prop $p battLevel 2>/dev/null)
+    case "$bat" in ''|*[!0-9]*) ;; *) [ "$bat" -gt 100 ] && bat=100 ;; esac
+    [ -n "$chg" ] || chg=$(lipc-get-prop $p isCharging 2>/dev/null)
     fl=$(lipc-get-prop $p flIntensity 2>/dev/null)
-    flmax=$(lipc-get-prop $p flMaxIntensity 2>/dev/null)
-    warm=$(lipc-get-prop $p currentAmberLevel 2>/dev/null)
+    if [ -f $W/status.flmax ]; then flmax=$(cat $W/status.flmax 2>/dev/null)
+    else flmax=$(lipc-get-prop $p flMaxIntensity 2>/dev/null); [ -n "$flmax" ] && echo "$flmax" > $W/status.flmax 2>/dev/null; fi
+    if [ "${FL_WARM:-}" = none ]; then warm=; else warm=$(lipc-get-prop $p currentAmberLevel 2>/dev/null); fi
     wifi=$(wifi_state)
     slp=$(lipc-get-prop $p screenSaverTimeout 2>/dev/null)
     lan=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    [ -n "$lan" ] || lan=$(ifconfig usb0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
     # QEMU/USB-net and some jailbreaks expose eth0 instead of wlan0.
     [ -n "$lan" ] || lan=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
     [ -n "$lan" ] || lan=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p')
@@ -36,11 +46,14 @@ status_write() {
         # 自动亮度：powerd 有 flAuto，而且机器上真有光线传感器才显示这个开关。
         # 传感器的判断：iio 设备里有 in_illuminance*，或者输入设备 / sensors 类里有名字带 als / lux / light 的。
         # （PW6 普通版实测没有传感器：flAuto 属性在，但没有任何这类设备。签名版 / Scribe 没有真机验证过。）
-        fla=$(lipc-get-prop $p flAuto 2>/dev/null); als=
-        ls /sys/bus/iio/devices/*/in_illuminance* >/dev/null 2>&1 && als=1
-        # powerd 自己的读数：alsLux >= 0 = 有传感器（没有传感器时是 -1，PW5 5.16.2 模拟器实测）
-        [ -z "$als" ] && ls_l=$(lipc-get-prop $p alsLux 2>/dev/null) && [ "$ls_l" -ge 0 ] 2>/dev/null && als=1
-        [ -z "$als" ] && cat /sys/class/input/*/device/name /sys/class/sensors/*/name /sys/bus/iio/devices/*/name 2>/dev/null | grep -qiE "(^|[^a-z])(als|lux|light)" && als=1
+        if [ -f $W/status.als ]; then als=$(cat $W/status.als 2>/dev/null)
+        else
+            als=0; ls /sys/bus/iio/devices/*/in_illuminance* >/dev/null 2>&1 && als=1
+            [ "$als" = 0 ] && ls_l=$(lipc-get-prop $p alsLux 2>/dev/null) && [ "$ls_l" -ge 0 ] 2>/dev/null && als=1
+            [ "$als" = 0 ] && cat /sys/class/input/*/device/name /sys/class/sensors/*/name /sys/bus/iio/devices/*/name 2>/dev/null | grep -qiE "(^|[^a-z])(als|lux|light)" && als=1
+            echo "$als" > $W/status.als 2>/dev/null
+        fi
+        [ "$als" = 1 ] && fla=$(lipc-get-prop $p flAuto 2>/dev/null) || { fla=; als=; }
         if [ -n "$fla" ] && [ -n "$als" ]; then echo "haslightauto=1"; echo "lightauto=$fla"; else echo "haslightauto=0"; fi
         # 蓝牙翻页器桥（bt.sh）：bt=1 桥在跑，btdev=当前接管的设备
         type bt_status_lines >/dev/null 2>&1 && bt_status_lines
@@ -49,5 +62,9 @@ status_write() {
         # Wi-Fi 省电现在的状态（on / off，读不到就不写）和设置
         ps=$(type wifi_ps_state >/dev/null 2>&1 && wifi_ps_state); [ -n "$ps" ] && echo "wifips=$ps"
         echo "wifipsmode=${WIFI_PS:-auto}"
+        if [ -n "${FL_COLD:-}" ]; then
+            echo "flcold=$FL_COLD"; echo "flcoldmax=$(cat /sys/class/backlight/$FL_COLD/max_brightness 2>/dev/null)"
+            echo "flwarm=${FL_WARM:-none}"
+        fi
     } > $X/ctl/status.tmp && mv -f $X/ctl/status.tmp $X/ctl/status
 }

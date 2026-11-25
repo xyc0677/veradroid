@@ -121,18 +121,45 @@ final class HostLink {
      * 宿主只在被问时写 status（打开桌面、面板时），桌面一直在前台时文件里的电量会停在几小时前
      * （PW6 1.03 用户“电量显示不同步”：一台测试机充满 100 % 时桌面顶栏还是 78 %）。读不到 Android 的就照旧用文件里的。
      */
+    private static volatile boolean battRegistered = false;
+    private static volatile int cachedBattPct = -1;
+    private static volatile int cachedBattChg = -1;
+
+    private static void parseBatteryIntent(android.content.Intent b) {
+        if (b == null || !b.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true)) return;
+        int lv = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
+        if (lv >= 0 && sc > 0) {
+            cachedBattPct = Math.min(100, lv * 100 / sc);
+            cachedBattChg = b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_CHARGING ? 1 : 0;
+        }
+    }
+
+    static void initBattery(android.content.Context c) {
+        if (battRegistered || c == null) return;
+        synchronized (HostLink.class) {
+            if (battRegistered) return;
+            try {
+                android.content.Intent b = c.getApplicationContext().registerReceiver(
+                    new android.content.BroadcastReceiver() {
+                        @Override public void onReceive(android.content.Context ctx, android.content.Intent intent) {
+                            parseBatteryIntent(intent);
+                        }
+                    },
+                    new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+                parseBatteryIntent(b);
+                battRegistered = true;
+            } catch (Throwable ignored) { }
+        }
+    }
+
     static Map<String, String> status(android.content.Context c) {
         Map<String, String> st = new HashMap<String, String>(kv(CTL + "status"));
-        try {
-            android.content.Intent b = c.getApplicationContext().registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
-            if (b != null && b.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true)) {
-                int lv = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
-                if (lv >= 0 && sc > 0) {
-                    st.put("battery", String.valueOf(lv * 100 / sc));
-                    st.put("charging", b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_CHARGING ? "1" : "0");
-                }
-            }
-        } catch (Throwable ignored) { }
+        initBattery(c);
+        int pct = cachedBattPct, chg = cachedBattChg;
+        if (pct >= 0) {
+            st.put("battery", String.valueOf(pct));
+            st.put("charging", chg == 1 ? "1" : "0");
+        }
         return st;
     }
 

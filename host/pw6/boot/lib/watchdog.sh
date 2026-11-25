@@ -191,13 +191,21 @@ log_cap() {   # log_cap <文件> <字节>
     tail -c $(($2 / 2)) "$1" > "$1.tmp" 2>/dev/null && cat "$1.tmp" > "$1"; rm -f "$1.tmp"
 }
 helpers_supervise() {
-    if [ -x "$VD/bin/veradroid-epd" ] && [ -f $W/epd.pid ] && ! alive $W/epd.pid; then
-        n=$(cat $W/epd.restarts 2>/dev/null || echo 0)
-        if [ "$n" -lt 3 ]; then
-            echo $((n + 1)) > $W/epd.restarts
-            t "display bridge (pid $(cat $W/epd.pid)) gone, restarting it ($((n + 1))/3); last log: $(tail -n 2 $W/epd.log 2>/dev/null | tr '\n' ' ')"
-            cp $W/epd.log $W/epd.log.crashed 2>/dev/null
-            display_start; epd_send REDRAW
+    _hs_now=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    if [ -x "$VD/bin/veradroid-epd" ] && [ -f $W/epd.pid ]; then
+        if ! alive $W/epd.pid; then
+            n=$(cat $W/epd.restarts 2>/dev/null || echo 0)
+            if [ "$n" -lt 3 ]; then
+                echo $((n + 1)) > $W/epd.restarts
+                echo "$_hs_now" > $W/epd.up_since
+                t "display bridge (pid $(cat $W/epd.pid)) gone, restarting it ($((n + 1))/3); last log: $(tail -n 2 $W/epd.log 2>/dev/null | tr '\n' ' ')"
+                cp $W/epd.log $W/epd.log.crashed 2>/dev/null
+                display_start; epd_send REDRAW
+            fi
+        elif [ -s $W/epd.restarts ]; then
+            _eu=$(cat $W/epd.up_since 2>/dev/null || echo "$_hs_now")
+            [ -f $W/epd.up_since ] || echo "$_hs_now" > $W/epd.up_since
+            [ $((_hs_now - _eu)) -ge 120 ] && rm -f $W/epd.restarts $W/epd.up_since
         fi
     fi
     if [ -f $W/input.pid ] && ! alive $W/input.pid && [ ! -f $W/frozen ]; then
@@ -251,7 +259,11 @@ bat_poke_tick() {
     [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-60} ] || return 0
     BAT_POKE_T=$bp_now
     for bp_d in ${BAT_PS_DIR:-/sys/class/power_supply}/*; do
-        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] && echo change > $bp_d/uevent 2>/dev/null
+        # Oasis 2 5.13.6 powerd parse_uevent has 32 fixed slots without bounds check; max77796-battery/uevent has 31 lines
+        # (35 key-value pairs with kernel header/footer), so writing "change" corrupts glibc heap and aborts powerd every minute.
+        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] || continue
+        [ "$(wc -l < $bp_d/uevent 2>/dev/null || echo 0)" -ge 28 ] && continue
+        echo change > $bp_d/uevent 2>/dev/null
     done
     return 0
 }

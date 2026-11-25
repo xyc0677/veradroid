@@ -49,7 +49,7 @@ input_touch_start() {
     TAPDEV=$(input_find '"gesture_tap"')
     [ -n "$TAPDEV" ] && t "input: bezel tap device $TAPDEV"
     : > $W/input.err   # 追加方式打开（同 epd.log：watchdog 的 log_cap 会截短它）
-    $VD/bin/veradroid-input $REAL $W/input.log $VD/boot/action.sh --w ${viewWidth:-1272} --h ${viewHeight:-1696} --edge 120 --window ${G_WINDOW:-40} --edge-hold 60 --edge-swipe 80 --edge-back ${KFB_EDGE_BACK:-1} --corner-ms $cm --flag $W/nogestures --inject $W/inject --gconf $W/gestures --fg $X/fg ${TAPDEV:+--tapdev $TAPDEV} --rt ${INPUT_RT:-0} $(input_cpufreq_arg) $(type idle_vinput_args >/dev/null 2>&1 && idle_vinput_args) $(rot_args) >>$W/input.err 2>&1 &
+    $VD/bin/veradroid-input $REAL $W/input.log $VD/boot/action.sh --w ${viewWidth:-1272} --h ${viewHeight:-1696} --edge 120 --window ${G_WINDOW:-40} --edge-hold 60 --edge-swipe 80 --edge-back ${KFB_EDGE_BACK:-1} --corner-ms $cm --flag $W/nogestures --inject $W/inject --gconf $W/gestures --fg $X/fg --ctl-dir $X/ctl ${TAPDEV:+--tapdev $TAPDEV} ${KFB_KEYS:+--keydev $KFB_KEYS} --rt ${INPUT_RT:-0} $(input_cpufreq_arg) $(type idle_vinput_args >/dev/null 2>&1 && idle_vinput_args) $(rot_args) >>$W/input.err 2>&1 &
     echo $! > $W/input.pid
     # 每 50 毫秒看一次（以前 200 毫秒），最多仍是 4 秒
     i=0; while [ $i -lt 80 ]; do

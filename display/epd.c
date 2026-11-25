@@ -149,7 +149,7 @@
 #include <arm_neon.h>
 #endif
 
-static int W = 1272, H = 1696;
+static int W = 1272, H = 1696, LW = 1272, LH = 1696;
 static int fbfd = -1;
 static FBInkConfig cfg;
 static uint8_t lut[256];
@@ -179,6 +179,31 @@ static const uint8_t *page_base(const uint8_t *shm, int page)
 {
     if (page == 2 && fb2_ok()) return fb2map;
     return shm + (size_t)(page & 1) * W * H * 4;
+}
+#define PAGE_Y8_BASE 8
+static inline int page_is_y8(int page) { return page >= PAGE_Y8_BASE && page <= PAGE_Y8_BASE + 2; }
+static const uint8_t *y8mem = NULL;
+static char y8path[600];
+static int y8_ok(void)
+{
+    if (y8mem) return 1;
+    if (!y8path[0]) return 0;
+    int fd = open(y8path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat sb;
+    size_t need = (size_t)W * H * 3;
+    void *m = MAP_FAILED;
+    if (fstat(fd, &sb) == 0 && (size_t)sb.st_size >= need) m = mmap(NULL, need, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) return 0;
+    y8mem = m;
+    return 1;
+}
+static const uint8_t *y8_base(int page)
+{
+    int k = page - PAGE_Y8_BASE;
+    if (k < 0 || k > 2 || !y8_ok()) return NULL;
+    return y8mem + (size_t)k * LW * LH;
 }
 static double g_gamma = 1.3;
 static int g_invert = 0;      /* 1: invert the picture (white on black) */
@@ -334,7 +359,6 @@ static volatile int swipe_broken = 0, swipe_recover = 0;
 static long long once_until = 0;    /* a SWIPE that no frame followed within 800 ms is dropped (it must not animate some later change) */
 static int swipe_steps = 12;   /* step count of the swipe being sent (anim_steps, or once_steps for a SWIPE one-shot) */
 static int g_rot = 0;          /* 0 / 90 / 180 / 270, see the header */
-static int LW = 1272, LH = 1696; /* logical (Android) size: W x H, or H x VW for 90 / 270 */
 static int VW = 0;             /* visible panel width (<= W), 0 = W */
 
 /* MTK swipe directions 0 down 1 up 2 left 3 right, given in the logical picture -> on the panel */
@@ -420,6 +444,7 @@ static int frame_big = 0;
 static unsigned long n_sent = 0;   /* refreshes sent to the panel */
 static const char *timing_flag = NULL;   /* when this file exists, wait for the panel after each refresh and log how long it took */
 static int g_tlog = 0;                   /* cached once per main-loop turn / FIFO batch */
+static int g_no_hwdither = 0; /* Zelda (Oasis 2 / 3): HW dithering blacks out the update, see open_fb */
 static int g_is_mtk = 0;      /* swipe animation is a MediaTek hwtcon feature; i.MX EPDC (PW2/PW3/PW4) has none */
 static int g_rawmtk = 0;      /* MTK hwtcon panel FBInk does not know (e.g. Scribe with an unknown serial code): FBInk would send
                                   i.MX ioctls (dmesg "HWTCON ERR err cmd", nothing refreshes), so we refresh with the MTK ioctl ourselves */
@@ -569,6 +594,75 @@ static long long now_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
+static void y8_apply_lut(const uint8_t *src, uint8_t *dst, size_t n)
+{
+    if (lut_is_id) { memcpy(dst, src, n); return; }
+    size_t i = 0;
+#ifdef __ARM_NEON
+    const uint8x16_t vw = vdupq_n_u8(lut[255]), vb = vdupq_n_u8(lut[0]);
+    for (; i + 32 <= n; i += 32) {
+        uint8x16_t s0 = vld1q_u8(src + i), s1 = vld1q_u8(src + i + 16);
+        uint64x2_t m_nff = vreinterpretq_u64_u8(vmvnq_u8(vandq_u8(s0, s1)));
+        if (!(vgetq_lane_u64(m_nff, 0) | vgetq_lane_u64(m_nff, 1))) {
+            vst1q_u8(dst + i, vw); vst1q_u8(dst + i + 16, vw);
+            continue;
+        }
+        uint64x2_t m_nz = vreinterpretq_u64_u8(vorrq_u8(s0, s1));
+        if (!(vgetq_lane_u64(m_nz, 0) | vgetq_lane_u64(m_nz, 1))) {
+            vst1q_u8(dst + i, vb); vst1q_u8(dst + i + 16, vb);
+            continue;
+        }
+        const uint8_t *p = src + i;
+        uint8_t *d = dst + i;
+        for (int k = 0; k < 32; k += 4) {
+            d[k] = lut[p[k]]; d[k + 1] = lut[p[k + 1]];
+            d[k + 2] = lut[p[k + 2]]; d[k + 3] = lut[p[k + 3]];
+        }
+    }
+#endif
+    if ((((uintptr_t)(dst + i)) & 3) == 0) {
+        uint32_t *d32 = (uint32_t *)(dst + i);
+        for (; i + 4 <= n; i += 4)
+            *d32++ = (uint32_t)lut[src[i]] | ((uint32_t)lut[src[i + 1]] << 8) |
+                     ((uint32_t)lut[src[i + 2]] << 16) | ((uint32_t)lut[src[i + 3]] << 24);
+    }
+    for (; i < n; i++) dst[i] = lut[src[i]];
+}
+
+static void y8_apply_fast(const uint8_t *src, uint8_t *dst, size_t n)
+{
+    if (!g_invert) { memcpy(dst, src, n); return; }
+    size_t i = 0;
+#ifdef __ARM_NEON
+    const uint8x16_t vinv = vdupq_n_u8(0xFF);
+    for (; i + 16 <= n; i += 16) vst1q_u8(dst + i, veorq_u8(vld1q_u8(src + i), vinv));
+#endif
+    for (; i < n; i++) dst[i] = (uint8_t)(src[i] ^ 0xFF);
+}
+
+static void y8_to_y8_rot(const uint8_t *src, int x, int y, int w, int h, uint8_t *dst)
+{
+    if (g_rot == 180) {
+        for (int j = 0; j < h; j++) {
+            const uint8_t *p = src + (size_t)(y + j) * LW + x;
+            uint8_t *o = dst + (size_t)(H - 1 - (y + j)) * W + (VW - 1 - x);
+            for (int i = 0; i < w; i++) *o-- = lut[*p++];
+        }
+        return;
+    }
+    for (int j0 = 0; j0 < h; j0 += 16) {
+        int j1 = j0 + 16 < h ? j0 + 16 : h;
+        for (int i = 0; i < w; i++) {
+            int lx = x + i;
+            for (int j = j0; j < j1; j++) {
+                int ly = y + j;
+                size_t o = g_rot == 90 ? (size_t)lx * W + (VW - 1 - ly) : (size_t)(H - 1 - lx) * W + ly;
+                dst[o] = lut[src[(size_t)ly * LW + lx]];
+            }
+        }
+    }
 }
 
 /* RGBA (little endian: bytes R,G,B,A) -> Y8 through the contrast curve, composited on white */
@@ -842,7 +936,7 @@ static int push(const uint8_t *rgba, int x, int y, int w, int h, int mode)
     lightf_pass(buf, w, w, h, 0, h);
 
     FBInkConfig c = cfg;
-    c.dithering_mode = dither;
+    c.dithering_mode = g_no_hwdither ? HWD_PASSTHROUGH : dither;
     c.ignore_alpha = true;
     c.no_refresh = false;
     c.is_flashing = false;
@@ -875,8 +969,98 @@ static void set_pwrdown(int ms)
     int rc = ioctl(fbfd, VD_SET_PWRDOWN_DELAY, &v);
     fprintf(stderr, "epd: power-down delay %d ms (driver had %d) -> %d\n", (int)v, pwrdown_orig, rc);
 }
+static int epdc_pw_avail = 0, epdc_pw_has_proc = 0, epdc_pw_want = 0, epdc_pw_prewarmed = 0;
+static int epdc_cpu_want = 0, epdc_cpu_boosted = 0;
+static long long epdc_pw_until = 0, epdc_cpu_until = 0;
+static char epdc_cpu_max[24], epdc_cpu_orig[24];
+static unsigned long epdc_pw_sent = 0;
+static pthread_mutex_t epdc_pw_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t epdc_pw_cv = PTHREAD_COND_INITIALIZER;
+
+static int epdc_sysfs_rd(const char *p, char *b, size_t n)
+{
+    int fd = open(p, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t r = read(fd, b, n - 1);
+    close(fd);
+    if (r <= 0) return -1;
+    b[r] = 0; b[strcspn(b, "\r\n")] = 0;
+    return 0;
+}
+static void epdc_sysfs_wr(const char *p, const char *v)
+{
+    int fd = open(p, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    if (write(fd, v, strlen(v)) < 0) { /* best effort */ }
+    close(fd);
+}
+
+static void *epdc_pw_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&epdc_pw_mtx);
+        while (epdc_pw_want == 0 && epdc_cpu_want == 0) pthread_cond_wait(&epdc_pw_cv, &epdc_pw_mtx);
+        int w = epdc_pw_want, cw = epdc_cpu_want;
+        epdc_pw_want = 0; epdc_cpu_want = 0;
+        pthread_mutex_unlock(&epdc_pw_mtx);
+        if (w != 0 && epdc_pw_has_proc) {
+            int fd = open("/proc/eink/waveform/power", O_WRONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                const char *cmd = (w > 0) ? "on" : "off";
+                if (write(fd, cmd, strlen(cmd)) < 0) { /* best effort */ }
+                close(fd);
+            }
+        }
+        if (cw > 0 && epdc_cpu_max[0]) {
+            char cur[24];
+            if (!epdc_cpu_orig[0] && epdc_sysfs_rd("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", cur, sizeof(cur)) == 0 &&
+                atol(cur) < atol(epdc_cpu_max))
+                snprintf(epdc_cpu_orig, sizeof(epdc_cpu_orig), "%s", cur);
+            epdc_sysfs_wr("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", epdc_cpu_max);
+        } else if (cw < 0 && epdc_cpu_orig[0] && access("/dev/shm/veradroid/lboost.active", F_OK) != 0) {
+            epdc_sysfs_wr("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", epdc_cpu_orig);
+        }
+    }
+    return NULL;
+}
+static void epdc_pw_signal(int want, int cpu_want)
+{
+    if (!epdc_pw_avail) return;
+    pthread_mutex_lock(&epdc_pw_mtx);
+    if (want != 0) epdc_pw_want = want;
+    if (cpu_want != 0) epdc_cpu_want = cpu_want;
+    pthread_cond_signal(&epdc_pw_cv);
+    pthread_mutex_unlock(&epdc_pw_mtx);
+}
+static void epdc_pw_init(void)
+{
+    epdc_pw_has_proc = !g_is_mtk && access("/proc/eink/waveform/power", F_OK) == 0;
+    if (access("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", W_OK) == 0) {
+        if (epdc_sysfs_rd("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", epdc_cpu_max, sizeof(epdc_cpu_max)) < 0)
+            epdc_cpu_max[0] = 0;
+        if (epdc_sysfs_rd("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq", epdc_cpu_orig, sizeof(epdc_cpu_orig)) < 0)
+            epdc_cpu_orig[0] = 0;
+    }
+    if (!epdc_pw_has_proc && !epdc_cpu_max[0]) return;
+    pthread_t th;
+    if (pthread_create(&th, NULL, epdc_pw_worker, NULL) == 0) {
+        pthread_detach(th);
+        epdc_pw_avail = 1;
+        fprintf(stderr, "epd: pre-warm worker enabled (epdc=%d cpufreq=%s)\n", epdc_pw_has_proc, epdc_cpu_max[0] ? epdc_cpu_max : "off");
+    }
+}
+
 static void restore_pwrdown(void)
 {
+    if (epdc_pw_prewarmed && epdc_pw_has_proc) {
+        epdc_pw_prewarmed = 0;
+        epdc_sysfs_wr("/proc/eink/waveform/power", "off");
+    }
+    if (epdc_cpu_boosted && epdc_cpu_orig[0] && access("/dev/shm/veradroid/lboost.active", F_OK) != 0) {
+        epdc_cpu_boosted = 0;
+        epdc_sysfs_wr("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", epdc_cpu_orig);
+    }
     if (pwrdown_saved && fbfd >= 0) { int32_t v = pwrdown_orig; ioctl(fbfd, VD_SET_PWRDOWN_DELAY, &v); }
 }
 
@@ -890,6 +1074,10 @@ static int open_fb(void)
     FBInkState st;
     fbink_get_state(&cfg, &st);
     g_is_mtk = st.is_mtk;
+    if (!st.is_mtk && strstr(st.device_platform, "Zelda")) {
+        g_no_hwdither = 1;
+        fprintf(stderr, "epd: %s (%s): hardware dithering off (Zelda EPDC)\n", st.device_name, st.device_platform);
+    }
     g_cfa = skip_cfa && st.is_mtk && st.has_color_panel && st.bpp == 32;
     g_color = st.is_mtk && st.has_color_panel;
     if (!st.is_mtk) {
@@ -910,6 +1098,7 @@ static int open_fb(void)
     }
     fprintf(stderr, "epd: %s (%s/%s) %ux%u %ubpp mtk=%d\n", st.device_name, st.device_codename, st.device_platform,
             st.screen_width, st.screen_height, st.bpp, st.is_mtk);
+    epdc_pw_init();
     fprintf(stderr, "epd: anim_mode=%d dir=%d steps=%d min=%d%% swipe=%d\n", anim_mode, anim_dir, anim_steps, anim_min_pct, swipe_ok);
     if (g_rot) fprintf(stderr, "epd: rotate %d: logical %dx%d on panel %dx%d (visible width %d)\n", g_rot, LW, LH, W, H, VW);
     return 0;
@@ -1074,7 +1263,7 @@ static long long qp_at(void) { long long d = qp_last + qpass_ms; return d > qp_d
 static int push_y8(const uint8_t *buf, int x, int y, int w, int h, int mode)
 {
     FBInkConfig c = cfg;
-    c.dithering_mode = dither;
+    c.dithering_mode = g_no_hwdither ? HWD_PASSTHROUGH : dither;
     c.ignore_alpha = true;
     c.no_refresh = false;
     c.is_flashing = false;
@@ -1262,7 +1451,23 @@ static int show_page_rows(const uint8_t *shm, int page, int mode, int force_full
         scroll_raw_y8 = 0;
         ly0 = 0; ly1 = LH; py0 = 0; py1 = H;
     }
-    if (g_rot) {
+    if (page_is_y8(page) && y8_ok()) {
+        const uint8_t *yb = y8_base(page);
+        if (g_rot) {
+            if (ly1 > ly0) {
+                y8_to_y8_rot(yb, 0, ly0, g_rot == 180 ? VW : LW, ly1 - ly0, cur_y8);
+                lightf_pass(cur_y8, W, W, H, py0, py1);
+            }
+        } else if (py1 > py0) {
+            if (fast_scroll) {
+                y8_apply_fast(yb + (size_t)py0 * W, cur_y8 + (size_t)py0 * W, (size_t)(py1 - py0) * W);
+                scroll_raw_y8 = 1;
+            } else {
+                y8_apply_lut(yb + (size_t)py0 * W, cur_y8 + (size_t)py0 * W, (size_t)(py1 - py0) * W);
+                lightf_pass(cur_y8, W, W, H, py0, py1);
+            }
+        }
+    } else if (g_rot) {
         if (ly1 > ly0) {
             rgba_to_y8_rot(page_base(shm, page), 0, ly0, g_rot == 180 ? VW : LW, ly1 - ly0, cur_y8);
             lightf_pass(cur_y8, W, W, H, py0, py1);
@@ -1694,6 +1899,25 @@ static unsigned long n_launch_held = 0;
 static int page_blank(const uint8_t *shm, int page)
 {
     if (g_rot) return 0;
+    if (page_is_y8(page) && y8_ok()) {
+        const uint8_t *img = y8_base(page);
+        int hist[16] = {0};
+        for (int y = 0; y < H; y += 64)
+            for (int x = 0; x < W; x += 64) hist[img[(size_t)y * W + x] >> 4]++;
+        int bi = 0;
+        for (int i = 1; i < 16; i++) if (hist[i] > hist[bi]) bi = i;
+        int dom = bi * 16 + 8, rows = 0, crow = 0;
+        for (int y = 0; y < H; y += 4) {
+            rows++;
+            const uint8_t *r = img + (size_t)y * W;
+            for (int x = 0; x < W; x += 4) {
+                int v = r[x];
+                if (v - dom > 24 || dom - v > 24) { crow++; break; }
+            }
+        }
+        launch_rows = rows ? crow * 1000 / rows : 0;
+        return crow * 100 < rows * 6;
+    }
     const uint8_t *img = page_base(shm, page);
     int hist[16] = {0};
     for (int y = 0; y < H; y += 64)
@@ -1763,7 +1987,8 @@ static void verify_page(const uint8_t *shm)
     if (g_rot || !prev_valid) { fprintf(stderr, "epd: verify: n/a\n"); return; }
     uint8_t *t = malloc((size_t)W * H);
     if (!t) return;
-    rgba_to_y8_opaque(page_base(shm, last_page), W * 4, 0, 0, W, H, t);
+    if (page_is_y8(last_page) && y8_ok()) y8_apply_lut(y8_base(last_page), t, (size_t)W * H);
+    else rgba_to_y8_opaque(page_base(shm, last_page), W * 4, 0, 0, W, H, t);
     lightf_pass(t, W, W, H, 0, H);
     long px = 0; int r0 = -1, r1 = -1, x0 = W, x1 = 0;
     for (int y = 0; y < H; y++) {
@@ -1806,14 +2031,30 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
             strcpy(sl, "/page");
             FILE *f = fopen(pf, "r");
             int v;
-            if (f) { if (fscanf(f, "%d", &v) == 1) last_page = v == 2 ? 2 : v & 1; fclose(f); }
+            if (f) { if (fscanf(f, "%d", &v) == 1) last_page = page_is_y8(v) ? v : (v == 2 ? 2 : v & 1); fclose(f); }
             strcpy(sl, "/fb2");
             snprintf(fb2path, sizeof(fb2path), "%s", pf);
-            /* tell hwcomposer.kindle that this bridge shows page 2: without <dir of shm>/fb2.ok it leaves frames with a dim
-               layer to GLES (a bridge that read "P 2" as page 0 showed none of the app's later frames, see hwc_kindle.c) */
             strcpy(sl, "/fb2.ok");
             int okfd = open(pf, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
             if (okfd >= 0) close(okfd);
+            /* 8-bit luma fastpath (/dev/kfb/y8 + y8.ok): 4x less shared memory & bandwidth than RGBX8888 */
+            strcpy(sl, "/y8");
+            snprintf(y8path, sizeof(y8path), "%s", pf);
+            int yfd = open(y8path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+            if (yfd >= 0) {
+                size_t yneed = (size_t)W * H * 3;
+                fchmod(yfd, 0666);
+                if (ftruncate(yfd, (off_t)yneed) == 0) {
+                    void *ym = mmap(NULL, yneed, PROT_READ, MAP_SHARED, yfd, 0);
+                    if (ym != MAP_FAILED) y8mem = ym;
+                }
+                close(yfd);
+            }
+            if (y8mem) {
+                strcpy(sl, "/y8.ok");
+                int yok = open(pf, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                if (yok >= 0) close(yok);
+            }
         }
     }
 
@@ -1864,6 +2105,22 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
             if (d < qp_at()) d = qp_at();
             if (d < nowt) d = busy_any(nowt) ? nowt + 1000 : nowt;
             if (deadline < 0 || d < deadline) deadline = d;
+        }
+        if (epdc_pw_prewarmed) {
+            if (n_sent != epdc_pw_sent) { epdc_pw_prewarmed = 0; epdc_pw_until = 0; }
+            else if (nowt >= epdc_pw_until) { epdc_pw_prewarmed = 0; epdc_pw_until = 0; epdc_pw_signal(-1, 0); }
+            else if (deadline < 0 || epdc_pw_until < deadline) deadline = epdc_pw_until;
+        }
+        if (epdc_cpu_boosted) {
+            if (nowt >= epdc_cpu_until) {
+                if (nowt - last_input_ms < 1000) {
+                    epdc_cpu_until = last_input_ms + 1000;
+                    if (deadline < 0 || epdc_cpu_until < deadline) deadline = epdc_cpu_until;
+                } else {
+                    epdc_cpu_boosted = 0; epdc_cpu_until = 0;
+                    epdc_pw_signal(0, -1);
+                }
+            } else if (deadline < 0 || epdc_cpu_until < deadline) deadline = epdc_cpu_until;
         }
         if (bg_on && (deadline < 0 || bg_until < deadline)) deadline = bg_until;   /* gesture badge: take it down on time */
         int sr;
@@ -1940,7 +2197,10 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
                 if (scroll_raw_y8) {
                     scroll_raw_y8 = 0;
                     if (!g_rot) {
-                        rgba_to_y8_opaque(page_base(fbmem, last_page), W * 4, 0, 0, W, H, cur_y8);
+                        if (page_is_y8(last_page) && y8_ok())
+                            y8_apply_lut(y8_base(last_page), cur_y8, (size_t)W * H);
+                        else
+                            rgba_to_y8_opaque(page_base(fbmem, last_page), W * 4, 0, 0, W, H, cur_y8);
                         lightf_pass(cur_y8, W, W, H, 0, H);
                     }
                 }
@@ -2134,6 +2394,21 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
             }
             else if (!strncmp(line, "GCN", 3)) { int v; if (sscanf(line + 3, "%d", &v) == 1 && v >= 0 && v <= 1000) { gc_every = v; gc_count = 0; } }
             else if (!strcmp(line, "NEWWIN")) newwin_until = now_ms() + 3000;
+            else if (!strcmp(line, "WAKE") || !strcmp(line, "BOOST")) {
+                long long tw = now_ms();
+                int want_pw = 0, want_cpu = 0;
+                if (epdc_pw_avail && access(sleepf, F_OK) != 0) {
+                    if (epdc_pw_has_proc && (tw - last_draw_ms >= 1400 || !last_draw_ms)) {
+                        if (!epdc_pw_prewarmed) { epdc_pw_prewarmed = 1; epdc_pw_sent = n_sent; want_pw = 1; }
+                        epdc_pw_until = tw + 4500;
+                    }
+                    if (line[0] == 'B' && epdc_cpu_max[0]) {
+                        if (!epdc_cpu_boosted) { epdc_cpu_boosted = 1; want_cpu = 1; }
+                        epdc_cpu_until = tw + 1800;
+                    }
+                    if (want_pw || want_cpu) epdc_pw_signal(want_pw, want_cpu);
+                }
+            }
             else if (!strncmp(line, "MONO", 4)) { int v; if (sscanf(line + 4, "%d", &v) == 1 && v >= 0 && v <= 254) mono_level = v; }
             else if (!strncmp(line, "MAXDEFER", 8)) { int v; if (sscanf(line + 8, "%d", &v) == 1 && v >= 0 && v <= 10000) max_defer_ms = v; }
             else if (!strcmp(line, "STATS"))
@@ -2175,10 +2450,22 @@ static int cmd_run(const char *shm, const char *fifo, const char *ctl)
                 }
             }
             else if (sscanf(line, "P %d %c", &x, &m) >= 1) {
-                page = x == 2 ? (fb2_ok() ? 2 : last_page) : x & 1;
+                int np = page_is_y8(x) ? (y8_ok() ? x : last_page) : (x == 2 ? (fb2_ok() ? 2 : last_page) : x & 1);
+                if (page >= 0 && page != np) rall = 1;
+                page = np;
                 if (tlog) fprintf(stderr, "[%lld] epd: got %s\n", now_ms(), line);
                 { int a, b; if (sscanf(line, "P %*d %d %d", &a, &b) == 2 && b > a) { if (a < ry0) ry0 = a; if (b > ry1) ry1 = b; } else rall = 1; }
                 int mm = (sscanf(line, "P %*d %c", &m) == 1) ? (m == 'F' ? M_FULL : m == 'D' ? M_DU : m == 'G' ? M_GC16 : m == 'R' ? M_REAGL : M_AUTO) : M_AUTO;
+                if (mm == M_FULL || mode == M_AUTO) mode = mm;
+            }
+            else if (sscanf(line, "Y %d %c", &x, &m) >= 1) {
+                int yk = x == 2 ? 2 : x & 1;
+                int np = y8_ok() ? (PAGE_Y8_BASE + yk) : last_page;
+                if (page >= 0 && page != np) rall = 1;
+                page = np;
+                if (tlog) fprintf(stderr, "[%lld] epd: got %s\n", now_ms(), line);
+                { int a, b; if (sscanf(line, "Y %*d %d %d", &a, &b) == 2 && b > a) { if (a < ry0) ry0 = a; if (b > ry1) ry1 = b; } else rall = 1; }
+                int mm = (sscanf(line, "Y %*d %c", &m) == 1) ? (m == 'F' ? M_FULL : m == 'D' ? M_DU : m == 'G' ? M_GC16 : m == 'R' ? M_REAGL : M_AUTO) : M_AUTO;
                 if (mm == M_FULL || mode == M_AUTO) mode = mm;
             }
             else if (sscanf(line, "D %d %d %d %d %c", &x, &y, &w, &h, &m) >= 4) {

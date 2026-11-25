@@ -3,6 +3,7 @@
 status_write() {
     p=com.lab126.powerd
     bat=$(lipc-get-prop $p battLevel 2>/dev/null)
+    case "$bat" in ''|*[!0-9]*) ;; *) [ "$bat" -gt 100 ] && bat=100 ;; esac
     chg=$(lipc-get-prop $p isCharging 2>/dev/null)
     fl=$(lipc-get-prop $p flIntensity 2>/dev/null)
     flmax=$(lipc-get-prop $p flMaxIntensity 2>/dev/null)

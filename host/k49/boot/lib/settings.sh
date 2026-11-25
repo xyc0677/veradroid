@@ -109,6 +109,12 @@ settings_defaults() {
     G_TWO_LONG_ACT=invert  # 双指长按 2 秒做什么
     KFB_PTKEYS=0           # 1 = 把 Kindle 的 kindle-input-pt 绑进 Android（旧做法；Android 会把它当成外接手写笔，每次触摸慢 72 ms，见 container.sh touch_setup）
     SAVER_EXIT_H=8         # 锁屏（屏保）超过这么多小时，醒来时直接退出 Android 回到 Kindle（默认 8 小时，避免隔夜耗电）；0 = 不退出（lib/sleep.sh saver_exit_check）
+    PAGE_KEYS=             # 实体翻页键输入设备名（Oasis 2 / 3：gpio-keys）
+    PAGE_KEYS_SWAP=0       # 机型默认校准（imx7d-zelda 设备树 Forward=104 / Back=109）
+    PAGE_KEYS_FLIP=0       # 用户设置：1 = 上下翻页键功能对换
+    PAGE_KEYS_MAP=volume   # 翻页键发给 Android 的键码：volume | page | dpad
+    FL_COLD=
+    FL_WARM=none
     USB_ASK=1              # Android 在前台时插上 USB 线：1 = 问要不要切到 USB 传输（回到 Kindle），0 = 不问（usb.sh）
     WIFI_PS=auto           # Wi-Fi 省电：auto（平时省电，传书 / 大量下载时临时关）| on（一直省电）| off（Android 运行时关）
     APP_COMPILE=auto       # 应用预编译（compile.sh）：auto | speed | off
@@ -166,7 +172,11 @@ settings_load() {
         # Scribe（barolo / MT8113 Bellatrix3，也不是 Bellatrix4）：同一个 FBInk 行为。用户反馈（KS1，1.00）“有些应用里的菜单很糊”：
         # 菜单 / 弹窗只占屏幕一小块 → DU（两级）+ Y4 抖动，没有补刷。和 PW5 同样的三项默认值。
         ks|ks2) KFB_DITHER=0; KFB_REAGL_MIN=50; KFB_CLEAN=600 ;;
+        oa2) KFB_DITHER=0; KFB_SETTLE=40; PAGE_KEYS=gpio-keys; PAGE_KEYS_SWAP=1; FL_COLD=max77796-bl; FL_WARM=none ;;
+        ko3) KFB_DITHER=0; KFB_SETTLE=40; PAGE_KEYS=gpio-keys; PAGE_KEYS_SWAP=1; FL_COLD=lm3697-bl1; FL_WARM=lipc ;;
     esac
+    _m_id=$(cat "$SYS/model" 2>/dev/null)
+    [ -n "$_m_id" ] && [ -f "$VD/models/$_m_id.conf" ] && . "$VD/models/$_m_id.conf" 
     # 512 MB 机型（实际内存 < 700 MB，和 lowmem_ram 一样，不看 LOWMEM 开关）：一页共享缓冲 + RGB565 窗口缓冲默认开（省 ~8 + ~8 MB）。
     # 只是默认值：机型文件和 settings.conf 照样能改（docs/framework-project.md §9.9）。
     if lowmem_ram; then KFB_ONEPAGE=1; KFB_RGB565=1; fi
@@ -226,10 +236,12 @@ epd_send_smooth() { epd_send PACE ${KFB_PACE:-0}; epd_send CLEAN ${KFB_CLEAN:-0}
 
 # 把当前设置写给桌面看（/dev/kfb/settings）
 settings_publish() {
-    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 BG_FREEZE GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE SAVER_EXIT_H USB_ASK UPDATE_BACKUP WEBVIEW; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
+    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 BG_FREEZE SAVER_EXIT_H GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK UPDATE_BACKUP WEBVIEW; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; } > $X/settings.tmp \
+        && printf 'PAGE_KEYS_MAP=%s\nPAGE_KEYS_FLIP=%s\nPAGE_KEYS_HW=%s\n' "$PAGE_KEYS_MAP" "${PAGE_KEYS_FLIP:-0}" "$([ -n "$PAGE_KEYS" ] && echo 1 || echo 0)" >> $X/settings.tmp \
         && printf 'SYSTEM_FONT=%s\nSYSTEM_FONT_LIVE=%s\n' "$SYSTEM_FONT" "$(cat $W/sysfont/android 2>/dev/null)" >> $X/settings.tmp \
         && printf 'WEBVIEW_ALT_OK=%s\nWEBVIEW_HAVE=%s\nWEBVIEW_LIVE=%s\n' "$(lowmem_ram && echo 0 || echo 1)" "$(type webview_ok >/dev/null 2>&1 && webview_ok && echo 1 || echo 0)" "$(cat $W/webview.mode 2>/dev/null)" >> $X/settings.tmp \
         && mv -f $X/settings.tmp $X/settings
+    case "${WIFI_PS:-auto}" in on|off) rm -f $W/wifips.auto ;; *) : > $W/wifips.auto 2>/dev/null || true ;; esac
     type ub_mirror >/dev/null 2>&1 && ub_mirror      # 安装器读的副本（backup.sh）
     return 0
 }
@@ -243,7 +255,7 @@ settings_apply() {
     if [ -s "$sfile" ]; then
         sa_raw=" $(tr '\n' ' ' < "$sfile") "
         sa_upd=""
-        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 BG_FREEZE GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE SAVER_EXIT_H USB_ASK WEBVIEW; do
+        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_PACE KFB_CLEAN KFB_REAGL_MIN KFB_SETTLE2 KFB_SCROLLDU KFB_IMG KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_GCN KFB_NEWWIN KFB_MONO KFB_MAXDEFER KFB_FLIPINPUT KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_SWIPE KFB_PWRDOWN KFB_HWC KFB_HZ KFB_DIM KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE STORAGE_AUTO TIME_12_24 BG_FREEZE SAVER_EXIT_H PAGE_KEYS_MAP PAGE_KEYS_FLIP PAGE_KEYS_SWAP GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX IDLE_FREEZE IDLE_WAKE IDLE_FREEZE_EXCLUDE USB_ASK WEBVIEW; do
             case "$sa_raw" in *" $k="*) ;; *) continue ;; esac
             v=$(sed -n "s/^$k=//p" "$sfile" | tail -1)
             [ -n "$v" ] || continue
@@ -253,6 +265,9 @@ settings_apply() {
                 KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop) ;; KINDLE_UI=*) continue ;;
                 GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; GESTURE_HINT=*) continue ;;
                 WEBVIEW=stock|WEBVIEW=alt|WEBVIEW=default) ;; WEBVIEW=*) continue ;;
+                PAGE_KEYS_MAP=volume|PAGE_KEYS_MAP=page|PAGE_KEYS_MAP=dpad|PAGE_KEYS_MAP=default) ;; PAGE_KEYS_MAP=*) continue ;;
+                PAGE_KEYS_FLIP=0|PAGE_KEYS_FLIP=1|PAGE_KEYS_FLIP=default) ;; PAGE_KEYS_FLIP=*) continue ;;
+                PAGE_KEYS_SWAP=0|PAGE_KEYS_SWAP=1|PAGE_KEYS_SWAP=default) ;; PAGE_KEYS_SWAP=*) continue ;;
             esac
             sa_upd="${sa_upd}${k}=${v}
 "
@@ -300,10 +315,12 @@ settings_apply() {
         fi
     fi
     rm -f "$sfile" "$sfile.conf"
+    pk_before="$PAGE_KEYS_MAP:${PAGE_KEYS_FLIP:-0}:${PAGE_KEYS_SWAP:-0}"
     settings_load
     # 新网页内核：打开开关时还没下载就在后台下（container.sh webview_dl，进度 ctl/webview.status）；生效要重启 Android
     [ "${WEBVIEW:-stock}" = alt ] && type webview_dl >/dev/null 2>&1 && webview_dl
     settings_publish
+    [ "$PAGE_KEYS_MAP:${PAGE_KEYS_FLIP:-0}:${PAGE_KEYS_SWAP:-0}" != "$pk_before" ] && type page_keys_apply >/dev/null 2>&1 && page_keys_apply
     # ANIM 必须先于 SET：显示桥收到 SET 会立刻重绘，若 ANIM 在后面，这次重绘仍用旧步数，
     # 下一条 P/D 又可能先碰到旧缓冲，导致“设置里选了 6 步，日志还是 12”。
     epd_send ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN

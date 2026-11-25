@@ -113,11 +113,12 @@ public class SwitcherActivity extends Activity {
                     @Override public void onClick(View v) {
                         // 和桌面点图标一样：先让宿主换好这个应用的显示参数 / 显示密度、显示桥挡住纯色的启动窗口，再把任务调到前面
                         // （以前只靠任务栈通知，宿主晚 0.1–5 秒才知道；多看要换密度，阅读页会先按旧密度重建一次、再重建一次）
-                        if (AppProf.host()) { HostService.launchedPkg = tpkg; AppProf.launching(tpkg); }
+                        if (AppProf.host()) { HostService.launchedPkg = tpkg; AppProf.launching(tpkg, id >= 0); }
                         try {
                             if (id >= 0) am.moveTaskToFront(id, 0);
                             else startActivity(open);
                         } catch (Exception e) { startActivity(open); }
+                        overridePendingTransition(0, 0);
                         finish();
                     }
                 }));
@@ -233,8 +234,14 @@ public class SwitcherActivity extends Activity {
     }
 
     /** 切换器常驻（singleInstance）：关掉时把它的任务放到后面，下次打开回到这个实例，只重新填列表。 */
+    @Override protected void onResume() {
+        super.onResume();
+        Panel.closeOnDraw(root);
+    }
+
     @Override public void finish() {
         if (!moveTaskToBack(true)) super.finish();
+        overridePendingTransition(0, 0);
     }
 
     @Override protected void onNewIntent(Intent i) {

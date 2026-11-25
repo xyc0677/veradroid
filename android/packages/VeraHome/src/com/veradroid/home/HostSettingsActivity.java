@@ -406,4 +406,7 @@ public class HostSettingsActivity extends Activity {
         }
         compileView.setText(s);
     }
+
+    @Override protected void onResume() { super.onResume(); Panel.closeOnDraw(getWindow().getDecorView()); }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

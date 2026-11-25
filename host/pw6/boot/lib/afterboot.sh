@@ -23,8 +23,18 @@ trust_unlock() {
 # dalvik-cache 里 odex 的过滤器（直接读 OAT 头，不起 JVM），不是 speed 就在开机 90 秒后低优先级编一次。冻结 / 屏保时不编。
 home_aot() {
     for ap in VeraHome:com.veradroid.home VeraIME:com.veradroid.ime; do
-        o=$SYS/data/dalvik-cache/arm/system@priv-app@${ap%%:*}@${ap%%:*}.apk@classes.dex
-        [ -f "$o" ] || o=$SYS/data/dalvik-cache/arm/system@app@${ap%%:*}@${ap%%:*}.apk@classes.dex
+        o=
+        for _cand in \
+            "$SYS/data/dalvik-cache/arm/system@priv-app@${ap%%:*}@${ap%%:*}.apk@classes.dex" \
+            "$SYS/data/dalvik-cache/arm/system@app@${ap%%:*}@${ap%%:*}.apk@classes.dex" \
+            "$SYS/data/dalvik-cache/arm64/system@priv-app@${ap%%:*}@${ap%%:*}.apk@classes.dex" \
+            "$SYS/data/dalvik-cache/arm64/system@app@${ap%%:*}@${ap%%:*}.apk@classes.dex" \
+            "$R/system/priv-app/${ap%%:*}/oat/arm/${ap%%:*}.odex" \
+            "$R/system/app/${ap%%:*}/oat/arm/${ap%%:*}.odex" \
+            "$R/system/priv-app/${ap%%:*}/oat/arm64/${ap%%:*}.odex" \
+            "$R/system/app/${ap%%:*}/oat/arm64/${ap%%:*}.odex"; do
+            [ -f "$_cand" ] && { o=$_cand; break; }
+        done
         # PW6 / k49 镜像：系统应用开机时根本不做 dexopt（dalvik-cache 里没有它们的 odex，内存里解压 dex 解释执行，0.98 真机实测），
         # 这时也编一次（f=none）；编完 odex 就在上面第一个路径
         f=none
@@ -385,6 +395,24 @@ RDME
     [ "${WEBVIEW:-stock}" = alt ] && type webview_ok >/dev/null 2>&1 && ! webview_ok && ! lowmem_ram && webview_dl
     # 新网页内核（WEBVIEW=alt，container.sh webview_prepare）：系统应用开机时不编，没有编好的代码时每个应用都解释执行它的
     # Java 部分（dex 只有约 2 MB）。后台编一次 speed（进 dalvik-cache；换回 52 时 webview_prepare 删掉）。
+    # Pre-relocate any /system/{app,priv-app} prebuilt .odex missing from /data/dalvik-cache/arm
+    if [ -s $SYS/data/dalvik-cache/arm/system@framework@boot.art ]; then
+        reloc_cmd=
+        for sapk in $SYS/rootfs/system/app/*/*.apk $SYS/rootfs/system/priv-app/*/*.apk; do
+            [ -f "$sapk" ] || continue
+            sdir=${sapk%/*}; sname=${sapk##*/}; sstem=${sname%.apk}
+            sodex=$sdir/oat/arm/$sstem.odex
+            [ -s "$sodex" ] || continue
+            cpath=${sapk#$SYS/rootfs/}; cdir=${sdir#$SYS/rootfs/}
+            [ "$cpath" = "system/app/webview/webview.apk" ] && [ "$(cat $W/webview.mode 2>/dev/null)" = alt ] && continue
+            dcname=$(printf '%s@classes.dex' "$cpath" | tr '/' '@')
+            [ -s "$SYS/data/dalvik-cache/arm/$dcname" ] && continue
+            reloc_cmd="$reloc_cmd /system/bin/patchoat --instruction-set=arm --input-oat-file=/$cdir/oat/arm/$sstem.odex --output-oat-file=/data/dalvik-cache/arm/$dcname --patched-image-location=/system/framework/boot.art && chmod 644 /data/dalvik-cache/arm/$dcname;"
+        done
+        if [ -n "$reloc_cmd" ]; then
+            adb_sh "$reloc_cmd" >/dev/null 2>&1 && t "after_boot: relocated system prebuilt odexes into dalvik-cache"
+        fi
+    fi
     if [ "$(cat $W/webview.mode 2>/dev/null)" = alt ] && [ ! -s $SYS/data/dalvik-cache/arm/system@vendor@app@webview-alt@webview.apk@classes.dex ]; then
         ( sleep 60; adb_sh_t 300 "cmd package compile -m speed $WEBVIEW_ALT_PKG" >/dev/null 2>&1
           t "webview: alt compiled: $(ls -s $SYS/data/dalvik-cache/arm/system@vendor@app@webview-alt@webview.apk@classes.dex 2>/dev/null | awk '{print $1}') KB" ) </dev/null >/dev/null 2>&1 &

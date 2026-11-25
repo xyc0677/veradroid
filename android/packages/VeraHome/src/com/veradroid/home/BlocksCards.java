@@ -88,51 +88,87 @@ final class BlocksCards {
      * 只读像素、不碰别的应用的数据。
      */
     private static final java.util.concurrent.ExecutorService fbExec = Ui.lowExecutor("fb-sample");
-    private static byte[][] homeSample;
+    private static byte[][] homeSample, capSample;
+    private static byte[] lineReuse;
+    private static int[] pxReuse;
+    private static java.nio.MappedByteBuffer sY8Map, sFbMap;
+    private static long sY8Len = -1, sFbLen = -1;
     private static int sampleW, sampleH;
 
-    private static byte[][] sampleFb(Context c) {
+    private static byte[][] ensureSampleBuf(byte[][] reuse, int len) {
+        if (reuse != null && reuse.length == 2 && reuse[0] != null && reuse[0].length == len) {
+            java.util.Arrays.fill(reuse[1], (byte) 0);
+            return reuse;
+        }
+        return new byte[2][len];
+    }
+
+    private static java.nio.MappedByteBuffer cachedMap(File f, long need, boolean y8) throws Exception {
+        long flen = f.length();
+        if (y8 && sY8Map != null && sY8Len == flen && sY8Map.capacity() >= need) return sY8Map;
+        if (!y8 && sFbMap != null && sFbLen == flen && sFbMap.capacity() >= need) return sFbMap;
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
+        try {
+            java.nio.MappedByteBuffer m = raf.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, need);
+            if (y8) { sY8Map = m; sY8Len = flen; } else { sFbMap = m; sFbLen = flen; }
+            return m;
+        } finally { raf.close(); }
+    }
+
+    private static byte[][] sampleFb(Context c, boolean forHome) {
         try {
             android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
             ((android.view.WindowManager) c.getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(dm);
             int w = dm.widthPixels, h = dm.heightPixels;
-            File f = new File(HostLink.KFB + "fb");
-            long page = (long) w * h * 4;
-            if (f.length() < page * 2) return null;
-            // framework project (KFB_ONEPAGE, docs/framework-project.md): SurfaceFlinger only ever uses page 0. Page 1 is a hole in
-            // the tmpfs file; reading it through a mapping would allocate it (about half a page of RAM with this sampling), so
-            // leave it alone: its sample stays all zero, the same on leaving and on coming back, and page 0 is picked.
+            int step = Math.max(2, w / 260);
+            sampleW = w / step; sampleH = h / step;
             int pages = new File(HostLink.KFB + "onepage").exists() ? 1 : 2;
-            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
-            try {
-                java.nio.MappedByteBuffer mb = raf.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, page * pages);
-                int step = Math.max(2, w / 260);
-                sampleW = w / step; sampleH = h / step;
-                byte[][] out = new byte[2][sampleW * sampleH];
-                // 一行一次整块拷出来再取点：以前每个点三次 get()（两页共五十多万次），单核的 PW4 上离开 / 回到主页各卡一两秒
-                byte[] line = new byte[(sampleW - 1) * step * 4 + 3];
+            File fy = new File(HostLink.KFB + "y8");
+            if (new File(HostLink.KFB + "y8.ok").exists() && fy.length() >= (long) w * h * 2) {
+                long ypage = (long) w * h;
+                java.nio.MappedByteBuffer ym = cachedMap(fy, ypage * pages, true);
+                byte[][] out = ensureSampleBuf(forHome ? homeSample : capSample, sampleW * sampleH);
+                if (forHome) homeSample = out; else capSample = out;
+                int needLine = (sampleW - 1) * step + 1;
+                if (lineReuse == null || lineReuse.length < needLine) lineReuse = new byte[needLine];
+                byte[] yline = lineReuse;
                 for (int pg = 0; pg < pages; pg++) {
                     for (int y = 0; y < sampleH; y++) {
-                        mb.position((int) (pg * page + (long) (y * step) * w * 4));
-                        mb.get(line, 0, line.length);
+                        ym.position((int) (pg * ypage + (long) (y * step) * w));
+                        ym.get(yline, 0, needLine);
                         int base = y * sampleW;
-                        for (int x = 0, o = 0; x < sampleW; x++, o += step * 4) {
-                            int r = line[o] & 255, g = line[o + 1] & 255, b = line[o + 2] & 255;
-                            out[pg][base + x] = (byte) ((r * 77 + g * 150 + b * 29) >> 8);
-                        }
+                        for (int x = 0, o = 0; x < sampleW; x++, o += step) out[pg][base + x] = yline[o];
                     }
                 }
                 return out;
-            } finally { raf.close(); }
+            }
+            File f = new File(HostLink.KFB + "fb");
+            long page = (long) w * h * 4;
+            if (f.length() < page * 2) return null;
+            java.nio.MappedByteBuffer mb = cachedMap(f, page * pages, false);
+            byte[][] out = ensureSampleBuf(forHome ? homeSample : capSample, sampleW * sampleH);
+            if (forHome) homeSample = out; else capSample = out;
+            byte[] line = new byte[(sampleW - 1) * step * 4 + 3];
+            for (int pg = 0; pg < pages; pg++) {
+                for (int y = 0; y < sampleH; y++) {
+                    mb.position((int) (pg * page + (long) (y * step) * w * 4));
+                    mb.get(line, 0, line.length);
+                    int base = y * sampleW;
+                    for (int x = 0, o = 0; x < sampleW; x++, o += step * 4) {
+                        int r = line[o] & 255, g = line[o + 1] & 255, b = line[o + 2] & 255;
+                        out[pg][base + x] = (byte) ((r * 77 + g * 150 + b * 29) >> 8);
+                    }
+                }
+            }
+            return out;
         } catch (Throwable t) { return null; }
     }
 
-    /** 离开主页去开应用时：记下主页自己的画面（两页），回来时用来认出哪一页是应用画的。 */
     static void onLeaveHome(Context c) {
         if (!wantsLastApp(c)) return;
         final Context app = c.getApplicationContext();
         fbExec.execute(new Runnable() { @Override public void run() {
-            homeSample = sampleFb(app);
+            homeSample = sampleFb(app, true);
         } });
     }
 
@@ -160,21 +196,23 @@ final class BlocksCards {
         if (pkg == null || !wantsLastApp(a) || a.findApp(pkg) == null || !readers(a).contains(pkg)) return;
         final Context app = a.getApplicationContext();
         fbExec.execute(new Runnable() { @Override public void run() {
-            byte[][] now = sampleFb(app);
+            byte[][] now = sampleFb(app, false);
             if (now == null) return;
             int pick = 0;
             if (homeSample != null && homeSample[0].length == now[0].length) {
                 long d0 = diff(now[0], homeSample[0]), d1 = diff(now[1], homeSample[1]);
                 pick = d1 > d0 ? 1 : 0;
-                if (Math.max(d0, d1) == 0) return;   // 两页都还是主页的画面：应用没画过东西
+                if (Math.max(d0, d1) == 0) return;
             }
-            final int w = sampleW, h = sampleH;
-            int[] px = new int[w * h];
+            final int w = sampleW, h = sampleH, n = w * h;
+            if (pxReuse == null || pxReuse.length != n) pxReuse = new int[n];
+            final int[] px = pxReuse;
             byte[] src = now[pick];
-            for (int i = 0; i < px.length; i++) { int v = src[i] & 255; px[i] = 0xff000000 | (v << 16) | (v << 8) | v; }
-            final Bitmap bm = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
+            for (int i = 0; i < n; i++) { int v = src[i] & 255; px[i] = 0xff000000 | (v << 16) | (v << 8) | v; }
+            final Bitmap bm = Bitmap.createBitmap(px, w, h, Bitmap.Config.RGB_565);
             final long ts = System.currentTimeMillis();
             ui.post(new Runnable() { @Override public void run() {
+                if (thumb != null && thumb != bm && !thumb.isRecycled()) thumb.recycle();
                 thumb = bm; thumbPkg = pkg;
                 Store.prefs(app, "home").edit().putString("la_pkg", pkg).putLong("la_time", ts).apply();
             } });
@@ -219,7 +257,9 @@ final class BlocksCards {
         if (thumb != null && pkg.equals(thumbPkg)) return thumb;
         File f = new File(Store.cache("lastapp"), "thumb.png");
         if (!f.isFile()) return null;
-        thumb = BitmapFactory.decodeFile(f.getAbsolutePath());
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inPreferredConfig = Bitmap.Config.RGB_565;
+        thumb = BitmapFactory.decodeFile(f.getAbsolutePath(), o);
         thumbPkg = pkg;
         return thumb;
     }

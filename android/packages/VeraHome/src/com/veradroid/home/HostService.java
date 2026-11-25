@@ -56,9 +56,11 @@ public class HostService extends Service {
         } });
         // 锁屏密码（LockScreen）：USB 上放了重置文件就先清掉，再按需盖上锁屏（开机这一次）
         handler.post(new Runnable() { @Override public void run() { handle("lock.reset"); LockScreen.show(HostService.this); } });
+        HostLink.initBattery(this);
         watchForeground();
         AppProf.migrate(this);
         keepAnimationsOff();
+        handler.postDelayed(new Runnable() { @Override public void run() { Panel.prewarm(HostService.this); } }, 4000);
         try {
             android.content.IntentFilter f = new android.content.IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
             f.addAction(Intent.ACTION_SCREEN_OFF);
@@ -124,15 +126,29 @@ public class HostService extends Service {
         AppProf.fg("home");
     }
 
+    private static final java.util.concurrent.ExecutorService FG_EXEC = java.util.concurrent.Executors.newSingleThreadExecutor(
+        new java.util.concurrent.ThreadFactory() {
+            @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "vera-fg"); t.setDaemon(true); return t; }
+        });
+
     private void writeForeground() {
-        String pkg = "", cls = "";
-        try {
-            List<ActivityManager.RunningTaskInfo> l = ((ActivityManager) getSystemService(Context.ACTIVITY_SERVICE)).getRunningTasks(1);
-            if (l != null && !l.isEmpty() && l.get(0).topActivity != null) {
-                pkg = l.get(0).topActivity.getPackageName();
-                cls = l.get(0).topActivity.getClassName();
+        FG_EXEC.execute(new Runnable() {
+            @Override public void run() {
+                String p = "", c = "";
+                try {
+                    List<ActivityManager.RunningTaskInfo> l = ((ActivityManager) getSystemService(Context.ACTIVITY_SERVICE)).getRunningTasks(1);
+                    if (l != null && !l.isEmpty() && l.get(0).topActivity != null) {
+                        p = l.get(0).topActivity.getPackageName();
+                        c = l.get(0).topActivity.getClassName();
+                    }
+                } catch (Throwable ignored) { }
+                final String pkg = p, cls = c;
+                handler.post(new Runnable() { @Override public void run() { applyForeground(pkg, cls); } });
             }
-        } catch (Throwable ignored) { }
+        });
+    }
+
+    private void applyForeground(String pkg, String cls) {
         // 每个应用单独的字号：前台应用（或我们自己的哪个页面）变了才看一次；AppFont 只在值真的变了时才写设置
         if (!(pkg + "/" + cls).equals(lastFgAct)) {
             lastFgAct = pkg + "/" + cls; AppFont.forForeground(this, pkg, cls);
@@ -253,7 +269,8 @@ public class HostService extends Service {
             String act = name.substring(4);
             if (act.equals("lock")) { LockScreen.show(this); return; }
             if (LockScreen.showing()) return;   // 锁着时不让手势打开面板 / 切换应用 / 回桌面（回 Kindle 由宿主自己做，不经过这里）
-            if (act.equals("panel")) { if (Panel.isOpen()) Panel.close(); else Panel.open(this); }
+            if (act.equals("panel_open")) { if (!Panel.isOpen()) Panel.open(this); }
+            else if (act.equals("panel")) { if (Panel.isOpen()) { if (!Panel.justOpened()) Panel.close(); } else Panel.open(this); }
             else if (Panel.isOpen() && act.equals("back")) Panel.close();
             else if (act.equals("switch")) { Panel.close(); start(SwitcherActivity.class); }
             else if (act.equals("appopt")) appOpt();

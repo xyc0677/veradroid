@@ -288,4 +288,5 @@ public class StorageActivity extends Activity {
         StatusBarService.refresh(this);
         super.onPause();
     }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

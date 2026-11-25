@@ -34,11 +34,8 @@ fw_services() {
     FW_MODE=$(kindle_ui_mode)
     if [ "$FW_MODE" = stop ]; then
         if [ ! -f /etc/upstart/framework.conf ]; then FW_MODE=keep
-        elif [ ! -x "$VD/bin/vdkaf" ]; then
-            t "fw: KINDLE_UI=stop wanted but bin/vdkaf is missing (the power key would stop working): keeping the framework"; FW_MODE=keep
-        elif [ ! -e /lib/ld-linux-armhf.so.3 ]; then
-            # bin/vdkaf 是 armhf 动态链接的；PW5 5.16.2.x 及更早的固件是软浮点（armel），它跑不起来（没有那个动态链接器）
-            t "fw: KINDLE_UI=stop wanted but this firmware is soft-float (armel) and bin/vdkaf is armhf: keeping the framework"; FW_MODE=keep
+        elif [ ! -x "$(vdkaf_bin)" ]; then
+            t "fw: KINDLE_UI=stop wanted but $(vdkaf_bin) is missing (the power key would stop working): keeping the framework"; FW_MODE=keep
         elif [ "$(cat $SYS/vdkaf.bad 2>/dev/null)" = "$(vdkaf_id)" ]; then
             # 这个固件 + 这个 vdkaf 上次没能顶替成功（见 framework_stop 里的自检）：不再停框架，免得每次进来都白白重启它一遍
             t "fw: vdkaf did not work on this firmware last time ($SYS/vdkaf.bad): keeping the framework"; FW_MODE=keep
@@ -52,11 +49,12 @@ fw_services() {
 fw_running() { initctl list 2>/dev/null | awk '$2 ~ /^start\// {print $1}'; }
 
 # “这个固件 + 这个 vdkaf”的标识：自检失败时记进 $SYS/vdkaf.bad，固件升级或 vdkaf 换了就自动再试一次
-vdkaf_id() { echo "$(cat /etc/prettyversion.txt 2>/dev/null | head -1) $(wc -c < "$VD/bin/vdkaf" 2>/dev/null)"; }
+vdkaf_bin() { if [ -e /lib/ld-linux-armhf.so.3 ]; then echo "$VD/bin/vdkaf"; else echo "$VD/bin/vdkaf-sf"; fi; }
+vdkaf_id() { echo "$(cat /etc/prettyversion.txt 2>/dev/null | head -1) $(wc -c < "$(vdkaf_bin)" 2>/dev/null)"; }
 # 框架停着的时候顶替 com.lab126.kaf（见上）。等框架真的退出、名字空出来再起；框架回来之前先停掉。
 vdkaf_start() {
-    [ -x "$VD/bin/vdkaf" ] || return 0
-    ( cd / && exec "$VD/bin/vdkaf" ) </dev/null >>$W/vdkaf.log 2>&1 &
+    [ -x "$(vdkaf_bin)" ] || return 0
+    ( cd / && exec "$(vdkaf_bin)" ) </dev/null >>$W/vdkaf.log 2>&1 &
     echo $! > $W/vdkaf.pid
     t "fw: vdkaf started (pid $!)"
 }

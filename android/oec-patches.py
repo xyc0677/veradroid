@@ -110,11 +110,32 @@ PATCHES = [
     (B + "com/android/internal/policy/DecorView.java",
      "    public boolean dispatchKeyEvent(KeyEvent event) {\n        final int keyCode = event.getKeyCode();\n",
      "    public boolean dispatchKeyEvent(KeyEvent event) {\n"
-     "        if (" + O + ".sPageKey != 0) {   // VeraDroid: page keys as volume keys / a swipe for this app\n"
+     "        if (" + O + ".sPageKey != 0 && !" + O + ".isInFastKey()) {   // VeraDroid: page keys as volume keys / a swipe for this app\n"
      "            event = " + O + ".mapPageKey(this, event);\n"
      "            if (event == null) return true;\n"
      "        }\n"
+     "        final boolean vdFastKey = " + O + ".sFastKey && !" + O + ".isInFastKey();\n"
+     "        if (vdFastKey) {\n"
+     "            event = " + O + ".filterFastKey(event);\n"
+     "            if (event == null) return true;\n"
+     "        }\n"
      "        final int keyCode = event.getKeyCode();\n"),
+    (B + "com/android/internal/policy/DecorView.java",
+     "            final boolean handled = cb != null && mFeatureId < 0 ? cb.dispatchKeyEvent(event)\n"
+     "                    : super.dispatchKeyEvent(event);\n"
+     "            if (handled) {\n"
+     "                return true;\n"
+     "            }\n"
+     "        }",
+     "            final boolean handled = cb != null && mFeatureId < 0 ? cb.dispatchKeyEvent(event)\n"
+     "                    : super.dispatchKeyEvent(event);\n"
+     "            if (vdFastKey && isDown && handled && " + O + ".afterFastKeyDown(this, event)) {\n"
+     "                return true;\n"
+     "            }\n"
+     "            if (handled) {\n"
+     "                return true;\n"
+     "            }\n"
+     "        }"),
     (B + "android/webkit/WebView.java",
      "    public void setWebViewClient(WebViewClient client) {\n        checkThread();\n        mProvider.setWebViewClient(client);\n",
      "    public void setWebViewClient(WebViewClient client) {\n        checkThread();\n"

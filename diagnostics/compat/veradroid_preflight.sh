@@ -72,8 +72,9 @@ if [ -n "$FV" ]; then
     n=$(printf '%s\n' "$FV" | awk -F. '{printf "%d%03d%03d", $1, $2, $3}')
     # Vera's official page now lists PW6 through 5.20.1. 5.19.5 is the only
     # combination we have actually tested; 5.20.1 is therefore EXPERIMENTAL.
-    if [ "$n" -lt 5018000 ] || [ "$n" -gt 5020001 ]; then
-        refuse "firmware $FV outside Vera range 5.18.0-5.20.1"
+    case "$(cat /proc/device-tree/compatible 2>/dev/null | tr '\0' ' ')" in *imx7d-zelda*) fw_lo=5013000 ;; *) fw_lo=5018000 ;; esac
+    if [ "$n" -lt "$fw_lo" ] || [ "$n" -gt 5020001 ]; then
+        refuse "firmware $FV outside Vera range"
     fi
 fi
 
@@ -91,6 +92,7 @@ case "$MODEL" in
     *rossini*) DEV=kt6; experimental "KT6 profile is simulated only; no real-device verification" ;;
     *cava*) DEV=kt5; experimental "KT5 profile is simulated only; no real-device verification" ;;
     *barolo*) DEV=ks; experimental "Scribe profile is simulated only; rotation/stylus not adapted" ;;
+    *imx7d-zelda*) DEV=oa2; experimental "Oasis 2/3 uses 32-bit k49/a7-512 profile" ;;
     *pisco*) refuse "KS2 has no validated resolution/profile" ;;
     '') experimental "device-tree model missing; assuming PW6" ;;
     *) experimental "unknown device-tree model: $MODEL" ;;
@@ -128,6 +130,10 @@ case "$DEV" in
             1860,2480|1860,4960|2480,1860|2480,3720|2480,4960) ;;
             *) refuse "framebuffer ${FBW}x${FBH}, expected Scribe 1860x2480/4960" ;;
         esac ;;
+    oa2|ko3)
+        if [ "$FBW" != "1264" ] || [ "$FBH" -lt 1680 ]; then
+            refuse "framebuffer ${FBW}x${FBH}, expected Oasis 2/3 1264x1680/3360"
+        fi ;;
     *)
         if [ "$FBW" != "1272" ] || [ "$FBH" -lt 1696 ]; then
             refuse "framebuffer ${FBW}x${FBH}, expected 1272x1696/3392"

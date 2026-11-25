@@ -8,6 +8,13 @@ input_find() {   # $1 = 设备名（正则）
         m && /^H: Handlers=/ { for (i = 1; i <= NF; i++) if (match($i, /event[0-9]+$/)) { print "/dev/input/" substr($i, RSTART); exit } }' /proc/bus/input/devices
 }
 touch_setup() {
+    if [ -n "${PAGE_KEYS:-}" ]; then
+        KFB_KEYS=$(input_find "\"$PAGE_KEYS\"")
+        [ -n "$KFB_KEYS" ] && chmod 666 $KFB_KEYS
+        export KFB_KEYS
+        type page_keys_layout >/dev/null 2>&1 && page_keys_layout
+        return 0
+    fi
     KFB_KEYS=$(input_find '"kindle-input-pt"')
     # kindle-input-pt（5.20 的 input_manager 建的虚拟设备，Kindle Remote 的键从这里出来）的按键位图是全部按键，包括 BTN_STYLUS /
     # BTN_TOOL_PEN：Android 7.1 的 EventHub 把它当成“外接手写笔”，触摸屏随之进入手写笔融合模式，每次手指按下都先等 72 ms
@@ -612,6 +619,7 @@ run_in_ns() {
     DEMO=; [ -f $R/.demo ] && DEMO=1
     [ -z "$DEMO" ] && mount -o remount,ro,bind $R
     mount -t tmpfs -o nosuid,mode=755 tmpfs $R/dev || exit 1
+    : > $R/dev/.coldboot_done
     for n in null zero full tty random urandom kmsg fuse; do
         [ -e /dev/$n ] && touch $R/dev/$n && mount --bind /dev/$n $R/dev/$n
     done
@@ -649,6 +657,7 @@ run_in_ns() {
     mkdir -p $R/dev/socket $R/dev/input $R/dev/kfb $R/dev/pts $R/dev/__properties__
     # 内核 < 3.17 没有 memfd：ashmem 退回到这块 tmpfs 上的已删除文件（libcutils/ashmem-dev.c、vdshim.c）
     mkdir -p $R/dev/vdshm && chmod 1777 $R/dev/vdshm
+    for d in "$TOUCH" "$KEYS" "$PTKEYS"; do [ -c "$d" ] && chmod 666 "$d" 2>/dev/null; done
     [ -n "$TOUCH" ] && { touch $R/dev/input/event0; mount --bind "$TOUCH" $R/dev/input/event0; }
     [ -n "$KEYS" ]  && { touch $R/dev/input/event1; mount --bind "$KEYS" $R/dev/input/event1; }
     [ -n "$PTKEYS" ] && { touch $R/dev/input/event2; mount --bind "$PTKEYS" $R/dev/input/event2; }   # Kindle 的翻页键 kindle-input-pt
@@ -751,6 +760,7 @@ run_in_ns() {
         cd $R && pivot_root . old && cd / && umount -l /old && rmdir /old 2>/dev/null
         exec /init
     fi
+    vd_art_stack $R/system/build.prop
     if [ -n "$HOSTNS" ]; then
         cd $R && exec chroot $R /init --second-stage
     fi

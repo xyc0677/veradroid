@@ -59,7 +59,7 @@ public class HomeActivity extends Activity {
     static final String[] RESET_KEYS = { "KFB_SETTLE", "KFB_MODE", "KFB_FLASH", "KFB_CONTRAST", "KFB_DITHER", "KFB_INVERT", "KFB_LIGHTF", "KFB_DARKEN", "KFB_GESTURES",
         "RETURN_MODE", "KFB_ANIM_MODE", "KFB_ANIM_STEPS", "KFB_ANIM_DIR", "KFB_ANIM_MIN", "KFB_SMOOTH", "KFB_PACE", "KFB_HOLD", "KFB_CLEAN", "KFB_REAGL_MIN",
         "G_TL", "G_TR", "G_BL", "G_BR", "G_EDGE_BACK", "G_EDGE_PANEL", "G_TWO_TAP", "G_TWO_LONG", "G_TWO_BACK", "G_TWO_SLIDE", "G_BACK_EXCLUDE",
-        "G_EDGE_THIRDS", "G_EB_L", "G_EB_M", "G_EB_R", "G_EB_HOLD", "G_EB_HOLD_MS" };
+        "G_EDGE_THIRDS", "G_EB_L", "G_EB_M", "G_EB_R", "G_EB_HOLD", "G_EB_HOLD_MS", "PAGE_KEYS_FLIP", "PAGE_KEYS_MAP" };
 
     private final Handler handler = new Handler();
     private final List<ResolveInfo> apps = new ArrayList<ResolveInfo>();
@@ -137,6 +137,28 @@ public class HomeActivity extends Activity {
 
     /** 这是盖在应用上面的单独设置页（SettingsActivity），不是桌面。 */
     boolean standalone;
+    boolean closingToBack;
+    private static final List<ResolveInfo> sSharedApps = new ArrayList<ResolveInfo>();
+    private static final Map<String, Long> sSharedInstalled = new HashMap<String, Long>();
+    private static final Map<String, String> sSharedLabels = new HashMap<String, String>();
+    private static final Map<String, Drawable> sSharedIcons = new HashMap<String, Drawable>();
+    private static String sSharedIconKey = "";
+    private static long sSharedLoadedAt, sSharedGen;
+    private static int sSharedSort = -1;
+
+    private void seedFromSharedApps() {
+        synchronized (sSharedApps) {
+            if (sSharedLoadedAt == 0 || sSharedApps.isEmpty() || sSharedSort != prefs.getInt("sort", 0)) return;
+            apps.clear(); apps.addAll(sSharedApps);
+            installed.clear(); installed.putAll(sSharedInstalled);
+            appLabels.clear(); appLabels.putAll(sSharedLabels);
+            String ik = iconKey();
+            if (ik.equals(sSharedIconKey)) { iconCache.clear(); iconCache.putAll(sSharedIcons); iconCacheKey = ik; appsIconKey = ik; }
+            appsGen = Math.max(1, sSharedGen);
+            loadedSort = sSharedSort;
+            appsLoadedAt = sSharedLoadedAt;
+        }
+    }
 
     /**
      * 显示密度（宿主 appprof.sh：多看在前台时临时换成 320 × 屏宽 / 1080）：桌面自己不跟着重建。以前每换一次密度桌面整个重建一次——
@@ -209,7 +231,11 @@ public class HomeActivity extends Activity {
         Store.purgeLegacyCloud();
         getWindow().setBackgroundDrawable(new ColorDrawable(Color.WHITE));
         getWindow().setWindowAnimations(0);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR);
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        if (standalone) seedFromSharedApps();
         if (!standalone) {
         startService(new Intent(this, HostService.class));
         if (prefs.getBoolean("statusbar", true)) StatusBarService.start(this);
@@ -284,9 +310,24 @@ public class HomeActivity extends Activity {
     };
     private final Runnable reloadSoon = new Runnable() { @Override public void run() { reload(); } };
 
+    private final Runnable restoreBarFallback = new Runnable() {
+        @Override public void run() { if (!resumed && !StatusBarService.isSuppressed()) StatusBarService.sync(HomeActivity.this); }
+    };
+
     @Override protected void onStop() {
         super.onStop();
-        if (standalone) return;   // 设置页开了个子页面（Wi-Fi、统计……）：回来时还在原来那一页
+        handler.removeCallbacks(restoreBarFallback);
+        if (!resumed && !StatusBarService.isSuppressed()) StatusBarService.sync(this);
+        if (standalone) {
+            if (closingToBack) {
+                closingToBack = false;
+                tab = -1;
+                blocksReturn = -1;
+                if (blocks != null && Blocks.on(this) && blocks.current() != BlocksHome.ME) blocks.show(BlocksHome.ME);
+                else if (!Blocks.on(this) && inSettings && tab != -1) showSettings();
+            }
+            return;   // 设置页开了个子页面（Wi-Fi、统计……）：回来时还在原来那一页
+        }
         BlocksCards.stopListening(this);
         // coming back (back gesture out of an app) should show the app grid, not whatever page we were on last
         if (inSettings) { tab = -1; showHome(); }
@@ -330,13 +371,21 @@ public class HomeActivity extends Activity {
                 try { imm.hideSoftInputFromWindow(tok, 0); } catch (Throwable ignored) { }
             } }, "hide-ime").start();
         } }, 1000);
+        closingToBack = false;
+        handler.removeCallbacks(restoreBarFallback);
         StatusBarService.setSuppressed(true);
-        StatusBarService.refresh(this);
+        StatusBarService.sync(this);
+        Panel.closeOnDraw(page);
         HostLink.cmd("status");
         long tv = Theme.version();
         if (tv != themeVer) { themeVer = tv; wallApplied = ""; }   // 在传书网页换了壁纸 / 图标
         if (!standalone && shownStyle != null && !shownStyle.equals(styleName(Blocks.on(this)))) applyStyle(styleName(Blocks.on(this)));
-        if (standalone) { if (appsLoadedAt == 0) reload(); refreshStatus(); }
+        if (standalone) {
+            if (appsLoadedAt == 0) seedFromSharedApps();
+            if (appsLoadedAt == 0) { if (blocks != null) reloadAfterFirstDraw(); else reload(); }
+            refreshStatus();
+            if (blocks != null && Blocks.on(this)) blocks.dataChanged();
+        }
         else if (!inSettings) {
             // Returning from an app does not change the launcher list; keep the existing e-ink grid.
             if (appsLoadedAt == 0) { if (blocks != null) reloadAfterFirstDraw(); else reload(); }
@@ -382,24 +431,38 @@ public class HomeActivity extends Activity {
     }
 
     /** 这次离开主页是去开别的应用（不是自己的阅读器 / 设置页），回来时才取它的画面。 */
-    private boolean leftForApp, ownStart;
+    private boolean leftForApp, ownStart, ownStartSuppressesBar;
 
     /** 所有 startActivity 都走这里：记下打开的是不是 VeraHome 自己的页面（阅读器、统计、商店……）。 */
     @Override public void startActivityForResult(Intent intent, int requestCode, Bundle options) {
-        try { android.content.ComponentName cn = intent.getComponent(); ownStart = cn != null && getPackageName().equals(cn.getPackageName()); } catch (Throwable ignored) { }
+        ownStartSuppressesBar = false;
+        try {
+            android.content.ComponentName cn = intent.getComponent();
+            if (cn != null && getPackageName().equals(cn.getPackageName())) {
+                ownStart = true;
+                String cls = cn.getClassName();
+                ownStartSuppressesBar = cls != null && (cls.endsWith(".HomeActivity") || cls.endsWith(".SettingsActivity"));
+            } else if (getPackageName().equals(intent.getPackage()) && intent.hasCategory(Intent.CATEGORY_HOME)) {
+                ownStart = true;
+                ownStartSuppressesBar = true;
+            }
+        } catch (Throwable ignored) { }
         super.startActivityForResult(intent, requestCode, options);
     }
 
     @Override protected void onPause() {
         super.onPause();
         resumed = false;
+        boolean stayHidden = ownStartSuppressesBar || ReaderActivity.opening || closingToBack;
         if (Blocks.on(this) && !ownStart && !standalone) { leftForApp = true; BlocksCards.onLeaveHome(this); }
         ownStart = false;
+        ownStartSuppressesBar = false;
         handler.removeCallbacks(tick);
         if (timeReceiverOn) { try { unregisterReceiver(timeReceiver); } catch (Throwable ignored) { } timeReceiverOn = false; }
-        if (!ReaderActivity.opening) {   // 打开自带阅读器时由阅读器在第一页画出来时放出状态栏
+        if (!stayHidden) {
             StatusBarService.setSuppressed(false);
-            StatusBarService.refresh(this);
+            handler.removeCallbacks(restoreBarFallback);
+            handler.postDelayed(restoreBarFallback, 250);
         }
     }
 
@@ -1296,6 +1359,16 @@ public class HomeActivity extends Activity {
                         if (ik.equals(iconKey())) { iconCache.clear(); iconCache.putAll(icons); iconCacheKey = ik; }
                         appsLoadedAt = System.currentTimeMillis();
                         loadedSort = mode;
+                        synchronized (sSharedApps) {
+                            sSharedApps.clear(); sSharedApps.addAll(apps);
+                            sSharedInstalled.clear(); sSharedInstalled.putAll(installed);
+                            sSharedLabels.clear(); sSharedLabels.putAll(appLabels);
+                            sSharedIcons.clear(); sSharedIcons.putAll(iconCache);
+                            sSharedIconKey = iconCacheKey;
+                            sSharedGen = appsGen;
+                            sSharedSort = loadedSort;
+                            sSharedLoadedAt = appsLoadedAt;
+                        }
                         if (same) gridRenderedAt = appsLoadedAt; else renderGrid();
                         if (blocks != null) blocks.appsChanged();
                     }
@@ -1344,21 +1417,42 @@ public class HomeActivity extends Activity {
         i.setClassName(pkg, ri.activityInfo.name);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
         try {
-            HostLink.cmd("appdirs " + pkg);
+            ActivityManager am = null;
+            int warmTaskId = -1;
+            try {
+                am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                List<ActivityManager.RunningTaskInfo> tasks = am != null ? am.getRunningTasks(12) : null;
+                if (tasks != null) {
+                    for (ActivityManager.RunningTaskInfo t : tasks) {
+                        if (t.numActivities > 0 && ((t.topActivity != null && pkg.equals(t.topActivity.getPackageName()))
+                                || (t.baseActivity != null && pkg.equals(t.baseActivity.getPackageName())))) {
+                            warmTaskId = t.id;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) { }
+            boolean warm = warmTaskId >= 0;
+            if (!warm) HostLink.cmd("appdirs " + pkg);
             if (AppProf.host()) {
-                // 每个应用的显示设置（宿主 appprof.sh：用户的 / 内置推荐）在应用画第一帧之前换好；显示桥挡住纯色的启动窗口
                 HostService.launchedPkg = pkg;
-                AppProf.launching(pkg);
+                AppProf.launching(pkg, warm);
             } else {
                 String spec = prefs.getString("appdisp_" + pkg, "");
                 if (spec == null) spec = "";
                 if (spec.length() > 0) HostLink.cmd("appdisp " + pkg + "|" + spec);
             }
-            AppFont.forForeground(this, pkg, null);   // 启动前就换好字号，免得应用画完一遍再重排一遍
-            startActivity(i);
-            // JNI/native apps can take a while to paint; ask the host for one
-            // full GC16 after the launch so e-ink does not stay on the old screen.
-            handler.postDelayed(new Runnable() { @Override public void run() { HostLink.cmd("clear"); } }, 1500);
+            AppFont.forForeground(this, pkg, null);
+            boolean moved = false;
+            if (warm && am != null) {
+                try { am.moveTaskToFront(warmTaskId, 0); moved = true; } catch (Throwable ignored) { }
+            }
+            if (!moved) startActivity(i);
+            overridePendingTransition(0, 0);
+            if (!moved) {
+                // JNI/native cold launches can take a while to paint; ask the host for one GC16 only on cold launch
+                handler.postDelayed(new Runnable() { @Override public void run() { HostLink.cmd("clear"); } }, 1500);
+            }
         } catch (Exception e) { say("启动失败：" + e.getMessage()); }
     }
 
@@ -1798,7 +1892,7 @@ public class HomeActivity extends Activity {
                     final String code = input.getText().toString().trim();
                     if (!code.matches("\\d{6}")) { say("请输入 6 位数字"); return; }
                     Update.bind(HomeActivity.this, code, new Update.BindResult() {
-                        @Override public void done(boolean ok, String message) {
+                        @Override public void done(final boolean ok, String message) {
                             say(message);
                             new VeraDialog.Builder(HomeActivity.this)
                                 .title(ok ? "绑定成功" : "绑定失败")
@@ -2124,6 +2218,13 @@ public class HomeActivity extends Activity {
             hostChoice(list, host, "深色加深", Panel.DARKEN_DESC, "KFB_DARKEN", ONOFF_L, ONOFF_V, "0");
             break;
         case 2:
+            if ("1".equals(host.get("PAGE_KEYS_HW"))) {
+                section(list, "实体翻页键");
+                hostChoice(list, host, "上下翻页键对换", "对调机身上两个实体翻页键的功能（默认：上键下一页、下键上一页；开启后：上键上一页、下键下一页），立即生效。",
+                    "PAGE_KEYS_FLIP", new String[] { "关（默认）", "开（上下对换）" }, new String[] { "0", "1" }, "0");
+                hostChoice(list, host, "实体翻页键键值", "微信读书等阅读应用请在应用设置里开启“音量键翻页”；不认音量键的应用可改成翻页键或方向键，立即生效。",
+                    "PAGE_KEYS_MAP", new String[] { "音量键（推荐）", "翻页键", "方向键" }, new String[] { "volume", "page", "dpad" }, "volume");
+            }
             section(list, "导航");
             navModeChoice(list);
             hostChoice(list, host, "手势提示", "识别到手势时在屏幕边上闪一下提示；应用卡住、2 秒没反应时提示怎么回到 Kindle。", "GESTURE_HINT",

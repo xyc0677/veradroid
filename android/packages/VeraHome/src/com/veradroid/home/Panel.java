@@ -45,19 +45,45 @@ final class Panel {
     /** 打开面板（已经开着就什么都不做）。任何线程以外的地方都从主线程调。 */
     /** 打开面板时前台的 activity（包名/类名，不算 PanelActivity）。前台换成别的 activity（按了 HOME、切了应用、开了新页面）就收起面板。 */
     static volatile String openedOver;
+    static volatile long lastOpenAt;
+    static boolean justOpened() { return isOpen() && android.os.SystemClock.uptimeMillis() - lastOpenAt < 650; }
+    private static final java.util.concurrent.ExecutorService TOP_EXEC = java.util.concurrent.Executors.newSingleThreadExecutor(
+        new java.util.concurrent.ThreadFactory() {
+            @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "panel-top"); t.setDaemon(true); return t; }
+        });
+
     static void onForeground(String act) {   // HostService 调（主线程）：前台的 activity 变了
         if (act == null || act.endsWith("/com.veradroid.home.PanelActivity")) return;
         if (openedOver != null && !act.equals(openedOver) && isOpen()) { android.util.Log.i("VeraHome", "panel: foreground " + act + " (opened over " + openedOver + ") - closing"); close(); }
     }
 
+    static void prewarm(Context c) {
+        try {
+            if (Blocks.on(c)) BlocksPanel.prewarm(c);
+            else {
+                Context app = c.getApplicationContext();
+                if (instance == null) instance = new Panel(new android.view.ContextThemeWrapper(app, android.R.style.Theme_Holo_Light_NoActionBar));
+                instance.warmAttach();
+            }
+        } catch (Throwable t) { android.util.Log.w("VeraHome", "panel prewarm: " + t); }
+    }
+
     static void open(Context c) {
-        // 当场查一次前台：HostService.fgAct 要等它下一次前台检查才更新（刚从统计页、设置页回到桌面时还是旧页面），
-        // 拿旧值当“打开时在前台的页面”，下一次检查一看前台“变了”就把刚打开的面板收起（Voyage 模拟器：打开 2.5 秒自己收起）
-        String top = HostService.topActivity(c);
-        openedOver = top != null && !top.endsWith("/com.veradroid.home.PanelActivity") ? top : HostService.fgAct;
+        final Context app = c.getApplicationContext();
+        lastOpenAt = android.os.SystemClock.uptimeMillis();
+        if (HostService.fgAct != null && !HostService.fgAct.endsWith("/com.veradroid.home.PanelActivity")) {
+            openedOver = HostService.fgAct;
+        }
+        /* Query AMS topActivity off the UI thread so ActivityManager lock contention can never stall panel first draw */
+        TOP_EXEC.execute(new Runnable() {
+            @Override public void run() {
+                if (!isOpen()) return;
+                String top = HostService.topActivity(app);
+                if (top != null && !top.endsWith("/com.veradroid.home.PanelActivity") && isOpen()) openedOver = top;
+            }
+        });
         if (Blocks.on(c)) { if (instance != null && instance.showing) instance.finish(); BlocksPanel.open(c); return; }
         BlocksPanel.close();
-        Context app = c.getApplicationContext();
         String conf = QUICK_DEFAULT, name = "";
         try { android.content.SharedPreferences sp = Store.prefs(app, "home"); conf = sp.getString("quick", QUICK_DEFAULT); name = sp.getString("panelname", ""); } catch (Throwable ignored) { }
         // 设置里改了快捷按钮 / 面板名称：常驻的那份是按旧配置搭的，丢掉重搭
@@ -66,7 +92,24 @@ final class Panel {
         instance.open();
     }
 
-    static void close() { openedOver = null; if (instance != null) instance.finish(); BlocksPanel.close(); }
+    private static final android.os.Handler DEFER_H = new android.os.Handler(android.os.Looper.getMainLooper());
+    private static final Runnable DEFER_CLOSE = new Runnable() { @Override public void run() { close(); } };
+    static void close() { DEFER_H.removeCallbacks(DEFER_CLOSE); openedOver = null; if (instance != null) instance.finish(); BlocksPanel.close(); }
+    static void closeDeferred() { openedOver = null; DEFER_H.removeCallbacks(DEFER_CLOSE); DEFER_H.postDelayed(DEFER_CLOSE, 750); }
+    static void closeOnDraw(final View root) {
+        if (!isOpen()) return;
+        if (root == null) { close(); return; }
+        Perf.whenAttached(root, new Runnable() { @Override public void run() {
+            root.postOnAnimation(DEFER_CLOSE);
+            root.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    root.getViewTreeObserver().removeOnPreDrawListener(this);
+                    close();
+                    return true;
+                }
+            });
+        } });
+    }
     static boolean isOpen() { return (instance != null && instance.showing) || BlocksPanel.isOpen(); }
 
     private final Context ctx;
@@ -210,6 +253,25 @@ final class Panel {
 
     // 面板打开 / 收起时的一次性显示提示（epd.c HINT）：这段时间里变化超过屏幕 PANEL_HINT_PCT % 的帧用 REAGL，不用 DU
     static final int PANEL_HINT_MS = 1200, PANEL_HINT_PCT = 20;
+
+    private void warmAttach() {
+        if (attached || showing) return;
+        paintClock();
+        readStatus();
+        try {
+            android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            int h = (int) (dm.heightPixels * 0.52);
+            frame.measure(View.MeasureSpec.makeMeasureSpec(dm.widthPixels, View.MeasureSpec.EXACTLY),
+                          View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
+            frame.layout(0, 0, frame.getMeasuredWidth(), frame.getMeasuredHeight());
+            android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888);
+            frame.draw(new android.graphics.Canvas(b));
+            b.recycle();
+        } catch (Throwable ignored) { }
+        frame.setVisibility(View.GONE);
+        try { wm.addView(frame, params()); attached = true; }
+        catch (Throwable t) { android.util.Log.w("VeraHome", "panel prewarm: " + t); }
+    }
 
     private void open() {
         if (showing) return;
@@ -544,8 +606,8 @@ final class Panel {
         else if ("home".equals(id)) openHome(false);
         else if ("anim".equals(id)) toggleAnim();
         else if ("lightf".equals(id)) { lightfOn = lightfOn > 0 ? 0 : lightfLast; HostLink.settings("KFB_LIGHTF=" + lightfOn + "\n"); paintToggles(); }
-        else if ("settings".equals(id)) { finish(); SettingsActivity.open(ctx); }   // 盖在当前应用上面，返回回到它
-        else if ("switch".equals(id)) { startActivity(new Intent(ctx, SwitcherActivity.class)); finish(); }
+        else if ("settings".equals(id)) { closeDeferred(); SettingsActivity.open(ctx); }   // 盖在当前应用上面，返回回到它
+        else if ("switch".equals(id)) { closeDeferred(); startActivity(new Intent(ctx, SwitcherActivity.class)); }
         else if ("restart".equals(id)) { HostLink.cmd("restart"); finish(); }
         else if ("stop".equals(id)) HostLink.cmd("stop");
         else if ("clean".equals(id)) { final String prev = Cleaner.previousApp(ctx); finish(); cleanNow(ctx, prev); }
@@ -559,7 +621,7 @@ final class Panel {
     }
 
     private void openHome(boolean settings) {
-        finish();
+        closeDeferred();
         Intent i = HomeActivity.homeIntent(ctx);
         if (settings) i.putExtra("settings", true);
         startActivity(i);

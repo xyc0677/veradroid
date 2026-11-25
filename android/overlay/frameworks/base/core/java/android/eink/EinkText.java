@@ -21,32 +21,43 @@ import android.os.SystemProperties;
 public final class EinkText {
     private EinkText() { }
 
-    private static volatile boolean sInit;
-    private static boolean sOn, sBold;
+    // 0 = uninitialised, 1 = disabled (fast inline return without ARMv7 dmb barrier), -1 = enabled
+    private static int sState;
+    private static boolean sBold;
     private static int sMax = 176;
 
     private static final long CHANGED_COLOR = 1L << 32, CHANGED_BOLD = 1L << 33;
 
-    private static void init() {
+    private static int init() {
         String pkg = ActivityThread.currentPackageName();
-        if (pkg == null) return;            // zygote preload / not bound yet: try again later
+        if (pkg == null) return 0;          // zygote preload / not bound yet: try again later
         Application app = ActivityThread.currentApplication();
-        if (app == null) return;
+        if (app == null) return 0;
         ApplicationInfo ai = app.getApplicationInfo();
         String v = SystemProperties.get("persist.vd.tc", "0");
         boolean on;
         if ("1".equals(v)) on = ai != null && (ai.flags & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) == 0;
         else on = !"0".equals(v) && EinkConfig.inList(v, pkg);
-        sOn = on;
         sBold = on && SystemProperties.getBoolean("persist.vd.tc.bold", false);
         sMax = Math.max(0, Math.min(255, SystemProperties.getInt("persist.vd.tc.max", 176)));
-        sInit = true;
+        int st = on ? -1 : 1;
+        sState = st;
+        return st;
     }
 
-    /** Before a text draw: maybe darken / embolden; returns what to undo in {@link #end}. */
+    /** Before a text draw: fast no-barrier inline exit when disabled; otherwise darken / embolden. */
     public static long begin(Paint p) {
-        if (!sInit) { init(); if (!sInit) return 0; }
-        if (!sOn || p == null) return 0;
+        int st = sState;
+        if (st > 0) return 0;
+        return beginSlow(p, st);
+    }
+
+    private static long beginSlow(Paint p, int st) {
+        if (st == 0) {
+            st = init();
+            if (st >= 0) return 0;
+        }
+        if (p == null) return 0;
         long r = 0;
         int c = p.getColor();
         int a = c >>> 24;

@@ -42,6 +42,7 @@ public final class EpdHint {
     private static long sPendingAt;
     private static volatile char sDefault;        // process default (setDefaultUpdateMode), 0 = auto
     private static volatile boolean sFast;        // enableA2 / applyApplicationFastMode
+    private static volatile long sLastBoostAt;
     private static final int[] sLoc = new int[2];
 
     private EpdHint() { }
@@ -121,6 +122,14 @@ public final class EpdHint {
 
     /** refreshScreen: redraw what is on the panel now, flashing for full / GC modes. */
     public static void refresh(int mode) { send(letter(mode) == 'F' ? "FULL" : "REDRAW"); }
+
+    /** Pre-warm EPDC rails and boost CPU to max freq for 1.8 s on Activity transitions. */
+    public static void boost() {
+        long now = SystemClock.uptimeMillis();
+        if (now - sLastBoostAt < 350) return;
+        sLastBoostAt = now;
+        send("BOOST");
+    }
 
     /** One line to the bridge; never blocks (no reader / full pipe: dropped). */
     public static void send(String line) {

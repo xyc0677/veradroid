@@ -36,6 +36,7 @@ import java.util.Locale;
 public class StatusBarService extends Service {
     private static final String TAG = "VeraStatusBar";
     private static boolean suppressed = false;   // Home / Panel 在前台时为 true
+    private static StatusBarService instance;
     private WindowManager wm;
     private View bar;
     private View reserve;                       // 看不见的 TYPE_STATUS_BAR：只为让系统给应用留出顶部
@@ -60,8 +61,41 @@ public class StatusBarService extends Service {
 
     public static void start(Context c) { c.startService(new Intent(c, StatusBarService.class)); }
     public static void stop(Context c) { c.stopService(new Intent(c, StatusBarService.class)); }
-    public static void setSuppressed(boolean v) { suppressed = v; }
-    public static void refresh(Context c) { c.startService(new Intent(c, StatusBarService.class)); }
+    private static final Handler mainH = new Handler(android.os.Looper.getMainLooper());
+    private static final Runnable deferredUnsuppress = new Runnable() {
+        @Override public void run() { if (!suppressed) sync(null); }
+    };
+    public static void setSuppressed(boolean v) {
+        suppressed = v;
+        if (v) mainH.removeCallbacks(deferredUnsuppress);
+    }
+    public static boolean isSuppressed() { return suppressed; }
+    public static void refresh(Context c) {
+        if (suppressed && c instanceof android.app.Activity) {
+            android.view.Window w = ((android.app.Activity) c).getWindow();
+            w.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            w.clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR);
+            w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        }
+        if (instance != null) {
+            if (suppressed) sync(c);
+            else { mainH.removeCallbacks(deferredUnsuppress); mainH.postDelayed(deferredUnsuppress, 180); }
+        } else if (c != null) {
+            c.startService(new Intent(c, StatusBarService.class));
+        }
+    }
+    public static void sync(Context c) {
+        mainH.removeCallbacks(deferredUnsuppress);
+        if (suppressed && c instanceof android.app.Activity) {
+            android.view.Window w = ((android.app.Activity) c).getWindow();
+            w.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            w.clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR);
+            w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        }
+        StatusBarService s = instance;
+        if (s != null) { if (s.enabled()) s.refreshNow(); else s.hide(); }
+        else if (c != null && !suppressed && Store.prefs(c, "home").getBoolean("statusbar", true)) c.startService(new Intent(c, StatusBarService.class));
+    }
     /** 系统按真的状态栏给应用留出顶部了（占位窗口加上了）。 */
     static boolean reserving() { return reserving; }
 
@@ -77,6 +111,7 @@ public class StatusBarService extends Service {
 
     @Override public IBinder onBind(Intent i) { return null; }
     @Override public int onStartCommand(Intent i, int flags, int startId) {
+        instance = this;
         boolean on = Store.prefs(this, "home").getBoolean("statusbar", true);
         if (!on) { hide(); stopSelf(); return START_NOT_STICKY; }
         refreshNow();
@@ -95,9 +130,16 @@ public class StatusBarService extends Service {
     }
 
     private void refreshNow() {
-        if (!enabled() || suppressed) { hide(); return; }
-        if (bar != null && builtBlocks != Blocks.on(this)) hide();   // 界面风格换了：按新风格重搭这一条
+        if (!enabled()) { hide(); return; }
+        if (suppressed) {
+            if (wm == null) wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            addReserve(height(this));
+            if (bar != null && bar.getVisibility() != View.GONE) bar.setVisibility(View.GONE);
+            return;
+        }
+        if (bar != null && builtBlocks != Blocks.on(this)) removeBar();
         show();
+        if (bar != null && bar.getVisibility() != View.VISIBLE) bar.setVisibility(View.VISIBLE);
         // 主题：statusbar.json 可以关掉时间/电量、改时间格式、在左边加一段文字
         org.json.JSONObject cfg = Theme.statusBar();
         if (clock != null) {
@@ -115,7 +157,7 @@ public class StatusBarService extends Service {
             int p = -1;
             try {
                 BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
-                p = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                p = Math.min(100, bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY));
             } catch (Throwable ignored) { }
             String battText = p >= 0 ? p + "%" : "";
             if (!battText.equals(String.valueOf(batt.getText()))) batt.setText(battText);
@@ -195,8 +237,10 @@ public class StatusBarService extends Service {
                         if (e.getRawY() - downY > dp(8)) dragging = true;
                         return true;
                     case MotionEvent.ACTION_UP:
-                        if (dragging || e.getRawY() - downY > dp(8)) openPanel();
-                        else openPanel();
+                        openPanel();
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        dragging = false;
                         return true;
                 }
                 return false;
@@ -213,7 +257,7 @@ public class StatusBarService extends Service {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT);
+                PixelFormat.OPAQUE);
         lp.gravity = Gravity.TOP | Gravity.LEFT;
         try {
             wm.addView(wrap, lp);
@@ -281,6 +325,7 @@ public class StatusBarService extends Service {
     private int dp(int v) { return Ui.dp(this, v); }
 
     @Override public void onDestroy() {
+        if (instance == this) instance = null;
         handler.removeCallbacks(tick);
         if (timeReceiverOn) { try { unregisterReceiver(timeReceiver); } catch (Throwable ignored) { } timeReceiverOn = false; }
         hide();

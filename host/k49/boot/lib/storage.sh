@@ -19,7 +19,7 @@ ST_NOTIFY=/mnt/base-us/veradroid/state/resize.notify     # 还没告诉用户的
 ST_LOG=/mnt/base-us/veradroid/logs/resize.log
 ST_LOCK=/dev/shm/veradroid/resize.lock             # 正在调整（tmpfs：重启就没了，标记还在）
 ST_KEEP=256          # 至少给 Kindle 留这么多 MB
-ST_LOW=200           # 镜像里可用空间低于这么多 MB 就自动扩
+ST_LOW=320           # 镜像里可用空间低于这么多 MB 就自动扩
 ST_STEP=512          # 自动扩容一次扩多少 MB
 ST_FATCAP=4095       # FAT 上单个文件的上限（4 GB - 1 字节）
 ST_HARDMAX=32768     # 再大没有意义
@@ -28,8 +28,8 @@ ST_MINIMUM=768       # 不管用了多少，最小也不低于这个
 st_log() { echo "[$(date '+%F %T')] $*" >> $ST_LOG 2>/dev/null; type t >/dev/null 2>&1 && t "storage: $*" >&2; return 0; }
 # 工具：固件自带的优先（和固件的内核、文件系统特性是一套），没有才用整包里带的静态版
 st_tool() {
-    command -v "$1" 2>/dev/null && return 0
     [ -x "$VD/bin/$1" ] && { echo "$VD/bin/$1"; return 0; }
+    command -v "$1" 2>/dev/null && return 0
     return 1
 }
 st_num() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ ${#1} -le 6 ]; }
@@ -43,6 +43,7 @@ st_mounted() { grep -q " $SYS " /proc/mounts; }
 st_sb() { dd if="$SYSTEM_IMG" bs=1 skip=$((1024 + $1)) count=4 2>/dev/null | od -An -tu4 2>/dev/null | tr -d ' \n'; }
 # 文件系统自己认为的大小（KB）。读不出来（不是 ext2/3/4）就什么都不输出。
 st_fs_kb() {
+    st_mounted || { type img_drop_file_cache >/dev/null 2>&1 && img_drop_file_cache; }
     magic=$(dd if="$SYSTEM_IMG" bs=1 skip=1080 count=2 2>/dev/null | od -An -tu2 2>/dev/null | tr -d ' \n')
     [ "$magic" = 61267 ] || return 1                     # 0xEF53
     b=$(st_sb 4); l=$(st_sb 24)
@@ -61,6 +62,7 @@ st_battery_ok() {   # 离线调整要几分钟，中途没电最伤：电量不�
 st_auto_on() { ! grep -q '^STORAGE_AUTO=0' "$SYS/settings.conf" 2>/dev/null; }
 # 能不能在线扩：ext4 正挂在唯一的一个 loop 设备上、有 resize2fs、losetup 认识 -c
 st_online_ok() {
+    case "$(uname -r)" in 3.*|4.1.*) return 1 ;; esac
     [ "$(st_fstype)" = ext4 ] || return 1
     [ "$(img_loops | wc -l)" = 1 ] || return 1
     st_tool resize2fs >/dev/null || return 1
@@ -161,6 +163,7 @@ st_cut() {
 }
 # 完整检查（镜像必须没挂着）。0 = 干净或已修好
 st_fsck() {
+    type img_drop_file_cache >/dev/null 2>&1 && img_drop_file_cache
     f=$(st_tool e2fsck) || { st_log "no e2fsck"; return 9; }
     "$f" -f -y "$SYSTEM_IMG" >> $ST_LOG 2>&1; rc=$?
     if [ $rc -ge 4 ]; then echo "-- e2fsck -f -y rc=$rc, once more" >> $ST_LOG; "$f" -f -y "$SYSTEM_IMG" >> $ST_LOG 2>&1; rc=$?; fi
@@ -192,7 +195,9 @@ st_needs_fill() {
 }
 st_fill() {   # 镜像没挂着、刚 e2fsck -f 过
     r=$(st_tool resize2fs) || return 1
-    "$r" "$SYSTEM_IMG" >> $ST_LOG 2>&1
+    "$r" "$SYSTEM_IMG" >> $ST_LOG 2>&1; sf_rc=$?
+    sync; type img_drop_file_cache >/dev/null 2>&1 && img_drop_file_cache
+    return $sf_rc
 }
 
 # storage_mount 在挂载前调：把上次没做完的调整收尾。返回 1 = 另一个进程正在调整，现在不能挂。

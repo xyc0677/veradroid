@@ -13,12 +13,13 @@ mkdir -p "$T/kfb"
 gcc -O2 -std=gnu99 -Wall -Wno-unused-function -pthread -DKFB_DIR="\"$T/kfb\"" -I"$R/tests/hwc/include" -I"$R/android/hwcomposer" \
     -o "$T/run" "$R/tests/hwc/run.c"
 rc=0
-for mode in ok nofb2; do
+for mode in ok nofb2 y8; do
     rm -f "$T/kfb"/*
     echo "64 48" > "$T/kfb/info"; echo 30 > "$T/kfb/hz"; echo 51 > "$T/kfb/hwc.dim"
     dd if=/dev/zero of="$T/kfb/fb" bs=$((64 * 48 * 4)) count=2 2>/dev/null
     mkfifo "$T/kfb/epd.fifo"
-    [ $mode = ok ] && : > "$T/kfb/fb2.ok"
+    [ $mode != nofb2 ] && : > "$T/kfb/fb2.ok"
+    [ $mode = y8 ] && : > "$T/kfb/y8.ok"
     "$T/run" "$T/kfb" $mode || rc=1
     [ $mode = nofb2 ] && [ -e "$T/kfb/fb2" ] && { echo "FAIL nofb2: the module created page 2"; rc=1; }
 done

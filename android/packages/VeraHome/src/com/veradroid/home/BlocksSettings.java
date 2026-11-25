@@ -167,6 +167,21 @@ final class BlocksSettings {
                 add(g, wideRow("暖光", "Warm light", warm));
             }
         }
+        if ("1".equals(cfg.get("PAGE_KEYS_HW"))) {
+            LinearLayout pk = group(c, "实体翻页键");
+            add(pk, Blocks.row(a, "上下翻页键对换", "对调机身两个翻页键方向，立即生效", toggle("1".equals(cfg.get("PAGE_KEYS_FLIP")), new Icons.Toggle.Listener() {
+                @Override public void onToggle(boolean on) {
+                    host("PAGE_KEYS_FLIP=" + (on ? 1 : 0));
+                    UiMode.guide(a, on ? "已开启上下翻页键对换（立即生效）" : "已恢复默认翻页键方向（立即生效）");
+                } })));
+            final String[] pkL = { "音量键", "翻页键", "方向键" };
+            final String[] pkV = { "volume", "page", "dpad" };
+            add(pk, Blocks.row(a, "翻页键键值", "阅读软件开启音量键翻页即可使用", new Blocks.Stepper(a, pkL, idx(pkV, cfg.get("PAGE_KEYS_MAP"), 0), new Blocks.Stepper.Listener() {
+                @Override public void onStep(int i) {
+                    host("PAGE_KEYS_MAP=" + pkV[i]);
+                    UiMode.guide(a, "实体翻页键键值已设为「" + pkL[i] + "」（立即生效）");
+                } })));
+        }
         final boolean expert = UiMode.isExpert(a);
         LinearLayout g = group(c, expert ? "刷新与画质" : "一键阅读场景");
         int sm = Math.max(0, Math.min(4, HostLink.num(cfg, "KFB_SMOOTH", 2)));
@@ -320,6 +335,21 @@ final class BlocksSettings {
         add(g, Blocks.navRow(a, "屏保", "休眠时显示的图片", new View.OnClickListener() {
             @Override public void onClick(View v) { a.startActivity(new Intent(a, ScreensaverActivity.class)); } }));
 
+        if ("1".equals(cfg.get("PAGE_KEYS_HW"))) {
+            LinearLayout pk = group(c, "实体翻页键");
+            add(pk, Blocks.row(a, "上下翻页键对换", "对调机身两个翻页键方向，立即生效", toggle("1".equals(cfg.get("PAGE_KEYS_FLIP")), new Icons.Toggle.Listener() {
+                @Override public void onToggle(boolean on) {
+                    host("PAGE_KEYS_FLIP=" + (on ? 1 : 0));
+                    UiMode.guide(a, on ? "已开启上下翻页键对换（立即生效）" : "已恢复默认翻页键方向（立即生效）");
+                } })));
+            final String[] pkL = { "音量键", "翻页键", "方向键" };
+            final String[] pkV = { "volume", "page", "dpad" };
+            add(pk, Blocks.row(a, "翻页键键值", "阅读软件开启音量键翻页即可使用", new Blocks.Stepper(a, pkL, idx(pkV, cfg.get("PAGE_KEYS_MAP"), 0), new Blocks.Stepper.Listener() {
+                @Override public void onStep(int i) {
+                    host("PAGE_KEYS_MAP=" + pkV[i]);
+                    UiMode.guide(a, "实体翻页键键值已设为「" + pkL[i] + "」（立即生效）");
+                } })));
+        }
         LinearLayout op = group(c, expert ? "输入与手势" : "输入法与系统更新");
         add(op, Blocks.navRow(a, "输入法切换", "启用或切换已安装的第三方输入法", new View.OnClickListener() {
             @Override public void onClick(View v) { a.startActivity(new Intent(a, ImeSettingsActivity.class)); a.overridePendingTransition(0, 0); } }));

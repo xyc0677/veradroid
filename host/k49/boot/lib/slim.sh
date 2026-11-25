@@ -120,6 +120,12 @@ slim_apply() {
             slim_prop_block | slim_block_set "$R/system/build.prop" && t "slim: build.prop updated ($(slim_prop_block | wc -l | tr -d ' ') props)"
         fi
         slim_prune
+        _hwf=$R/system/etc/permissions/handheld_core_hardware.xml
+        if [ -f "$_hwf" ] && grep -qE 'android\.software\.(print|backup|voice_recognizers)' "$_hwf" 2>/dev/null; then
+            [ -f "$SYS/slim-removed/handheld_core_hardware.xml" ] || { mkdir -p "$SYS/slim-removed" && cp -f "$_hwf" "$SYS/slim-removed/handheld_core_hardware.xml" 2>/dev/null || true; }
+            grep -vE 'android\.(software\.(print|backup|voice_recognizers|connectionservice)|hardware\.(camera|microphone|sensor\.compass))' "$_hwf" > "$W/hwf.slim" 2>/dev/null \
+                && chmod 644 "$W/hwf.slim" && mv -f "$W/hwf.slim" "$_hwf" 2>/dev/null || rm -f "$W/hwf.slim"
+        fi
     else
         : | slim_block_set "$R/init.kindle.rc" && t "slim: off, init.kindle.rc restored"
         : | slim_block_set "$R/system/build.prop" && t "slim: off, build.prop restored"

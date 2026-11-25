@@ -30,11 +30,17 @@ final class AppProf {
     /** 宿主认得每个应用的显示设置（appprof.sh）。 */
     static boolean host() { return new File(TABLE).exists(); }
 
+    private static long tableMtime = -1, tableLen = -1;
+    private static Map<String, String[]> tableCache;
+
     /** 合并后的表：包名（可以以 * 结尾 = 前缀）→ {来源 b|u, spec} */
-    static Map<String, String[]> table() {
+    static synchronized Map<String, String[]> table() {
+        File f = new File(TABLE);
+        long mt = f.lastModified(), ln = f.length();
+        if (tableCache != null && mt == tableMtime && ln == tableLen) return tableCache;
         Map<String, String[]> m = new LinkedHashMap<String, String[]>();
         try {
-            BufferedReader r = new BufferedReader(new FileReader(TABLE));
+            BufferedReader r = new BufferedReader(new FileReader(f));
             String line;
             while ((line = r.readLine()) != null) {
                 String[] a = line.trim().split("\\s+");
@@ -42,6 +48,9 @@ final class AppProf {
             }
             r.close();
         } catch (Exception ignored) { }
+        tableMtime = mt;
+        tableLen = ln;
+        tableCache = m;
         return m;
     }
 
@@ -109,9 +118,10 @@ final class AppProf {
     static void fg(String pkg) { HostLink.cmd("fg " + pkg); }
 
     /** 桌面自己要打开一个应用（点图标 / 切换应用 / 宿主的 ctl/app）：先换好显示参数，再让显示桥挡住纯色的启动窗口。 */
-    static void launching(String pkg) {
+    static void launching(String pkg) { launching(pkg, false); }
+    static void launching(String pkg, boolean warm) {
         if (!host()) return;
-        HostLink.epd("LAUNCH " + LAUNCH_MS);
+        HostLink.epd("LAUNCH " + (warm ? 0 : LAUNCH_MS));
         fg(pkg);
         // 记下宿主现在按哪个应用设置的：任务栈通知漏了（或应用秒退）时，回桌面照样会发 "fg home" 把密度换回来
         // （以前这里不记，profPkg 还是 "home"，回来时以为没变，多看的密度留了 30 秒）

@@ -221,21 +221,136 @@ cpu_gov_restore() {
 # 预编译文件，靠缺页读进来，4 KB 预读时冷启动很慢。PW6 实测（清掉缓存后）：微信读书冷启动 3.6–4.1 s -> 2.5–2.8 s，
 # 到界面可见 8.5–9.2 s -> 5.9–6.3 s；Android 开机 15.8 s -> 12.9 s。128 和 256/512/1024 没有差别，取最小的。
 # 只调大、不调小；原值记在内存盘里，stop 时恢复。
+
+perf_tune_on() {
+    [ "${PERF_TUNE:-0}" = 1 ] || return 0
+    if [ ! -f $W/blk_tune.saved ]; then
+        : > $W/blk_tune.saved
+        for b in /sys/block/mmcblk[0-9] /sys/block/loop[0-9]*; do
+            [ -d "$b/queue" ] || continue
+            case "$b" in */loop*) [ -s "$b/loop/backing_file" ] || continue ;; esac
+            for k in add_random iostats rotational rq_affinity; do
+                [ -w "$b/queue/$k" ] || continue
+                old=$(cat "$b/queue/$k" 2>/dev/null); [ -n "$old" ] || continue
+                want=0; [ "$k" = rq_affinity ] && want=2
+                [ "$old" = "$want" ] && continue
+                echo "$b/queue/$k $old" >> $W/blk_tune.saved
+                echo "$want" > "$b/queue/$k" 2>/dev/null || true
+            done
+            case "$b" in */mmcblk*)
+                if [ -w "$b/queue/scheduler" ]; then
+                    cur=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$b/queue/scheduler" 2>/dev/null)
+                    if [ "$cur" = cfq ] && grep -qw noop "$b/queue/scheduler" 2>/dev/null; then
+                        echo "$b/queue/scheduler $cur" >> $W/blk_tune.saved
+                        echo noop > "$b/queue/scheduler" 2>/dev/null || true
+                    fi
+                fi ;;
+            esac
+        done
+    fi
+    cg0=/sys/devices/system/cpu/cpu0/cpufreq
+    if [ -f "$cg0/scaling_available_governors" ] && grep -qw interactive "$cg0/scaling_available_governors" 2>/dev/null && [ ! -f $W/gov_perf.saved ]; then
+        cat "$cg0/scaling_governor" > $W/gov_perf.saved 2>/dev/null || true
+        for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$g" ] && echo interactive > "$g" 2>/dev/null || true; done
+        id=/sys/devices/system/cpu/cpufreq/interactive
+        if [ -d "$id" ]; then
+            : > $W/interactive.saved
+            mx=$(cat "$cg0/scaling_max_freq" 2>/dev/null)
+            for kv in hispeed_freq:${mx:-996000} go_hispeed_load:35 above_hispeed_delay:0 timer_rate:10000 min_sample_time:40000 io_is_busy:1; do
+                k=${kv%%:*}; v=${kv#*:}
+                [ -w "$id/$k" ] || continue
+                old=$(cat "$id/$k" 2>/dev/null); [ -n "$old" ] && [ "$old" != "$v" ] && echo "$id/$k $old" >> $W/interactive.saved
+                echo "$v" > "$id/$k" 2>/dev/null || true
+            done
+        fi
+    fi
+    od=/sys/devices/system/cpu/cpufreq/ondemand
+    if [ -d "$od" ] && [ ! -f $W/ondemand.saved ]; then
+        : > $W/ondemand.saved
+        for kv in sampling_rate:20000 up_threshold:75 io_is_busy:1 sampling_down_factor:2; do
+            k=${kv%%:*}; v=${kv#*:}
+            [ -w "$od/$k" ] || continue
+            old=$(cat "$od/$k" 2>/dev/null); [ -n "$old" ] || continue
+            [ "$old" = "$v" ] && continue
+            echo "$od/$k $old" >> $W/ondemand.saved
+            echo "$v" > "$od/$k" 2>/dev/null || true
+        done
+    fi
+    if [ -d /sys/devices/system/cpu/cpu1 ] && [ ! -f $W/irq_tune.saved ]; then
+        : > $W/irq_tune.saved
+        for irq in $(awk '/mmc0|\.usb|bcmsdh/{gsub(/:/,"",$1); print $1}' /proc/interrupts 2>/dev/null); do
+            af=/proc/irq/$irq/smp_affinity
+            [ -w "$af" ] || continue
+            old=$(cat "$af" 2>/dev/null | tr -d ' \n'); [ -n "$old" ] && [ "$old" != 2 ] || continue
+            echo 2 > "$af" 2>/dev/null && echo "$af $old" >> $W/irq_tune.saved || true
+        done
+    fi
+    if lowmem_ram 2>/dev/null && [ ! -f $W/vm_tune.saved ]; then
+        : > $W/vm_tune.saved
+        for kv in vfs_cache_pressure:50 dirty_background_ratio:5 dirty_ratio:15; do
+            k=/proc/sys/vm/${kv%%:*}; v=${kv#*:}
+            [ -w "$k" ] || continue
+            old=$(cat "$k" 2>/dev/null); [ -n "$old" ] && [ "$old" != "$v" ] && echo "$k $old" >> $W/vm_tune.saved
+            echo "$v" > "$k" 2>/dev/null || true
+        done
+    fi
+    return 0
+}
+perf_tune_restore() {
+    for sf in $W/blk_tune.saved $W/ondemand.saved $W/interactive.saved $W/irq_tune.saved $W/vm_tune.saved; do
+        [ -f "$sf" ] || continue
+        while read p old; do [ -w "$p" ] && echo "$old" > "$p" 2>/dev/null || true; done < "$sf"
+        rm -f "$sf"
+    done
+    if [ -f $W/gov_perf.saved ]; then
+        prev=$(cat $W/gov_perf.saved)
+        for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$g" ] && echo "$prev" > "$g" 2>/dev/null || true; done
+        rm -f $W/gov_perf.saved
+    fi
+    return 0
+}
+dedup_start() {
+    case "$(uname -r)" in 3.*|4.1.*) ;; *) return 0 ;; esac
+    [ -d /sys/block/vdblk0 ] && { t "cache dedup: skipped (vdblk0 zero-cache direct remap active)"; return 0; }
+    [ "${CACHE_DEDUP:-1}" = 1 ] && [ -x "$VD/bin/vdloopdio" ] && [ -f "$SYSTEM_IMG" ] || return 0
+    d=$(awk '$2 == "/mnt/base-us" {print $1}' /proc/mounts | tail -1)
+    n=$(echo "${d##*/}" | sed 's/^loop//'); bk=
+    case "$d" in /dev/loop*) bk=$(cat /sys/block/loop$n/loop/backing_file 2>/dev/null) ;; esac
+    case "$bk" in /dev/*) [ -b "$bk" ] || bk= ;; *) bk= ;; esac
+    alive $W/dedup.pid && return 0
+    (
+        while [ -f $W/pid ]; do
+            if [ -f $W/frozen ] || [ -f $W/saver_frozen ]; then sleep 30; continue; fi
+            "$VD/bin/vdloopdio" --drop "$SYSTEM_IMG" $bk 2>/dev/null
+            sleep ${CACHE_DEDUP_S:-3}
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    echo $! > $W/dedup.pid
+    t "cache dedup: dropping duplicate pages of $SYSTEM_IMG${bk:+ and $bk} every ${CACHE_DEDUP_S:-3}s"
+}
+dedup_stop() {
+    p=$(cat $W/dedup.pid 2>/dev/null); rm -f $W/dedup.pid
+    [ -n "$p" ] && kill "$p" 2>/dev/null
+    return 0
+}
+
 readahead_on() {
+    perf_tune_on
     [ "${READAHEAD_KB:-128}" -gt 0 ] 2>/dev/null || return 0
     : > $W/readahead.saved
-    for b in /sys/block/mmcblk0 /sys/block/loop[0-9]*; do
+    for b in /sys/block/mmcblk[0-9] /sys/block/vdblk[0-9]* /sys/block/loop[0-9]*; do
         f=$b/queue/read_ahead_kb
         [ -w "$f" ] || continue
         case "$b" in */loop*) [ -s "$b/loop/backing_file" ] || continue ;; esac
         old=$(cat "$f" 2>/dev/null); [ -n "$old" ] || continue
-        [ "$old" -lt "${READAHEAD_KB:-128}" ] 2>/dev/null || continue
+        case "$b" in */vdblk*) [ "$old" != "${READAHEAD_KB:-128}" ] ;; *) [ "$old" -lt "${READAHEAD_KB:-128}" ] 2>/dev/null ;; esac || continue
         echo "$b $old" >> $W/readahead.saved
         echo "${READAHEAD_KB:-128}" > "$f" 2>/dev/null
     done
     return 0
 }
 readahead_restore() {
+    perf_tune_restore
     [ -f $W/readahead.saved ] || return 0
     while read b old; do [ -w "$b/queue/read_ahead_kb" ] && echo "$old" > "$b/queue/read_ahead_kb" 2>/dev/null; done < $W/readahead.saved
     rm -f $W/readahead.saved
@@ -270,5 +385,50 @@ loopdio_restore() {
     [ -f $W/loopdio.base ] || return 0
     l=$(cat $W/loopdio.base); rm -f $W/loopdio.base
     [ -x "$VD/bin/vdloopdio" ] && loopdio_set $l 0 && t "loop dio: /mnt/base-us ($l) back to buffered"
+    return 0
+}
+
+page_keys_layout() {
+    PK_CHANGED=
+    [ -n "${PAGE_KEYS:-}" ] && [ -d "$R/system/usr/keylayout" ] || return 0
+    case "$PAGE_KEYS" in *[!A-Za-z0-9_.-]*) return 0 ;; esac
+    case "${PAGE_KEYS_MAP:-volume}" in
+        page) up=PAGE_UP; dn=PAGE_DOWN ;;
+        dpad) up=DPAD_LEFT; dn=DPAD_RIGHT ;;
+        *)    up=VOLUME_UP; dn=VOLUME_DOWN ;;
+    esac
+    _pks=0; [ "${PAGE_KEYS_SWAP:-0}" = 1 ] && _pks=1
+    [ "${PAGE_KEYS_FLIP:-0}" = 1 ] && _pks=$((1 - _pks))
+    if [ "$_pks" = 1 ]; then k104=$dn; k109=$up; else k104=$up; k109=$dn; fi
+    f=$R/system/usr/keylayout/$PAGE_KEYS.kl
+    printf '# generated by VeraDroid (boot/lib/memory.sh page_keys_layout)\nkey 104   %s\nkey 109   %s\n' $k104 $k109 > $W/kl.new
+    if ! cmp -s $W/kl.new "$f"; then
+        _pkw=
+        if cp $W/kl.new "$f" 2>/dev/null && chmod 644 "$f" 2>/dev/null; then
+            _pkw=1
+        elif grep -q " $R " /proc/mounts 2>/dev/null && mount -o remount,rw,bind "$R" 2>/dev/null; then
+            cp $W/kl.new "$f" 2>/dev/null && chmod 644 "$f" 2>/dev/null && _pkw=1
+            mount -o remount,ro,bind "$R" 2>/dev/null || true
+        fi
+        if [ -n "$_pkw" ]; then PK_CHANGED=1; t "keys: $PAGE_KEYS.kl 104=$k104 109=$k109"
+        else t "keys: cannot write $PAGE_KEYS.kl (applies at the next Android start)"; fi
+    fi
+    rm -f $W/kl.new
+    return 0
+}
+page_keys_apply() {
+    page_keys_layout
+    [ -n "$PK_CHANGED" ] && [ -n "${PAGE_KEYS:-}" ] && alive $W/pid || return 0
+    _pkn=$(awk -v pat="\"$PAGE_KEYS\"" '/^N: Name=/ { m = ($0 ~ pat) }
+        m && /^H: Handlers=/ { for (i = 1; i <= NF; i++) if (match($i, /event[0-9]+$/)) { print substr($i, RSTART); exit } }' /proc/bus/input/devices)
+    _pkd=$(cat /sys/class/input/$_pkn/dev 2>/dev/null)
+    case "$_pkd" in [0-9]*:[0-9]*) ;; *) return 0 ;; esac
+    if [ "$(cat $W/mode 2>/dev/null)" = chroot ]; then
+        { umount -l "$R/dev/input/event2" 2>/dev/null || true; rm -f "$R/dev/input/event2" && mknod -m 666 "$R/dev/input/event2" c ${_pkd%%:*} ${_pkd#*:} && chmod 666 "$R/dev/input/event2"; } >/dev/null 2>&1 \
+            && t "keys: $PAGE_KEYS reopened in Android ($PAGE_KEYS_MAP, flip=${PAGE_KEYS_FLIP:-0})" || true
+    else
+        _in=$(vd_in) && [ -n "$_in" ] && $_in /system/bin/sh -c "export PATH=/system/bin:/system/xbin:/sbin; umount -l /dev/input/event2 2>/dev/null; rm -f /dev/input/event2 && mknod -m 666 /dev/input/event2 c ${_pkd%%:*} ${_pkd#*:}" >/dev/null 2>&1 \
+            && t "keys: $PAGE_KEYS reopened in Android ($PAGE_KEYS_MAP, flip=${PAGE_KEYS_FLIP:-0})" || true
+    fi
     return 0
 }

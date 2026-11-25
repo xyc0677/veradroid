@@ -549,4 +549,5 @@ public class FontStoreActivity extends Activity {
         if (jobFile == null) jobMsg = null;      // 下次打开不再显示上一次的结果
         super.onDestroy();
     }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

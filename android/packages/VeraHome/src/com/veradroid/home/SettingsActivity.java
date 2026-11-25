@@ -12,10 +12,26 @@ import android.content.Intent;
  * （方块风格），或者经典的设置分类（经典风格）；不搭首页 / 文件 / 应用、不预先搭别的页、不挂小部件宿主、不做桌面的那些事。
  */
 public class SettingsActivity extends HomeActivity {
+    @Override protected void onCreate(android.os.Bundle s) {
+        setTheme(android.R.style.Theme_Holo_Light_NoActionBar);
+        super.onCreate(s);
+        getWindow().setFormat(android.graphics.PixelFormat.OPAQUE);
+    }
+
     static void open(Context c) {
+        Perf.begin();
         Intent i = new Intent(c, SettingsActivity.class);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
         i.putExtra("settings", true);
         try { c.startActivity(i); } catch (Throwable t) { android.util.Log.w("VeraHome", "settings: " + t); }
+    }
+
+    @Override public void finish() {
+        closingToBack = true;
+        StatusBarService.setSuppressed(false);
+        StatusBarService.sync(this);
+        HostLink.epdHint(800, 20);
+        if (!moveTaskToBack(true)) super.finish();
+        overridePendingTransition(0, 0);
     }
 }

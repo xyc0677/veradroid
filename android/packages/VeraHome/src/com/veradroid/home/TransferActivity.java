@@ -165,4 +165,5 @@ public class TransferActivity extends Activity {
         int m = Store.prefs(this, "home").getInt("xfer_idle", 30);
         return m % 60 == 0 ? (m / 60) + " 小时" : m + " 分钟";
     }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

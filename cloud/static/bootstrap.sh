@@ -1491,6 +1491,7 @@ case "$model_tree" in
     *cava*) detected=kt5 ;;
     *barolo*) detected=ks ;;
     *pisco*) detected=ks2 ;;
+    *imx7d-zelda*) if [ -e /proc/self/ns/pid ]; then detected=ko3; else detected=oa2; fi ;;
     *) detected= ;;
 esac
 # PW5/KT5/KT6（eink-emulator 实测）的设备树只有通用的 "mediatek,mt8110 mediatek,mt8512"，没有板名。
@@ -1566,6 +1567,7 @@ case "$MODEL" in
     kt5|kt6) ok='1072,1448 1072,2896' ;;
     ks) ok='1860,2480 2480,1860 1860,4960 2480,3720 2480,4960 1872,2480 1872,4960' ;;
     ks2) ok='1872,4960 1872,2480 1860,2480 1860,4960' ;;
+    oa2|ko3) ok='1264,1680 1264,3360' ;;
     imx41) echo "这台是老机型：请用官网的老机型安装脚本（veradroid.wenjin.jp/install/legacy），不会改动这台 Kindle。"; exit 1 ;;
     legacy) # 3.0 内核老机型（PW2 / PW3 等）：模拟器里还没开机到桌面，先不让普通用户装；测试时带 VD_LEGACY_TEST=1
         [ "${VD_LEGACY_TEST:-0}" = 1 ] || { echo "这台是老机型：请用官网的老机型安装脚本（veradroid.wenjin.jp/install/legacy），不会改动这台 Kindle。"; exit 1; }
@@ -1591,7 +1593,7 @@ if [ -n "$FW" ]; then
     # （binder / uinput / tun 都编进内核，config 完全相同；没有 PID 命名空间 -> chroot 模式，和 5.17.1 一样），不需要外挂模块。
     # 内核里真没有 binder 的话照样拒绝。
     fwmin=5017000; fwmin_s=5.17
-    case "$MODEL" in pw5) fwmin=5016000; fwmin_s="5.16（PW5）" ;; esac
+    case "$MODEL" in pw5) fwmin=5016000; fwmin_s="5.16（PW5）" ;; oa2) fwmin=5013000; fwmin_s="5.13（Oasis 2）" ;; ko3) fwmin=5015000; fwmin_s="5.15（Oasis 3）" ;; esac
     if [ "$MODEL" != legacy ] && [ "$fwn" -lt "$fwmin" ] 2>/dev/null && [ "${VD_ALLOW_OLD_FW:-0}" != 1 ]; then
         die "固件 $FW 太旧；VeraDroid 需要 $fwmin_s 或更新"
     fi
@@ -2400,7 +2402,7 @@ esac
 # BEGIN vd_bundle_k49
 vd_bundle_k49() { # <包目录>：0 = k49（4.9 内核）系列的包
     vbp=$(sed -n 's/.*"product": *"\([^"]*\)".*/\1/p' "$1/manifest.json" 2>/dev/null | head -1)
-    case "$vbp" in veradroid-k49*) return 0 ;; veradroid-pw6*) return 1 ;; esac
+    case "$vbp" in veradroid-k49*|veradroid-a7-512*) return 0 ;; veradroid-pw6*) return 1 ;; esac
     [ -e "$1/bin/vdlmk" ]
 }
 # END vd_bundle_k49
@@ -2653,6 +2655,8 @@ echo "$MODEL" > "$VD/model" 2>/dev/null || true   # 系统盘外的一份（loop
 if [ -f "$TMP/veradroid-pw6/image-class" ]; then cp "$TMP/veradroid-pw6/image-class" "$VD/image-class" 2>/dev/null || true
 else rm -f "$VD/image-class" 2>/dev/null || true; fi
 cp -a "$TMP/veradroid-pw6/boot" "$TMP/veradroid-pw6/bin" "$VD/"
+[ -d "$TMP/veradroid-pw6/models" ] && { rm -rf "$VD/models"; cp -a "$TMP/veradroid-pw6/models" "$VD/models"; }
+[ -d "$TMP/veradroid-pw6/kmod" ] && { rm -rf "$VD/kmod"; cp -a "$TMP/veradroid-pw6/kmod" "$VD/kmod"; }
 [ -f "$TMP/veradroid-pw6/VeraDroid-Launch.sh" ] && cp "$TMP/veradroid-pw6/VeraDroid-Launch.sh" "$VD/VeraDroid-Launch.sh" && chmod 755 "$VD/VeraDroid-Launch.sh"
 # 程序目录里这一份只是备份（书库入口被删时 framework.sh 的 launcher_restore 用它补回去）。标题和书库里的正式入口分开：
 # 有用户把整个 veradroid 文件夹拷进了 documents，书库里于是出现两个一模一样的“VeraDroid”（用户报告：KT6 5.17）。

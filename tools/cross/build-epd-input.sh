@@ -9,7 +9,7 @@ set -eu
 SRC=$1; OUT=$2; FB=${FBINK_DIR:-${VD_BUILD:-$HOME/veradroid-build}/rot/FBInk}
 mkdir -p "$OUT"
 nice -n 12 docker run --rm --cpus=4 --memory=2g -v "$SRC":/s:ro -v "$OUT":/o -v "$FB":/fbink:ro vdcross-legacy:gcc5-glibc219 sh -c '
-set -e; CC="arm-linux-gnueabihf-gcc -O2 -static -Wall -Wno-unused-function"
-$CC -mfpu=neon -pthread -I /fbink /s/display/epd.c /fbink/Release/libfbink.a -lm -o /o/veradroid-epd
+set -e; CC="arm-linux-gnueabihf-gcc ${EPD_CPU_FLAGS:--O3 -mfpu=neon} -static -Wall -Wno-unused-function"
+$CC -pthread -I /fbink /s/display/epd.c /fbink/Release/libfbink.a -lm -o /o/veradroid-epd
 $CC /s/input/vinput.c -lm -o /o/veradroid-input
 arm-linux-gnueabihf-strip /o/veradroid-epd /o/veradroid-input; chmod 755 /o/*; md5sum /o/*'

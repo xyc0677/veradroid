@@ -84,12 +84,34 @@ zram_extra() {
 }
 
 MEMKEEP_CG=/sys/fs/cgroup/memory/vdkeep
+MEMSYS_CG=/sys/fs/cgroup/memory/vdsys
+
+sf_rt_apply() {
+    [ "${SF_RT_PRIO:-2}" -gt 0 ] 2>/dev/null && command -v chrt >/dev/null 2>&1 || return 0
+    sfr_p=$(pidof surfaceflinger 2>/dev/null); [ -n "$sfr_p" ] || return 0
+    [ "$(cat $W/sfrt.pid 2>/dev/null)" = "$sfr_p" ] && return 0
+    sfr_n=0; sfr_ev=0
+    for sfr_t in /proc/$sfr_p/task/*; do
+        sfr_tid=${sfr_t##*/}
+        sfr_cm=$(cat "$sfr_t/comm" 2>/dev/null)
+        case "$sfr_cm" in surfaceflinger|DispSync|EventThread|POSIX\ timer*)
+            chrt -f -p "${SF_RT_PRIO:-2}" "$sfr_tid" >/dev/null 2>&1 && sfr_n=$((sfr_n + 1))
+            [ "$sfr_cm" = EventThread ] && sfr_ev=1 ;;
+        esac
+    done
+    if [ "$sfr_ev" = 1 ] && [ "$sfr_n" -gt 0 ]; then
+        echo "$sfr_p" > $W/sfrt.pid
+        t "sched: surfaceflinger ($sfr_p) SCHED_FIFO=2 on $sfr_n threads"
+    fi
+    return 0
+}
 mem_keep_on() {
     case "${MEM_KEEP:-auto}" in 0|off) return 1 ;; auto) lowmem_ram 2>/dev/null && return 1 ;; esac
     return 0
 }
 # 桌面 / 输入法放进 vdkeep（进程号变了才写；进程没了 cgroup 自己就空了）。watchdog 每 20 秒、回桌面时各一次
 mem_keep_tick() {
+    sf_rt_apply
     mem_keep_on || return 0
     mk_r=${MEMKEEP_CG%/*}
     [ -f $mk_r/memory.swappiness ] || return 0
@@ -104,10 +126,62 @@ mem_keep_tick() {
             grep -qx "$mk_id" $MEMKEEP_CG/cgroup.procs 2>/dev/null || echo "$mk_id" > $MEMKEEP_CG/cgroup.procs 2>/dev/null
         done
     done
+    if [ ! -d $MEMSYS_CG ]; then
+        if mkdir $MEMSYS_CG 2>/dev/null; then
+            echo 15 > $MEMSYS_CG/memory.swappiness 2>/dev/null
+            echo 1 > $MEMSYS_CG/memory.move_charge_at_immigrate 2>/dev/null
+        fi
+    fi
+    if [ -d $MEMSYS_CG ]; then
+        for mk_sp in system_server surfaceflinger; do
+            for mk_id in $(pidof "$mk_sp" 2>/dev/null); do
+                grep -qx "$mk_id" $MEMSYS_CG/cgroup.procs 2>/dev/null || echo "$mk_id" > $MEMSYS_CG/cgroup.procs 2>/dev/null
+            done
+        done
+    fi
+    if [ -n "${VD:-}" ] && [ -x "$VD/bin/vdpin" ] && ! alive $W/vdpin.pid 2>/dev/null; then
+        set --
+        for mk_f in "$R/system/priv-app/VeraHome/VeraHome.apk" "$R/system/priv-app/VeraHome/oat/arm/VeraHome.odex" "$SYS/data/dalvik-cache/arm/system@priv-app@VeraHome@VeraHome.apk@classes.dex" "$SYS/data/dalvik-cache/arm64/system@priv-app@VeraHome@VeraHome.apk@classes.dex"; do
+            [ -f "$mk_f" ] && set -- "$@" "$mk_f"
+        done
+        [ $# -gt 0 ] && "$VD/bin/vdpin" "$W/vdpin.pid" "$@" 2>/dev/null && t "memkeep: pinned VeraHome code in RAM ($# files)"
+    fi
     return 0
 }
-# 停止时：先解冻所有被冻结的后台应用，再删掉 cgroup（Android 的进程都已经退出，空的才删得掉）
-mem_keep_off() { bg_thaw_all; [ -d $MEMKEEP_CG ] && rmdir $MEMKEEP_CG 2>/dev/null; return 0; }
+# 停止时：先解冻所有被冻结的后台应用，停掉 vdpin，再删掉 cgroup
+mem_keep_off() {
+    bg_thaw_all
+    if [ -f $W/vdpin.pid ]; then kill "$(cat $W/vdpin.pid 2>/dev/null)" 2>/dev/null; rm -f $W/vdpin.pid $W/sfrt.pid; fi
+    if [ -f $W/lboost.base ]; then
+        mlb_b=$(cat $W/lboost.base 2>/dev/null)
+        [ -n "$mlb_b" ] && [ -w /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq ] && echo "$mlb_b" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq 2>/dev/null
+        rm -f $W/lboost.base $W/lboost.tok $W/lboost.active
+    fi
+    [ -d $MEMKEEP_CG ] && rmdir $MEMKEEP_CG 2>/dev/null
+    [ -d $MEMSYS_CG ] && rmdir $MEMSYS_CG 2>/dev/null
+    return 0
+}
+mem_launch_boost() {
+    [ -f $W/pid ] && [ "${LAUNCH_BOOST_S:-6}" -gt 0 ] 2>/dev/null || return 0
+    mlb_d=/sys/devices/system/cpu/cpu0/cpufreq
+    [ -w $mlb_d/scaling_min_freq ] && [ -r $mlb_d/scaling_max_freq ] || return 0
+    mlb_mx=$(cat $mlb_d/scaling_max_freq 2>/dev/null); [ -n "$mlb_mx" ] || return 0
+    if [ ! -f $W/lboost.base ]; then
+        mlb_cur=$(cat $mlb_d/scaling_min_freq 2>/dev/null)
+        if [ -n "$mlb_cur" ] && [ "$mlb_cur" -lt "$mlb_mx" ] 2>/dev/null; then echo "$mlb_cur" > $W/lboost.base
+        elif [ -r $mlb_d/cpuinfo_min_freq ]; then cat $mlb_d/cpuinfo_min_freq > $W/lboost.base 2>/dev/null; fi
+    fi
+    mlb_tk=$(( $(cat $W/lboost.tok 2>/dev/null || echo 0) + 1 ))
+    echo "$mlb_tk" > $W/lboost.tok
+    : > $W/lboost.active 2>/dev/null
+    echo "$mlb_mx" > $mlb_d/scaling_min_freq 2>/dev/null || { rm -f $W/lboost.active; return 0; }
+    ( sleep "${LAUNCH_BOOST_S:-6}"
+      [ "$(cat $W/lboost.tok 2>/dev/null)" = "$mlb_tk" ] || exit 0
+      rm -f $W/lboost.active
+      mlb_b=$(cat $W/lboost.base 2>/dev/null)
+      [ -n "$mlb_b" ] && echo "$mlb_b" > $mlb_d/scaling_min_freq 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+}
 
 # ---- 切换应用立即冻结后台（BG_FREEZE，默认开）----
 # 打开/切换前台应用时，立刻给上一个后台第三方应用发 SIGSTOP 冻结（0% CPU、停止内存增长，zram 可安心回收其闲置页）；
@@ -170,7 +244,7 @@ mem_fg() {
         { awk -v p="$mf_old" '$1 != p' $W/memfg.bg 2>/dev/null; echo "$mf_old $(date +%s)"; } > $W/memfg.bg.tmp && mv -f $W/memfg.bg.tmp $W/memfg.bg
     fi
     [ -f $W/memfg.bg ] && awk -v p="$mf_new" '$1 != p' $W/memfg.bg > $W/memfg.bg.tmp 2>/dev/null && mv -f $W/memfg.bg.tmp $W/memfg.bg
-    [ "$mf_new" = home ] && mem_keep_tick
+    if [ "$mf_new" = home ]; then mem_keep_tick; else mem_launch_boost; fi
     if [ "${BG_FREEZE:-1}" = 1 ] && [ -s "$W/pid" ] && [ -s "$W/memfg.bg" ]; then
         ( sleep 1; bg_freeze_sweep ) >/dev/null 2>&1 &
     fi

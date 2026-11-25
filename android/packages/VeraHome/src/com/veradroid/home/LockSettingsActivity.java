@@ -160,4 +160,7 @@ public class LockSettingsActivity extends Activity {
         if (step != IDLE) { step = IDLE; render(); return; }
         super.onBackPressed();
     }
+
+    @Override protected void onResume() { super.onResume(); Panel.closeOnDraw(getWindow().getDecorView()); }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

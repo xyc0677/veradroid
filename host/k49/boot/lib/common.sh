@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # 公共定义。所有模块都 source 这个文件。
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH; export PATH   # 系统自带的 curl/tar 优先：越狱工具或插件装的 curl 可能没有根证书（HTTPS 全部失败）
+# 4.1 内核（Oasis 2 / 3，2G/2G 分割）：默认的自顶向下 mmap 把 libart.so 放在 ~0x76xxxxxx，压在 0x70000000 启动镜像上。
+# 未带 ro.vd.artbase 的镜像用 ulimit -s unlimited 切换自底向上布局（同 host/legacy），4.9+ 内核直接跳过。
+vd_art_stack() {   # [build.prop]
+    case "$(uname -r)" in 3.*|4.1.*) ;; *) return 0 ;; esac
+    if grep -q '^ro.vd.artbase=' "${1:-/mnt/base-us/system/veradroid/rootfs/system/build.prop}" 2>/dev/null; then ulimit -s 8192 2>/dev/null
+    else ulimit -s unlimited 2>/dev/null; fi
+}
+vd_art_stack
 VD=${VD:-/mnt/base-us/veradroid}          # 程序目录（一律走 ext4 的 /mnt/base-us，不走 /mnt/us 的 FUSE）
 SYS=/mnt/base-us/system/veradroid          # 数据：rootfs、data、日志、设置（书库不扫 system/）
 SYSTEM_IMG=/mnt/base-us/veradroid-sys.img   # vfat /mnt/base-us 上的 ext4 系统盘（PW5 等）
@@ -10,7 +18,43 @@ SYSTEM_IMG=/mnt/base-us/veradroid-sys.img   # vfat /mnt/base-us 上的 ext4 系�
 [ -f "$VD/boot/lib/backup.sh" ] && . "$VD/boot/lib/backup.sh"
 # 有的机型（KT6，eink-emulator 实测）loop 节点只有 /dev/loop/N，没有 /dev/loopN，`mount -o loop` 找不到空闲设备。
 # 先试 mount -o loop，不行就自己挑一个空闲节点用 busybox losetup 绑定。
-loop_mount() { # img dir
+vdblk_try_load() {
+    grep -q "^vdblk " /proc/modules 2>/dev/null && return 0
+    vk="$VD/kmod/$(uname -r)/vdblk.ko"
+    [ -f "$vk" ] && insmod "$vk" 2>/dev/null || true
+    if [ ! -e /dev/vdblk-ctl ]; then
+        vm=$(awk '$2=="vdblk-ctl"{print $1}' /proc/misc 2>/dev/null)
+        [ -n "$vm" ] && mknod -m 600 /dev/vdblk-ctl c 10 "$vm" 2>/dev/null || true
+    fi
+}
+img_drop_file_cache() {
+    [ -f "$SYSTEM_IMG" ] || return 0
+    sync
+    [ -x "$VD/bin/vdloopdio" ] && "$VD/bin/vdloopdio" --drop "$SYSTEM_IMG" >/dev/null 2>&1 || true
+}
+vdblk_attach() { # img -> /dev/vdblkN
+    [ "${VDBLK_DIRECT:-1}" != 0 ] && [ "$1" = "$SYSTEM_IMG" ] && [ -x "$VD/bin/vdblkctl" ] || return 1
+    vdblk_try_load
+    grep -q "^vdblk " /proc/modules 2>/dev/null || return 1
+    vd_b=$("$VD/bin/vdblkctl" --attach "$1" 2>/dev/null) || vd_b=
+    [ -n "$vd_b" ] && [ -b "$vd_b" ] || return 1
+    echo "$vd_b"
+}
+loop_detach() {
+    case "$1" in
+        *vdblk*) [ -x "$VD/bin/vdblkctl" ] && "$VD/bin/vdblkctl" --detach "$SYSTEM_IMG" >/dev/null 2>&1 || true ;;
+        *) losetup -d "$1" 2>/dev/null || true ;;
+    esac
+}
+loop_mount() { # img dir [attached_bdev]
+    vd_b=${3:-}
+    [ -z "$vd_b" ] && vd_b=$(vdblk_attach "$1" 2>/dev/null || true)
+    if [ -n "$vd_b" ] && [ -b "$vd_b" ]; then
+        if mount -t ext4 -o rw,noatime,commit=30 "$vd_b" "$2" 2>/dev/null || mount -t ext4 -o rw,noatime "$vd_b" "$2" 2>/dev/null || mount -t ext3 -o rw,noatime "$vd_b" "$2" 2>/dev/null; then
+            return 0
+        fi
+        "$VD/bin/vdblkctl" --detach "$1" >/dev/null 2>&1 || true
+    fi
     mount -o loop,rw,noatime "$1" "$2" 2>/dev/null && return 0
     for d in /dev/loop/[0-9]* /dev/loop[0-9]*; do
         [ -b "$d" ] || continue
@@ -21,13 +65,15 @@ loop_mount() { # img dir
     done
     return 1
 }
-# 系统盘镜像当前挂在哪些 loop 设备上（/sys/block/loopN/loop/backing_file）
+# 系统盘镜像当前挂在哪些 loop / vdblk 设备上
 img_loops() {
+    [ -d /sys/block/vdblk0 ] && echo vdblk0
     for b in /sys/block/loop*/loop/backing_file; do
         case "$(cat "$b" 2>/dev/null)" in *veradroid-sys.img) d=${b%/loop/backing_file}; echo "${d##*/}" ;; esac
     done
 }
-loop_dev() { # loopN -> 设备节点（有的机型只有 /dev/loop/N）
+loop_dev() { # loopN / vdblk0 -> 设备节点（有的机型只有 /dev/loop/N）
+    case "$1" in vdblk*) echo /dev/$1; return ;; esac
     n=${1#loop}
     [ -b /dev/loop$n ] && echo /dev/loop$n || echo /dev/loop/$n
 }
@@ -89,7 +135,7 @@ storage_mount() {
     # e2fsck 去修一个还在用的镜像也一样会弄坏它。所以先把残留的 loop 摘掉；摘不掉就不启动。
     i=0
     while [ -n "$(img_loops)" ]; do
-        for l in $(img_loops); do losetup -d "$(loop_dev $l)" 2>/dev/null; done
+        for l in $(img_loops); do loop_detach "$(loop_dev $l)"; done
         [ -z "$(img_loops)" ] && break
         # 摘不掉 = 还有进程占着镜像里的文件（上次退出没收干净的子进程、没死透的 Android 进程）。以前只是等 5 秒然后不启动，
         # 而这时 Kindle 界面在前台、提示被书库重画盖掉：用户看到的是“正在打开”之后什么都没有，只有重启 Kindle 才好
@@ -98,15 +144,27 @@ storage_mount() {
         i=$((i + 1)); [ $i -ge 25 ] && { t "storage: system image still attached to $(img_loops | tr '\n' ' ')(previous run not finished; holders: $(img_holders $(img_loops) | tr '\n' ' '))"; return 1; }
         usleep 200000
     done
+    img_drop_file_cache
     # 上次调整大小没做完（断电 / 被杀）、或者留了“下次启动时扩容”：先收尾（storage.sh）。别的进程正在调整就不挂。
     if type st_recover >/dev/null 2>&1; then
         st_recover || { t "storage: a resize is in progress, not mounting"; return 1; }
     fi
     # 系统盘是 vfat 上的一个镜像文件：没电关机、死机、强制重启都可能让它的 ext4/ext3 元数据不一致
     # （KT5 模拟器实测：“block bitmap corrupt … Data will be lost”，日志都写坏了）。挂载前先自动修：
-    # -p 只修安全的问题；它说需要人工（退出码 ≥4）时用 -y 全部按默认修，总比带着坏的元数据继续写好。
-    # 结果记在 /mnt/base-us/veradroid/logs/fsck.log（系统盘外面，盘坏了也看得到）。
-    if command -v e2fsck >/dev/null 2>&1; then
+    # vdblk 直通时直接对 /dev/vdblk0 用随包新版 e2fsck 检查，避免 vfat 文件页缓存与块设备缓存产生别名冲突。
+    sm_bdev=$(vdblk_attach "$SYSTEM_IMG" 2>/dev/null || true)
+    if [ -n "$sm_bdev" ]; then
+        sm_fsck=; [ -x "$VD/bin/e2fsck" ] && sm_fsck="$VD/bin/e2fsck" || sm_fsck=$(command -v e2fsck 2>/dev/null || true)
+        if [ -n "$sm_fsck" ]; then
+            mkdir -p /mnt/base-us/veradroid/logs 2>/dev/null
+            "$sm_fsck" -p "$sm_bdev" >/mnt/base-us/veradroid/logs/fsck.log 2>&1; rc=$?
+            if [ $rc -ge 4 ]; then
+                echo "-- e2fsck -p rc=$rc, retry with -y" >>/mnt/base-us/veradroid/logs/fsck.log
+                "$sm_fsck" -y "$sm_bdev" >>/mnt/base-us/veradroid/logs/fsck.log 2>&1; rc=$?
+            fi
+            echo "-- $(date) e2fsck ($sm_bdev) rc=$rc" >>/mnt/base-us/veradroid/logs/fsck.log
+        fi
+    elif command -v e2fsck >/dev/null 2>&1; then
         mkdir -p /mnt/base-us/veradroid/logs 2>/dev/null
         e2fsck -p "$SYSTEM_IMG" >/mnt/base-us/veradroid/logs/fsck.log 2>&1; rc=$?
         if [ $rc -ge 4 ]; then
@@ -115,7 +173,7 @@ storage_mount() {
         fi
         echo "-- $(date) e2fsck rc=$rc" >>/mnt/base-us/veradroid/logs/fsck.log
     fi
-    loop_mount "$SYSTEM_IMG" "$SYS" || return 1
+    loop_mount "$SYSTEM_IMG" "$SYS" "$sm_bdev" || return 1
 }
 storage_umount() {
     # Host-ns leftovers under $SYS (notably after_boot binder_repair bind on
@@ -129,7 +187,7 @@ storage_umount() {
     dev=$(awk -v m="$SYS" '$2==m {print $1}' /proc/mounts | tail -1)
     [ -n "$dev" ] || {
         # Detach any loop still tied to the system image even if mount gone
-        for l in $(img_loops); do losetup -d "$(loop_dev "$l")" 2>/dev/null || true; done
+        for l in $(img_loops); do loop_detach "$(loop_dev "$l")"; done
         return 0
     }
     # 刚杀掉的容器进程、延迟卸载（umount -l）的挂载要过一会儿才真正放手：立刻 umount 会报 busy，
@@ -143,7 +201,7 @@ storage_umount() {
         i=$((i + 1)); [ $i -ge 25 ] && { t "storage: $SYS still busy, left mounted"; break; }
         usleep 200000
     done
-    case "$dev" in /dev/loop*) losetup -d "$dev" 2>/dev/null || true ;; esac
+    case "$dev" in /dev/vdblk*) loop_detach "$dev" ;; /dev/loop*) losetup -d "$dev" 2>/dev/null || true ;; esac
 }
 W=/dev/shm/veradroid                       # 运行时状态（tmpfs，重启即消失）
 R=$SYS/rootfs                              # 系统根目录

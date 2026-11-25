@@ -289,7 +289,7 @@ final class Icons {
 
         @Override protected void onDraw(Canvas c) {
             boolean white = isPressed() ? !inverted : inverted;
-            draw(c, kind, Math.min(getWidth(), getHeight()), white ? Color.WHITE : Color.BLACK);
+            Icons.draw(c, kind, Math.min(getWidth(), getHeight()), white ? Color.WHITE : Color.BLACK);
         }
     }
 

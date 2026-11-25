@@ -34,6 +34,13 @@ import java.util.Map;
 final class BlocksPanel {
     private static BlocksPanel instance;
 
+    static void prewarm(Context c) {
+        Context app = c.getApplicationContext();
+        String conf = conf(app);
+        if (instance == null) instance = new BlocksPanel(new android.view.ContextThemeWrapper(app, android.R.style.Theme_Holo_Light_NoActionBar), conf);
+        instance.warmAttach();
+    }
+
     static void open(Context c) {
         Context app = c.getApplicationContext();
         String conf = conf(app);
@@ -328,7 +335,7 @@ final class BlocksPanel {
 
     private LinearLayout optBar, optCard, appBar;
     private TextView appHint;
-    private String appPkg;
+    private String appPkg, cachedLabelPkg, cachedLabel;
 
     /** 面板底下那个应用（HostService 记的“按哪个应用算显示设置”）；桌面在前台 = null */
     private void syncApp() {
@@ -342,8 +349,12 @@ final class BlocksPanel {
             return;
         }
         appPkg = p;
-        String label = p;
-        try { label = String.valueOf(ctx.getPackageManager().getApplicationLabel(ctx.getPackageManager().getApplicationInfo(p, 0))); } catch (Throwable ignored) { }
+        String label = p.equals(cachedLabelPkg) && cachedLabel != null ? cachedLabel : p;
+        if (!p.equals(cachedLabelPkg)) {
+            try { label = String.valueOf(ctx.getPackageManager().getApplicationLabel(ctx.getPackageManager().getApplicationInfo(p, 0))); } catch (Throwable ignored) { }
+            cachedLabelPkg = p;
+            cachedLabel = label;
+        }
         String sum = "";
         int appSmooth = globalSmoothMode;
         if (AppProf.host()) {
@@ -391,7 +402,7 @@ final class BlocksPanel {
         i.putExtra("pkg", appPkg);
         i.putExtra("label", label);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-        finish();
+        Panel.closeDeferred();
         ctx.startActivity(i);
     }
     private TextView optLabel, optHint;
@@ -530,10 +541,10 @@ final class BlocksPanel {
         else if ("anim".equals(id)) { animOn = animOn > 0 ? 0 : animLast; HostLink.settings("KFB_ANIM_MODE=" + animOn + "\n"); paintTiles(); }
         else if ("lightf".equals(id)) { lightfOn = lightfOn > 0 ? 0 : Panel.lightfLast; HostLink.settings("KFB_LIGHTF=" + lightfOn + "\n"); paintTiles(); }
         else if ("settings".equals(id)) {
-            finish();
+            Panel.closeDeferred();
             SettingsActivity.open(ctx);   // 盖在当前应用上面，返回 / ✕ 回到这个应用
         }
-        else if ("switch".equals(id)) { start(new Intent(ctx, SwitcherActivity.class)); finish(); }
+        else if ("switch".equals(id)) { Panel.closeDeferred(); start(new Intent(ctx, SwitcherActivity.class)); }
         else if ("restart".equals(id)) { HostLink.cmd("restart"); finish(); }
         else if ("stop".equals(id)) HostLink.cmd("stop");
         else if ("clean".equals(id)) { String prev = Cleaner.previousApp(ctx); finish(); Panel.cleanNow(ctx, prev); }
@@ -541,7 +552,7 @@ final class BlocksPanel {
 
     /** 回到 VeraDroid 桌面（和经典面板的“桌面”一样）：先收起面板再开桌面。 */
     private void goHome() {
-        finish();
+        Panel.closeDeferred();
         start(HomeActivity.homeIntent(ctx));
     }
 
@@ -562,19 +573,40 @@ final class BlocksPanel {
         return lp;
     }
 
+    private void warmAttach() {
+        if (attached || showing) return;
+        set(clock, Ui.clock(ctx));
+        readStatus();
+        syncApp();
+        try {
+            android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            root.measure(View.MeasureSpec.makeMeasureSpec(dm.widthPixels, View.MeasureSpec.EXACTLY),
+                         View.MeasureSpec.makeMeasureSpec(dm.heightPixels, View.MeasureSpec.AT_MOST));
+            root.layout(0, 0, root.getMeasuredWidth(), root.getMeasuredHeight());
+            android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888);
+            root.draw(new android.graphics.Canvas(b));
+            b.recycle();
+        } catch (Throwable ignored) { }
+        root.setVisibility(View.GONE);
+        try { wm.addView(root, params()); attached = true; }
+        catch (Throwable t) { android.util.Log.w("VeraHome", "panel prewarm: " + t); }
+    }
+
     private void open() {
         if (showing) return;
         showing = true;
         HostLink.epdHint(Panel.PANEL_HINT_MS, Panel.PANEL_HINT_PCT);
         set(clock, Ui.clock(ctx));
-        readStatus();
-        loadNotes();
         syncApp();
         if (!attached) {
+            readStatus();
+            loadNotes();
             Perf.measure(root, "blocks panel");
             try { wm.addView(root, params()); attached = true; }
             catch (Throwable t) { android.util.Log.w("VeraHome", "panel: " + t); showing = false; return; }
         } else {
+            readStatus();
+            loadNotes();
             Perf.measure(root, "blocks panel (reused)");
             root.setVisibility(View.VISIBLE);
         }

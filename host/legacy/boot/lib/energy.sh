@@ -7,6 +7,7 @@
 bat_level() {
     b=$(lipc-get-prop com.lab126.powerd battLevel 2>/dev/null)
     case "$b" in ''|*[!0-9]*) b=$(cat /sys/class/power_supply/*/capacity 2>/dev/null | head -1) ;; esac
+    case "$b" in ''|*[!0-9]*) ;; *) [ "$b" -gt 100 ] && b=100 ;; esac
     echo "$b"
 }
 bat_charging() { [ "$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)" = 1 ]; }

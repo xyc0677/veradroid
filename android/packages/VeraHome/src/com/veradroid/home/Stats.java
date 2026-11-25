@@ -23,7 +23,7 @@ final class Stats {
         try {
             BatteryManager bm = (BatteryManager) c.getSystemService(Context.BATTERY_SERVICE);
             if (bm != null) {
-                pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                pct = Math.min(100, bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY));
                 charging = bm.isCharging();
             }
         } catch (Throwable ignored) { }
@@ -58,7 +58,7 @@ final class Stats {
         try {
             BatteryManager bm = (BatteryManager) c.getSystemService(Context.BATTERY_SERVICE);
             if (bm != null) {
-                pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                pct = Math.min(100, bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY));
                 charging = bm.isCharging();
             }
         } catch (Throwable ignored) { }

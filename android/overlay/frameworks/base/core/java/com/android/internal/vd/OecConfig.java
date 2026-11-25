@@ -67,8 +67,10 @@ public final class OecConfig {
     private static int sDpiResolved;   // the dpi actually applied (0 = none yet / none)
 
     // read by hot paths without a lock
-    public static volatile boolean sNoFling, sNoSmooth;
+    public static volatile boolean sNoFling, sNoSmooth, sFastKey;
     public static volatile int sPageKey;
+    private static boolean sInFastKey;
+    private static int sSwallowUpMask;
     public static volatile boolean sToast, sLightBar, sDialogBorder;
     public static volatile boolean sWebBold, sWebBlack, sWebCss;
     public static volatile int sWebFont;
@@ -120,6 +122,7 @@ public final class OecConfig {
         sNoFling = get(v, "OEC_FLING", 0) == 1;
         sNoSmooth = get(v, "OEC_SMOOTH", 0) == 1;
         sPageKey = get(v, "OEC_PAGEKEY", 0);
+        sFastKey = get(v, "OEC_FASTKEY", 0) == 1;
         sToast = get(v, "OEC_TOAST", 0) == 1;
         sLightBar = get(v, "OEC_LIGHTBAR", 0) == 1;
         sDialogBorder = get(v, "OEC_DLGBORDER", 0) == 1;
@@ -333,6 +336,66 @@ public final class OecConfig {
             return null;
         }
         return e;
+    }
+
+    private static int pageTurnKeyBit(int code) {
+        switch (code) {
+            case KeyEvent.KEYCODE_VOLUME_UP:   return 1;
+            case KeyEvent.KEYCODE_VOLUME_DOWN: return 2;
+            case KeyEvent.KEYCODE_PAGE_UP:     return 4;
+            case KeyEvent.KEYCODE_PAGE_DOWN:   return 8;
+            default:                           return 0;
+        }
+    }
+
+    /**
+     * OEC_FASTKEY: many Android reader apps (including WeRead) suppress system volume UI in onKeyDown()
+     * and only turn the page in onKeyUp(), adding 100-160 ms of thumb-release latency on hardware buttons.
+     * Synthesize ACTION_UP immediately after a handled ACTION_DOWN (on the main thread) and swallow the trailing physical UP.
+     */
+    public static boolean isInFastKey() { return sInFastKey; }
+
+    public static KeyEvent filterFastKey(KeyEvent e) {
+        if (sInFastKey || !sFastKey || e == null) return e;
+        int code = e.getKeyCode();
+        int bit = pageTurnKeyBit(code);
+        if (bit == 0 || e.getDeviceId() < 0
+                || (e.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
+            return e;
+        }
+        int act = e.getAction();
+        if (act == KeyEvent.ACTION_UP) {
+            if ((sSwallowUpMask & bit) != 0) {
+                sSwallowUpMask &= ~bit;
+                return null;
+            }
+            return e;
+        }
+        if (act == KeyEvent.ACTION_DOWN && e.getRepeatCount() > 0) {
+            return new KeyEvent(e.getDownTime(), e.getEventTime(), KeyEvent.ACTION_DOWN,
+                    code, 0, e.getMetaState(), e.getDeviceId(), e.getScanCode(), e.getFlags(), e.getSource());
+        }
+        return e;
+    }
+
+    public static boolean afterFastKeyDown(View decor, KeyEvent e) {
+        if (sInFastKey || !sFastKey || decor == null || e == null || e.getAction() != KeyEvent.ACTION_DOWN) return false;
+        int code = e.getKeyCode();
+        int bit = pageTurnKeyBit(code);
+        if (bit == 0 || e.getDeviceId() < 0
+                || (e.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
+            return false;
+        }
+        sSwallowUpMask |= bit;
+        sInFastKey = true;
+        try {
+            KeyEvent up = new KeyEvent(e.getDownTime(), e.getEventTime(), KeyEvent.ACTION_UP,
+                    code, 0, e.getMetaState(), e.getDeviceId(), e.getScanCode(), e.getFlags(), e.getSource());
+            decor.dispatchKeyEvent(up);
+        } finally {
+            sInFastKey = false;
+        }
+        return true;
     }
 
     /** A finger swipe in the middle of the window: next page = from 80 % up to 20 %, previous = 20 % down to 80 %. */

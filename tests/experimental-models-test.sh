@@ -34,5 +34,21 @@ check amazon,seabreeze 1272,3392 EXPERIMENTAL
 check amazon,rossini 1072,2896 EXPERIMENTAL
 check amazon,cava 1072,2896 EXPERIMENTAL
 check amazon,barolo 1860,2480 EXPERIMENTAL
+check fsl,imx7d-zelda 1264,3360 EXPERIMENTAL
 check amazon,pisco 1860,2480 REFUSE
+# vdkaf_bin: armhf -> bin/vdkaf (no self-recursion), armel -> bin/vdkaf-sf
+sed "s|/lib/ld-linux-armhf.so.3|$SB/ld-armhf|g" "$REPO/host/k49/boot/lib/framework.sh" > "$SB/fw.sh"
+rm -f "$SB/ld-armhf"
+got_sf=$(VD=/vd sh -c ". '$SB/fw.sh'; vdkaf_bin")
+[ "$got_sf" = "/vd/bin/vdkaf-sf" ] && echo "ok vdkaf_bin armel -> $got_sf" || { echo "FAIL vdkaf_bin armel got=$got_sf"; fail=1; }
+: > "$SB/ld-armhf"
+got_hf=$(VD=/vd sh -c ". '$SB/fw.sh'; vdkaf_bin")
+[ "$got_hf" = "/vd/bin/vdkaf" ] && echo "ok vdkaf_bin armhf -> $got_hf" || { echo "FAIL vdkaf_bin armhf got=$got_hf"; fail=1; }
+# vdblk-ctl security guard: never mknod 666, must enforce 600 and CAP_SYS_ADMIN
+if grep -q 'vdblk-ctl:vdblk-ctl' "$REPO/host/k49/boot/lib/kmod.sh" || ! grep -q 'mknod -m 600 /dev/vdblk-ctl' "$REPO/host/k49/boot/lib/kmod.sh"; then
+    echo "FAIL kmod.sh: /dev/vdblk-ctl must be mode 0600"; fail=1
+fi
+if ! grep -q 'capable(CAP_SYS_ADMIN)' "$REPO/tools/src/vdblk.c"; then
+    echo "FAIL vdblk.c: missing CAP_SYS_ADMIN check"; fail=1
+fi
 exit "$fail"

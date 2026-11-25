@@ -336,6 +336,7 @@ net_start
 echo "$APP" > $X/ctl/app
 splash_wait
 splash_update 20
+dedup_start
 boot_watch &
 echo $! > $W/boot.pid
 start_helpers
@@ -346,6 +347,7 @@ start_helpers
 # 直接跑 $VD 里的那份会让 /mnt/base-us 在关机时卸不掉（EBUSY），哪怕 VeraDroid 早就停了。
 [ -x "$VD/boot/lib/auto-update.sh" ] && cp "$VD/boot/lib/auto-update.sh" "$W/auto-update.sh.tmp" 2>/dev/null && mv -f "$W/auto-update.sh.tmp" "$W/auto-update.sh" && ( cd / && exec setsid sh $W/auto-update.sh ) </dev/null >/dev/null 2>&1 &
 after_boot &
+echo $! > $W/afterboot.pid
 t "started"
 vd_slog "started (container up, android booting)"
 exit 0

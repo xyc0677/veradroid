@@ -354,4 +354,7 @@ public class AppDisplayActivity extends Activity {
     }
 
     private int dp(int v) { return Ui.dp(this, v); }
+
+    @Override protected void onResume() { super.onResume(); Panel.closeOnDraw(getWindow().getDecorView()); }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

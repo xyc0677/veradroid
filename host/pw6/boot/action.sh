@@ -11,6 +11,19 @@
 #   screenshot  截图（存到 Android 的 Screenshots）      wifi  Wi-Fi 开关            refresh = clear，return = kindle（别名）
 #   app.<包名>  打开指定应用（例如 app.com.tencent.weread.eink）
 #   appopt  前台应用的显示设置（桌面的“应用优化”页；前台是桌面时打开下拉面板）。底边左段上划的默认动作
+if [ "$1" = poke ]; then
+    touch /dev/shm/veradroid/lastinput 2>/dev/null
+    if [ -f /dev/shm/veradroid/wifips.auto ] && [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = up ]; then
+        _fg=$(cat /dev/shm/veradroid/kfb/fg 2>/dev/null)
+        if [ -n "$_fg" ] && [ "$_fg" != com.veradroid.home ]; then
+            cut -d. -f1 /proc/uptime > /dev/shm/veradroid/wifi.busy 2>/dev/null
+            if [ ! -f /dev/shm/veradroid/wifi.ps ]; then
+                ( { iw dev wlan0 set power_save off 2>/dev/null || iwconfig wlan0 power off 2>/dev/null; } && : > /dev/shm/veradroid/wifi.ps ) </dev/null >/dev/null 2>&1 &
+            fi
+        fi
+    fi
+    exec lipc-set-prop -i com.lab126.powerd touchScreenSaverTimeout 1 >/dev/null 2>&1
+fi
 VD=${VD:-/mnt/base-us/veradroid}
 W=/dev/shm/veradroid
 X=$W/kfb
@@ -21,7 +34,7 @@ if [ "$1" != poke ]; then
     [ "$(wc -c < $AL 2>/dev/null || echo 0)" -gt 65536 ] && { tail -c 32768 $AL > $AL.tmp 2>/dev/null && mv -f $AL.tmp $AL; }
     echo "[$(date +%T)] action $1 $2" >> $AL
 fi
-[ -f $SYS/settings.conf ] && . $SYS/settings.conf
+if [ -f $X/settings ]; then . $X/settings; elif [ -f $SYS/settings.conf ]; then . $SYS/settings.conf; fi
 # 给宿主的命令（FIFO，宿主没在听也不会卡住这个脚本）
 send() { _p=$(cat $W/cmd.pid 2>/dev/null); [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null || return 0; ( echo "$1" > $X/ctl/cmd ) & }   # 没人监听就不发，否则每个手势留下一个永远阻塞的进程
 # ---- 手势提示（docs/gesture-hint.md）：宿主自己让显示桥画一个“方块”小牌子（图标 + 粗体中文 + 英文小字），Android 卡住也看得到 ----
@@ -69,7 +82,7 @@ run_action() {
         ''|none) ;;
         back|home|panel|switch|appopt)
             # appopt：桌面马上打开一个页面，本身就是反馈；牌子的字库里没有“显示优化”这几个字，只在没有响应时提示
-            case "$1" in back) hint back "BACK|返回" ;; home) hint home "HOME|桌面" ;; panel) hint panel "PANEL|面板" ;; switch) hint switch "SWITCH APPS|切换" ;; esac
+            case "$1" in back) hint back "BACK|返回" ;; home) hint home "HOME|桌面" ;; switch) hint switch "SWITCH APPS|切换" ;; esac
             # 每次都写一个新文件再改名（inotify 的 MOVED_TO，桌面每次都收得到）。以前是 touch：文件已经在的话（开机时桌面还没开始听、
             # 桌面进程被杀重启的那几秒里做了手势）touch 只改时间、桌面收不到事件，文件就一直留着，之后每次下划都是“没有响应”，
             # 直到重启 VeraDroid（用户诊断-20261120：开机时下划了一次，之后一整天应用里拉不出面板）。
@@ -138,6 +151,7 @@ case "$1" in
     light)  POS=l; step flIntensity "$2" ;;                     # 左半屏上下滑
     warmth) POS=r; step currentAmberLevel "$2" ;;               # 右半屏上下滑
     panel)  POS=t; run_action panel ;;
+    watch_panel) POS=t; watch_ctl act.panel_open ;;
     tl) POS=tl; run_action "${G_TL:-none}" ;;
     tr) POS=tr; run_action "${G_TR:-none}" ;;
     bl) POS=bl; run_action "${G_BL:-kindle}" ;;                 # 默认回到 Kindle（settings.sh）

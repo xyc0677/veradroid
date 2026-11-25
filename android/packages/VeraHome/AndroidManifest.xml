@@ -63,12 +63,13 @@
         <!-- 盖在当前应用上面的设置（下拉面板 / 宿主的“设置”）：自己的任务，返回 / ✕ 回到原来的应用 -->
         <activity
             android:name=".SettingsActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:taskAffinity="com.veradroid.home.settings"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
             android:windowSoftInputMode="stateAlwaysHidden"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density" />
         <activity
             android:name=".PanelActivity"
             android:theme="@android:style/Theme.Holo.Light.Dialog.NoActionBar"

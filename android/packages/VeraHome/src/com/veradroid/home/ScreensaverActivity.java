@@ -484,4 +484,7 @@ public class ScreensaverActivity extends Activity {
             }
         }, "saver-import").start();
     }
+
+    @Override protected void onResume() { super.onResume(); Panel.closeOnDraw(getWindow().getDecorView()); }
+    @Override public void finish() { super.finish(); overridePendingTransition(0, 0); }
 }

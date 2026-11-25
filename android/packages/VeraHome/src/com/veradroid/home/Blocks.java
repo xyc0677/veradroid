@@ -56,7 +56,19 @@ final class Blocks {
      * 下一次画面变化用墨水屏控制器的硬件擦除（MTK swipe，显示桥的 SWIPE 一次性命令）：只有几步，不是连续动画；
      * 中间帧是控制器自己的快刷，最后一帧是 REAGL（GLR16），不闪、不留残影。i.MX 的机型没有这个功能，桥会直接照常刷新。
      */
+    private static int isImx = -1;
+    private static boolean hasHwSwipe() {
+        if (isImx < 0) {
+            String m = "";
+            try { m = new java.io.BufferedReader(new java.io.FileReader("/dev/kfb/model")).readLine(); } catch (Throwable ignored) { }
+            m = m == null ? "" : m.trim();
+            isImx = ("oa2".equals(m) || "ko3".equals(m) || "pw4".equals(m) || "pw3".equals(m) || "pw2".equals(m) || "kv".equals(m) || "oa1".equals(m) || "kt4".equals(m)) ? 1 : 0;
+        }
+        return isImx == 0;
+    }
+
     static void swipe(Context c, int dir, int kind) {
+        if (!hasHwSwipe()) return;
         int lv = anim(c);
         if (lv == 0) return;
         int steps = kind == KIND_LIST ? lv : lv + 1;   // 简洁：翻列表 1 步、换页 / 设置单 2 步；完整：2 / 3 步
@@ -428,14 +440,27 @@ final class Blocks {
     }
 
     /** 页面最上面的标题区：英文小字一行（可以带数字，如 “LIBRARY / 12 BOOKS”）、大标题、右边一个方框按钮。 */
-    static LinearLayout pageHead(Context c, String en, String zh, View right) {
-        LinearLayout h = new LinearLayout(c);
+    static LinearLayout pageHead(final Context c, String en, String zh, final View right) {
+        final LinearLayout h = new LinearLayout(c);
         h.setOrientation(LinearLayout.HORIZONTAL);
         h.setGravity(Gravity.CENTER_VERTICAL);
         h.setPadding(dp(c, 16), dp(c, 6), dp(c, 16), dp(c, 6));
         LinearLayout l = titled(c, en, zh, 26, true);
         h.addView(l, weight(1));
-        if (right != null) h.addView(right);
+        if (right != null) {
+            h.addView(right);
+            final View target = right.isClickable() ? right
+                : (right instanceof ViewGroup && ((ViewGroup) right).getChildCount() == 1 && ((ViewGroup) right).getChildAt(0).isClickable()
+                    ? ((ViewGroup) right).getChildAt(0) : null);
+            if (target != null) {
+                h.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                    @Override public void onLayoutChange(View v, int l0, int t0, int r0, int b0, int ol, int ot, int or, int ob) {
+                        int left = right.getLeft() + (target == right ? 0 : target.getLeft()) - dp(c, 14);
+                        h.setTouchDelegate(new android.view.TouchDelegate(new android.graphics.Rect(Math.max(0, left), 0, h.getWidth(), h.getHeight()), target));
+                    }
+                });
+            }
+        }
         return h;
     }
 

@@ -58,8 +58,12 @@ wifi_ps_tick() {
             busy=
             [ -f $W/fwd.id ] && busy=fwd                                  # 传书网页开着
             dt=$((now - pt)); [ $dt -gt 0 ] && [ $(( (tot - prx) / dt )) -ge ${WIFI_BUSY_BPS:-2048} ] && busy=rx   # ≥ 2 KB/s 即判定在联网交互，立刻唤醒 Wi-Fi 降延迟
+            _wfg=$(cat $X/fg 2>/dev/null)
+            if [ -z "$busy" ] && [ -n "$_wfg" ] && [ "$_wfg" != com.veradroid.home ] && [ -f $W/lastinput ]; then
+                [ $(( $(date +%s) - $(stat -c %Y $W/lastinput 2>/dev/null || echo 0) )) -le ${WIFI_TOUCH_S:-20} ] && busy=touch
+            fi
             if [ -n "$busy" ]; then echo $now > $W/wifi.busy; wifi_ps_off
-            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge 120 ]; then wifi_ps_restore
+            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge ${WIFI_IDLE_S:-120} ]; then wifi_ps_restore
             fi ;;
     esac
 }

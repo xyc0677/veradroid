@@ -184,7 +184,7 @@ settings_load() {
 
 # 把当前设置写给桌面看（/dev/kfb/settings）
 settings_publish() {
-    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG UPDATE_BACKUP USB_ASK PAGE_KEYS_MAP; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; echo "PAGE_KEYS_HW=$([ -n "$PAGE_KEYS" ] && echo 1 || echo 0)"; } > $X/settings.tmp \
+    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG UPDATE_BACKUP USB_ASK PAGE_KEYS_MAP PAGE_KEYS_FLIP; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; echo "PAGE_KEYS_HW=$([ -n "$PAGE_KEYS" ] && echo 1 || echo 0)"; } > $X/settings.tmp \
         && printf 'SYSTEM_FONT=%s\nSYSTEM_FONT_LIVE=%s\n' "$SYSTEM_FONT" "$(cat $W/sysfont/android 2>/dev/null)" >> $X/settings.tmp \
         && mv -f $X/settings.tmp $X/settings
     type ub_mirror >/dev/null 2>&1 && ub_mirror      # 安装器读的副本（backup.sh）
@@ -200,7 +200,7 @@ settings_apply() {
     if [ -s "$sfile" ]; then
         sa_raw=" $(tr '\n' ' ' < "$sfile") "
         sa_upd=""
-        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK PAGE_KEYS_MAP; do
+        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK PAGE_KEYS_MAP PAGE_KEYS_FLIP; do
             case "$sa_raw" in *" $k="*) ;; *) continue ;; esac
             v=$(sed -n "s/^$k=//p" "$sfile" | tail -1)
             [ -n "$v" ] || continue
@@ -210,6 +210,7 @@ settings_apply() {
                 KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop) ;; KINDLE_UI=*) continue ;;
                 GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; GESTURE_HINT=*) continue ;;
                 PAGE_KEYS_MAP=volume|PAGE_KEYS_MAP=page|PAGE_KEYS_MAP=dpad|PAGE_KEYS_MAP=default) ;; PAGE_KEYS_MAP=*) continue ;;
+                PAGE_KEYS_FLIP=0|PAGE_KEYS_FLIP=1|PAGE_KEYS_FLIP=default) ;; PAGE_KEYS_FLIP=*) continue ;;
             esac
             sa_upd="${sa_upd}${k}=${v}
 "
@@ -258,11 +259,11 @@ settings_apply() {
         fi
     fi
     rm -f "$sfile" "$sfile.conf"
-    pk_before=$PAGE_KEYS_MAP
+    pk_before="$PAGE_KEYS_MAP:${PAGE_KEYS_FLIP:-0}"
     settings_load
     settings_publish
     # 实体翻页键发成什么键（memory.sh）：改了就重写键位表，让 Android 重新打开这个设备（立即生效）
-    [ "$PAGE_KEYS_MAP" != "$pk_before" ] && type page_keys_apply >/dev/null 2>&1 && page_keys_apply
+    [ "$PAGE_KEYS_MAP:${PAGE_KEYS_FLIP:-0}" != "$pk_before" ] && type page_keys_apply >/dev/null 2>&1 && page_keys_apply
     # ANIM 必须先于 SET：显示桥收到 SET 会立刻重绘，若 ANIM 在后面，这次重绘仍用旧步数，
     # 下一条 P/D 又可能先碰到旧缓冲，导致“设置里选了 6 步，日志还是 12”。
     epd_send ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN

@@ -35,7 +35,7 @@ out=$(VD=$T/vd SYS=$T/sys W=$T/w X=$T/w/kfb sh -c '
     . host/pw6/boot/lib/appprof.sh
     appprof_init
     appprof_fg com.tencent.weread.eink; echo "A $(tr "\n" ";" < $SYS/settings.app)"
-    : > $W/epd; appprof_fg com.duokan.reader; echo "B $(wc -l < $W/epd | tr -d " ")"            # same profile: nothing sent
+    : > $W/epd; appprof_fg org.koreader.launcher; echo "B $(wc -l < $W/epd | tr -d " ")"        # same profile: nothing sent
     appprof_fg org.mozilla.firefox; echo "C $(tr "\n" ";" < $SYS/settings.app)"                  # prefix rule
     appprof_fg com.example.none; echo "D $([ -f $SYS/settings.app ] && echo app || echo global)"
     appprof_set "com.duokan.reader|KFB_MODE=2;KFB_X=\$(reboot);KFB_FLASH=3"
@@ -50,7 +50,7 @@ out=$(VD=$T/vd SYS=$T/sys W=$T/w X=$T/w/kfb sh -c '
 ')
 expect() { printf '%s\n' "$out" | grep -qxF "$1" || fail "expected '$1' in:
 $out"; }
-expect "A KFB_MODE=1;KFB_FLASH=6;"
+expect "A KFB_SMOOTH=3;KFB_FLASH=6;"
 expect "B 0"
 expect "C KFB_SCROLLDU=300;"
 expect "D global"

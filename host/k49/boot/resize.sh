@@ -65,7 +65,7 @@ sync
 i=0
 while st_mounted || [ -n "$(img_loops)" ]; do
     storage_umount
-    for l in $(img_loops); do losetup -d "$(loop_dev $l)" 2>/dev/null; done
+    for l in $(img_loops); do loop_detach "$(loop_dev $l)"; done
     i=$((i + 1)); [ $i -ge 25 ] && break
     usleep 200000
 done

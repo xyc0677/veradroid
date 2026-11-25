@@ -55,6 +55,14 @@ final class VdHostNet {
      * the fallback, DNS always comes from the file.
      */
     static LinkProperties linkProperties(String iface) {
+        return linkProperties(iface, false);
+    }
+
+    static LinkProperties linkPropertiesQuiet(String iface) {
+        return linkProperties(iface, true);
+    }
+
+    private static LinkProperties linkProperties(String iface, boolean quiet) {
         if (!enabled() || iface == null) return null;
         String[] v = read();
         if (v == null || !iface.equals(v[0])) return null;
@@ -74,10 +82,10 @@ final class VdHostNet {
                     if (!d.isEmpty()) lp.addDnsServer(NetworkUtils.numericToInetAddress(d));
                 }
             }
-            Log.i(TAG, "using the Kindle's network as-is: " + lp);
+            if (!quiet) Log.i(TAG, "using the Kindle's network as-is: " + lp);
             return lp;
         } catch (IllegalArgumentException e) {
-            Log.e(TAG, "bad " + FILE + ": " + e);
+            if (!quiet) Log.e(TAG, "bad " + FILE + ": " + e);
             return null;
         }
     }

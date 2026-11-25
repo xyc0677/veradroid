@@ -125,17 +125,20 @@
 #define MAXEV 512
 
 static int W = 1272, H = 1696, EDGE = 60, EDGE_TOP = -1, TOUCH_DEBUG = 0, WINDOW_MS = 80, CORNER = 160, CORNER_MS = 2000, GESTURES = 1, EDGE_BACK = 1;
-static const char *LOGF = "/dev/null", *ACT = "", *FLAGF = NULL, *INJECT = NULL, *GCONF = NULL, *FGF = NULL;
+static const char *LOGF = "/dev/null", *ACT = "", *FLAGF = NULL, *INJECT = NULL, *GCONF = NULL, *FGF = NULL, *CTL_DIR = NULL;
 /* per-gesture switches (--gconf) */
 static int G_EDGE_BACK = 1, G_EDGE_PANEL = 1, G_TWO_TAP = 1, G_TWO_LONG = 1, G_TWO_BACK = 1, G_TWO_SLIDE = 1;
 static int G_TAP = 1, G_TAP_KEY = KEY_VOLUMEDOWN;   /* bezel double tap (gesture_tap) -> this key, see the header */
-static int tapfd = -1;
+static int tapfd = -1, keyfd = -1;
+static unsigned long n_keyboost = 0;
+static long long last_poke_ms = 0;
+static int poke_due = 0;
 static int BOOST_MS = 150, BOOST_KHZ = 0, SCROLL_PX = 20, PASS_PX = 12;
 static int TAP_PX = 28;       /* gconf TAP_PX: tap dead zone (px on a 1272 px wide panel, scaled), see dz_forward; 0 = off */
 static int HELD_REPLAY = 0;   /* gconf HELD_REPLAY=1: held frames replayed as read (before 1.04 / 1.12), see flush_held */
 static int RT_PRIO = 0, RT_GCONF = -1, started = 0;   /* --rt, gconf RT= (overrides it while present) */
 static void set_rt(int prio, const char *who);   /* touch boost / scroll hints, see the header */
-static const char *TAPDEV = NULL;
+static const char *TAPDEV = NULL, *KEYDEV = NULL;
 static int G_EDGE_SENS = 1;            /* edge swipe sensitivity: 0 low, 1 standard, 2 high (scales the strip width and the swipe distance) */
 static int EDGE_SWIPE;                 /* defined with its default further down */
 static int EDGE_BASE = -1, EDGE_TOP_BASE = -1, EDGE_SWIPE_BASE = -1;   /* command-line values, captured at startup */
@@ -369,6 +372,24 @@ static void action(const char *name, const char *arg)
         _exit(127);
     }
     /* children are reaped by SIGCHLD ignore */
+}
+
+static void panel_fast(void)
+{
+    if (!CTL_DIR || !CTL_DIR[0]) { action("panel", NULL); return; }
+    char tmp[256], dst[256];
+    snprintf(tmp, sizeof(tmp), "%s/.act.panel_open.%d", CTL_DIR, (int)getpid());
+    snprintf(dst, sizeof(dst), "%s/act.panel_open", CTL_DIR);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    if (fd >= 0) {
+        close(fd);
+        if (rename(tmp, dst) == 0) {
+            action("watch_panel", NULL);
+            return;
+        }
+        unlink(tmp);
+    }
+    action("panel", NULL);
 }
 
 /* back gesture: the key for Android, and "hint back" so the host shows its on-screen badge (action.sh, GESTURE_HINT) */
@@ -677,7 +698,7 @@ static long long boost_until = 0;          /* 0 = not boosted */
 static int boost_on = 0;
 static char boost_orig[24];
 static unsigned long n_boost = 0;
-static char CPUFREQ_MIN[160], CPUFREQ_MAX[160];   /* empty = no --cpufreq: boost off */
+static char CPUFREQ_MIN[160], CPUFREQ_MAX[160], CPUFREQ_HWMIN[160];   /* empty = no --cpufreq: boost off */
 static int sysfs_read(const char *path, char *buf, int len)
 {
     int fd = open(path, O_RDONLY);
@@ -703,12 +724,17 @@ static void boost_begin(void)
     if (sysfs_read(CPUFREQ_MIN, boost_orig, sizeof(boost_orig)) < 0) return;
     if (BOOST_KHZ > 0) snprintf(mx, sizeof(mx), "%d", BOOST_KHZ);
     else if (sysfs_read(CPUFREQ_MAX, mx, sizeof(mx)) < 0) return;
-    if (atol(mx) <= atol(boost_orig)) return;       /* already there (or capped below the minimum: powersave) */
+    if (atol(mx) <= atol(boost_orig)) {
+        if (CPUFREQ_HWMIN[0] && access("/dev/shm/veradroid/lboost.active", F_OK) == 0 &&
+            sysfs_read(CPUFREQ_HWMIN, boost_orig, sizeof(boost_orig)) > 0 && atol(mx) > atol(boost_orig)) { boost_on = 1; }
+        return;
+    }
     if (sysfs_write(CPUFREQ_MIN, mx) == 0) { boost_on = 1; n_boost++; }
 }
 static void boost_end(void)
 {
-    if (boost_on && sysfs_write(CPUFREQ_MIN, boost_orig) < 0) logf_("boost: could not put scaling_min_freq back to %s", boost_orig);
+    if (boost_on && access("/dev/shm/veradroid/lboost.active", F_OK) != 0 &&
+        sysfs_write(CPUFREQ_MIN, boost_orig) < 0) logf_("boost: could not put scaling_min_freq back to %s", boost_orig);
     boost_on = 0; boost_until = 0;
 }
 
@@ -919,12 +945,15 @@ static void handle_frame(struct input_event *fr, int n)
     int active = count_active();
     (void)down_edge;
     static int prev_any = 0;
+    static long long last_wake_ms = 0;
     if (active && !prev_any) {        /* first finger down: boost before anything else (the gconf may switch it off) */
         idle_thaw();                  /* the container first: the frame below goes to its input reader */
         gconf_load();
         boost_begin();
         boost_until = 0;              /* held while a finger is down */
         scroll_sent = 0;
+        long long tw = now_ms();
+        if (!last_wake_ms || tw - last_wake_ms >= 800) { last_wake_ms = tw; epd_cmd("WAKE\n"); }
     } else if (!active && prev_any) {
         if (boost_on) boost_until = now_ms() + BOOST_MS;
         epd_cmd("TOUCH\n");          /* an input event: the bridge counts only page turns that follow one (FLIPINPUT) */
@@ -942,7 +971,6 @@ static void handle_frame(struct input_event *fr, int n)
 
     int gest = GESTURES && !(FLAGF && access(FLAGF, F_OK) == 0);
 
-    static int poke_due = 0;
     if (active == 0 && poke_due) { poke_due = 0; action("poke", NULL); }
 
     switch (md) {
@@ -958,7 +986,7 @@ static void handle_frame(struct input_event *fr, int n)
             t_down = now_ms();
             for (int i = 0; i < n && nheld < MAXEV; i++) held[nheld++] = fr[i];
             /* keep the Kindle from sleeping while the screen is being used; defer fork/exec until lift so touch-down has 0 delay */
-            { static long long last_poke = 0; if (t_down - last_poke > 20000) { last_poke = t_down; poke_due = 1; } }
+            if (!last_poke_ms || t_down - last_poke_ms > 20000) { last_poke_ms = t_down; poke_due = 1; }
             corner_fired = 0;
             two_done = 0;
             eb_third = -1;
@@ -1042,7 +1070,7 @@ static void handle_frame(struct input_event *fr, int n)
         if (active == 0) {
             if (swipe) {                    /* a fast flick that ended before the swipe was seen while held */
                 corner_fired = 1;
-                if (md == EDGE_B) eb_swipe(1); else action("panel", NULL);
+                if (md == EDGE_B) eb_swipe(1); else panel_fast();
             } else if (!corner_fired) {     /* a tap: deliver the held press and this release to Android */
                 for (int i = 0; i < n && nheld < MAXEV; i++) held[nheld++] = fr[i];
                 flush_held();
@@ -1052,10 +1080,12 @@ static void handle_frame(struct input_event *fr, int n)
             corner_fired = 1;               /* fire as soon as the swipe is long enough; the held press never reaches Android */
             nheld = 0;
             if (md == EDGE_B) eb_swipe(0);  /* thirds with a hold action: armed (EDGE_ARM) until lift / hold */
-            else action("panel", NULL);
+            else panel_fast();
         } else if (!corner_fired) {
             for (int i = 0; i < n && nheld < MAXEV; i++) held[nheld++] = fr[i];
-            if (now_ms() - t_down >= EDGE_HOLD_MS || nheld >= MAXEV - 8) {
+            long long hold_lim = EDGE_HOLD_MS;
+            if (CTL_DIR && md == EDGE_T && dy > 14 && dy > abs(dx) && hold_lim < 180) hold_lim = 180;
+            if (now_ms() - t_down >= hold_lim || nheld >= MAXEV - 8) {
                 flush_held();              /* not a gesture (yet): Android gets the press, the rest of the touch is forwarded */
                 edge_kind = md;
                 md = EDGE_FWD;
@@ -1075,7 +1105,7 @@ static void handle_frame(struct input_event *fr, int n)
             cancel_to_android();
             md = SWALLOW;
             if (edge_kind == EDGE_B) eb_swipe(0);   /* may arm (md = EDGE_ARM) */
-            else action("panel", NULL);
+            else panel_fast();
         } else {
             /* corner long press also for touches that started inside the top/bottom edge strip (they are in EDGE_FWD,
                not PASS): same rule as below -- one finger, held >= CORNER_MS, moved < 40 px */
@@ -1416,13 +1446,47 @@ static void tap_read(void)
             if (paused || !G_TAP || (FLAGF && access(FLAGF, F_OK) == 0)) { logf_("tap key %d ignored", ev.code); continue; }
             logf_("bezel tap (key %d) -> key %d", ev.code, G_TAP_KEY);
             idle_thaw();
-            epd_cmd("TOUCH\n");
+            boost_begin();
+            if (boost_on) boost_until = now_ms() + BOOST_MS;
+            epd_cmd("WAKE\nTOUCH\n");
             key_tap(G_TAP_KEY);
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
         logf_("tapdev gone (%s), bezel tap off", n < 0 ? strerror(errno) : "eof");   /* gesturetapd restarted: rescan on the next start */
         close(tapfd); tapfd = -1;
+        return;
+    }
+}
+
+static void key_read(void)
+{
+    struct input_event ev[16];
+    for (;;) {
+        ssize_t n = read(keyfd, ev, sizeof(ev));
+        if (n >= (ssize_t)sizeof(ev[0])) {
+            int cnt = (int)(n / (ssize_t)sizeof(ev[0]));
+            for (int i = 0; i < cnt; i++) {
+                if (paused || ev[i].type != EV_KEY) continue;
+                if (ev[i].value == 1) {
+                    long long t = now_ms();
+                    idle_thaw();
+                    gconf_load();
+                    boost_begin();
+                    if (boost_on) boost_until = t + BOOST_MS;
+                    epd_cmd("WAKE\nTOUCH\n");
+                    n_keyboost++;
+                    if (!last_poke_ms || t - last_poke_ms > 20000) { last_poke_ms = t; poke_due = 1; }
+                } else if (ev[i].value == 0 && poke_due) {
+                    poke_due = 0;
+                    action("poke", NULL);
+                }
+            }
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
+        logf_("keydev gone (%s)", n < 0 ? strerror(errno) : "eof");
+        close(keyfd); keyfd = -1;
         return;
     }
 }
@@ -1448,9 +1512,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--inject") && i + 1 < argc) INJECT = argv[++i];
         else if (!strcmp(argv[i], "--gconf") && i + 1 < argc) GCONF = argv[++i];
         else if (!strcmp(argv[i], "--fg") && i + 1 < argc) FGF = argv[++i];
+        else if (!strcmp(argv[i], "--ctl-dir") && i + 1 < argc) CTL_DIR = argv[++i];
         else if (!strcmp(argv[i], "--rotate") && i + 1 < argc) { ROT = atoi(argv[++i]); ROT_ON = 1; }
         else if (!strcmp(argv[i], "--vw") && i + 1 < argc) VW = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tapdev") && i + 1 < argc) TAPDEV = argv[++i];
+        else if (!strcmp(argv[i], "--keydev") && i + 1 < argc) KEYDEV = argv[++i];
         else if (!strcmp(argv[i], "--epd-fifo") && i + 1 < argc) EPDF = argv[++i];
         else if (!strcmp(argv[i], "--rt") && i + 1 < argc) RT_PRIO = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stuck-ms") && i + 1 < argc) STUCK_MS = atoi(argv[++i]);
@@ -1462,6 +1528,7 @@ int main(int argc, char **argv)
             const char *d = argv[++i];
             snprintf(CPUFREQ_MIN, sizeof(CPUFREQ_MIN), "%s/scaling_min_freq", d);
             snprintf(CPUFREQ_MAX, sizeof(CPUFREQ_MAX), "%s/scaling_max_freq", d);
+            snprintf(CPUFREQ_HWMIN, sizeof(CPUFREQ_HWMIN), "%s/cpuinfo_min_freq", d);
         }
         else if (!strcmp(argv[i], "--proto") && i + 1 < argc) {
             const char *v = argv[++i];
@@ -1506,6 +1573,11 @@ int main(int argc, char **argv)
         if (tapfd < 0) fprintf(stderr, "tapdev %s: %s\n", TAPDEV, strerror(errno));
         else if (ioctl(tapfd, EVIOCGRAB, 1) < 0) perror("EVIOCGRAB tapdev");
     }
+    if (KEYDEV && KEYDEV[0]) {
+        keyfd = open(KEYDEV, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (keyfd < 0) fprintf(stderr, "keydev %s: %s\n", KEYDEV, strerror(errno));
+        else logf_("keydev %s monitored (non-grabbed)", KEYDEV);
+    }
     {
         struct input_absinfo ai;
         if (src_proto == PROTO_B && ioctl(tfd, EVIOCGABS(ABS_MT_SLOT), &ai) == 0 && ai.value >= 0 && ai.value < MAXSLOT) hw_slot = cur_slot = ai.value;
@@ -1539,7 +1611,7 @@ int main(int argc, char **argv)
         }
         long long now_t = now_ms();
         if (boost_until && now_t >= boost_until) boost_end();
-        struct pollfd pf[3] = { { tfd, POLLIN, 0 }, { ifd, POLLIN, 0 }, { tapfd, POLLIN, 0 } };
+        struct pollfd pf[4] = { { tfd, POLLIN, 0 }, { ifd, POLLIN, 0 }, { tapfd, POLLIN, 0 }, { keyfd, POLLIN, 0 } };
         /* Exact deadline poll timeout: avoids 100 Hz wakeups during touch hold and removes up to 10 ms jitter on WINDOW_MS / EDGE_HOLD_MS */
         int pto = -1;
         long long dl = -1;
@@ -1554,7 +1626,11 @@ int main(int argc, char **argv)
         }
         if (STUCK_MS > 0 && (out_any() || count_active())) { int w = STUCK_MS / 4 > 10 ? STUCK_MS / 4 : 10; if (pto < 0 || w < pto) pto = w; }
         if (boost_until) { long long left = boost_until - now_t; if (left < 1) left = 1; if (pto < 0 || left < pto) pto = (int)left; }
-        int pr = poll(pf, 3, pto);   /* a negative fd is skipped by poll */
+        int pr = poll(pf, 4, pto);   /* a negative fd is skipped by poll */
+        if (pr > 0 && keyfd >= 0 && (pf[3].revents & (POLLIN | POLLERR | POLLHUP))) {
+            key_read();
+            if (!(pf[0].revents & POLLIN) && !(ifd >= 0 && (pf[1].revents & POLLIN)) && !(tapfd >= 0 && (pf[2].revents & (POLLIN | POLLERR | POLLHUP)))) continue;
+        }
         if (pr > 0 && tapfd >= 0 && (pf[2].revents & (POLLIN | POLLERR | POLLHUP))) {
             tap_read();
             if (!(pf[0].revents & POLLIN) && !(ifd >= 0 && (pf[1].revents & POLLIN))) continue;
@@ -1648,9 +1724,10 @@ int main(int argc, char **argv)
     boost_end();
     ioctl(tfd, EVIOCGRAB, 0);
     if (tapfd >= 0) ioctl(tapfd, EVIOCGRAB, 0);
+    if (keyfd >= 0) close(keyfd);
     ioctl(ufd, UI_DEV_DESTROY);
     if (kfd >= 0) ioctl(kfd, UI_DEV_DESTROY);
-    logf_("boost: %lu times, scroll hints: %lu, idle thaws: %lu", n_boost, n_scroll, n_thaw);
+    logf_("boost: %lu times (keys: %lu), scroll hints: %lu, idle thaws: %lu", n_boost, n_keyboost, n_scroll, n_thaw);
     logf_("stuck contacts: %lu lifted in Android, %lu tracking id changes, %lu watchdog checks, %lu resets", n_released, n_tidchg, n_wd, n_reset);
     logf_("stopped, forwarded %lu events, %lu drops, %lu stuck fingers lifted, %lu BTN_TOUCH fixed, %lu pressure fixed", fwd_count, drops, resync_lifts, btn_fixes, pres_fixes);
     return 0;

@@ -121,7 +121,7 @@ compile_prof_save() { # pkg
 compile_prof_back() { # pkg：编成了（odex 是 speed-profile）就只删存的那份
     for cpb_k in cur ref; do
         cpb_f=$SYS/data/misc/profiles/$cpb_k/$1/primary.prof; [ $cpb_k = cur ] && cpb_f=$SYS/data/misc/profiles/cur/0/$1/primary.prof
-        if [ -s $W/compile.prof.$cpb_k.$1 ] && [ "$(odex_filter "$1")" != speed-profile ] && [ -f "$cpb_f" ] && [ ! -s "$cpb_f" ]; then
+        if [ -s $W/compile.prof.$cpb_k.$1 ] && ! compile_done_filter "$(odex_filter "$1")" speed-profile && [ -f "$cpb_f" ] && [ ! -s "$cpb_f" ]; then
             cat $W/compile.prof.$cpb_k.$1 > "$cpb_f" 2>/dev/null && t "compile: $1 profile ($cpb_k) put back after the stopped speed-profile compile"
         fi
         rm -f $W/compile.prof.$cpb_k.$1
@@ -254,7 +254,33 @@ compile_watch() {
 compile_prefault() {
     [ "${APP_PREFAULT:-auto}" = off ] && return 0
     [ -f $W/prefault.done ] && return 0
-    lowmem_ram && { : > $W/prefault.done; return 0; }
+    if lowmem_ram; then
+        [ -n "${APP_PREFAULT_HEAD_MB:-}" ] && [ "${APP_PREFAULT_HEAD_MB:-0}" -gt 0 ] || { : > $W/prefault.done; return 0; }
+        alive $W/prefault.pid && return 0
+        [ "$(mem_avail_mb)" -ge 120 ] || return 0
+        [ -n "$(pgrep dex2oat 2>/dev/null)" ] && return 0
+        mkdir -p $W/prefault.d 2>/dev/null
+        (
+            for o in $SYS/data/app/*/oat/arm/base.odex; do
+                [ -f "$o" ] || continue
+                pd=${o#$SYS/data/app/}; pd=$W/prefault.d/${pd%%/*}
+                [ -f "$pd" ] && continue
+                [ "$(mem_avail_mb)" -ge 120 ] || exit 0
+                [ -f $W/frozen ] || [ -f $W/saver_frozen ] && exit 0
+                [ -n "$(pgrep dex2oat 2>/dev/null)" ] && exit 0
+                [ -f "${o%/*}/.vd-keep.odex" ] && exit 0
+                t0=$(cut -d' ' -f1 /proc/uptime)
+                art_f="${o%.odex}.art"
+                [ -f "$art_f" ] && { ionice -c 3 nice -n 19 cat "$art_f" > /dev/null 2>&1 || nice -n 19 cat "$art_f" > /dev/null 2>&1; }
+                ionice -c 3 nice -n 19 dd if="$o" of=/dev/null bs=1048576 count="${APP_PREFAULT_HEAD_MB}" 2>/dev/null || nice -n 19 dd if="$o" of=/dev/null bs=1048576 count="${APP_PREFAULT_HEAD_MB}" 2>/dev/null
+                : > "$pd"
+                t "prefault-head: ${o#$SYS/data/app/} (${APP_PREFAULT_HEAD_MB} MB + art) in $(awk -v a=$t0 -v b="$(cut -d' ' -f1 /proc/uptime)" 'BEGIN{printf "%.2f", b-a}') s"
+            done
+            : > $W/prefault.done
+        ) </dev/null >>$LOG 2>&1 &
+        echo $! > $W/prefault.pid
+        return 0
+    fi
     alive $W/prefault.pid && return 0
     [ "$(mem_avail_mb)" -ge 400 ] || return 0
     [ -n "$(pgrep dex2oat 2>/dev/null)" ] && return 0     # 编译时不预读（见下面）
@@ -750,7 +776,9 @@ compile_one() { # pkg mode [force|stale]
     # 不和前台抢 CPU）；512 MB 机型一律单线程。COMPILE_THREADS 可以强制指定。编完恢复。
     thr=${COMPILE_THREADS:-}
     if [ -z "$thr" ]; then
-        if lowmem_ram || compile_user_busy || ! compile_charging; then thr=1; fi
+        if [ -n "${COMPILE_IDLE_THREADS:-}" ] && ! compile_user_busy && ! compile_fg_app && [ "$(mem_avail_mb)" -ge 150 ]; then
+            thr=$COMPILE_IDLE_THREADS
+        elif lowmem_ram || compile_user_busy || ! compile_charging; then thr=1; fi
     fi
     othr=$(adb_sh "getprop dalvik.vm.dex2oat-threads" 2>/dev/null | tr -d '\r\n')
     [ -n "$thr" ] && adb_sh "setprop dalvik.vm.dex2oat-threads $thr" >/dev/null 2>&1
@@ -763,11 +791,11 @@ compile_one() { # pkg mode [force|stale]
         *) adb_sh "setprop dalvik.vm.dex2oat-flags '$oflags --no-watch-dog'" >/dev/null 2>&1 ;; esac
     s=$(cut -d. -f1 /proc/uptime)
     cs_ts=$(date +%s)
-    [ "$mode" = speed-profile ] && compile_prof_save "$pkg"
+    case "$mode" in speed-profile|speed|everything) compile_prof_save "$pkg" ;; esac
     compile_pm_start "$pkg" $W/compile.out -m $mode $cflag $pkg
     compile_babysit $cp_ "$pkg"
     compile_pm_wait; rc=$?
-    [ "$mode" = speed-profile ] && compile_prof_back "$pkg"
+    case "$mode" in speed-profile|speed|everything) compile_prof_back "$pkg" ;; esac
     # stale 不带 -f：PackageManager 只做了它认为需要的（relocation = patchoat）。之后还不是 UpToDate / 过滤器不对才整个重编
     if [ -z "$cflag" ] && [ ! -s $W/compile.abort ] && grep -q Success $W/compile.out && alive $W/pid; then
         if compile_stale_pkgs | grep -q "^$pkg " || ! compile_done_filter "$(odex_filter "$pkg")" "$mode"; then
