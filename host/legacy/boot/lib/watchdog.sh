@@ -164,6 +164,7 @@ do_restart() {
 
 # 内存盘（/dev/shm，占的是内存）里的日志：显示桥每刷一次写一行，开着几天能长到几 MB。超过上限就留后一半
 log_cap() {   # log_cap <文件> <字节>
+    [ -f "$1" ] || return 0
     sz=$(wc -c < "$1" 2>/dev/null || echo 0)
     [ "$sz" -gt "$2" ] 2>/dev/null || return 0
     tail -c $(($2 / 2)) "$1" > "$1.tmp" 2>/dev/null && cat "$1.tmp" > "$1"; rm -f "$1.tmp"
@@ -257,15 +258,24 @@ bat_poke_tick() {
 host_oom_protect() {
     [ -n "${HOST_OOM_ADJ--800}" ] || return 0
     for ho_n in cmd watchdog guard sleep input epd slirp vdkaf shutw; do
-        ho_p=$(cat $W/$ho_n.pid 2>/dev/null)
+        [ -r $W/$ho_n.pid ] || continue
+        ho_p=; read -r ho_p < $W/$ho_n.pid 2>/dev/null || true
         case "$ho_p" in ''|*[!0-9]*) continue ;; esac
-        [ "$(cat /proc/$ho_p/oom_score_adj 2>/dev/null)" = "${HOST_OOM_ADJ--800}" ] || echo "${HOST_OOM_ADJ--800}" > /proc/$ho_p/oom_score_adj 2>/dev/null
+        [ -r /proc/$ho_p/oom_score_adj ] || continue
+        ho_cur=; read -r ho_cur < /proc/$ho_p/oom_score_adj 2>/dev/null || true
+        [ "$ho_cur" = "${HOST_OOM_ADJ--800}" ] || echo "${HOST_OOM_ADJ--800}" > /proc/$ho_p/oom_score_adj 2>/dev/null
     done
     return 0
 }
 watchdog() {
     # PERF: poll every 60s while frozen to cut host wakeups. FIFO cmd.sh still handles UI.
-    # MEM: re-apply kernel LMK each tick (lab126 can reset minfree).
+    # MEM: re-apply kernel LMK each tick on low-RAM (<700MB) devices (lab126 can reset minfree); cache MemTotal once.
+    wd_mt=
+    if [ -r "${LMK_MEMINFO:-/proc/meminfo}" ]; then
+        while read -r wd_k wd_v _; do
+            [ "$wd_k" = "MemTotal:" ] && { wd_mt=$wd_v; break; }
+        done < "${LMK_MEMINFO:-/proc/meminfo}"
+    fi
     [ -f $W/booted ] || rm -f $W/ss.pid
     wd_was_frozen=
     wd_tick=0
@@ -274,10 +284,13 @@ watchdog() {
         sleep $sleep_for
         kill -0 $P 2>/dev/null || { t "system exited"; log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; break; }
         wd_tick=$((wd_tick + 1))
-        lmk_kernel_tune 2>/dev/null || true
-        host_oom_protect
+        [ -n "$wd_mt" ] && [ "$wd_mt" -lt 700000 ] 2>/dev/null && { lmk_kernel_tune 2>/dev/null || true; }
+        # 低频维护（每 3 轮 = 60 秒；冻结时每轮已经 ≥60 秒）：减少前台阅读时的后台 fork
+        if [ $((wd_tick % 3)) -eq 1 ] || [ $sleep_for -ge 60 ]; then
+            host_oom_protect
+            log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
+        fi
         var_guard; pm_pending_guard
-        log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
         if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then wd_was_frozen=1; fi
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ]; then
             # 命令监听没了（FIFO 建不起来、被杀）：桌面的“返回 Kindle”、设置、手势全都没反应，只能重启 Kindle。重新起一个。
@@ -288,8 +301,8 @@ watchdog() {
             # 解冻首圈补发一次 lmkd 档位，未冻结时每 15 轮（约 5 分钟）周期兜底
             if [ -n "$wd_was_frozen" ]; then
                 wd_was_frozen=
-                [ -f $W/booted ] && ( lmk_tune ) &
-            elif [ $((wd_tick % 15)) -eq 0 ] && [ -f $W/booted ]; then
+                [ -f $W/booted ] && { [ -z "$wd_mt" ] || [ "$wd_mt" -lt 700000 ] 2>/dev/null; } && ( lmk_tune ) &
+            elif [ $((wd_tick % 15)) -eq 0 ] && [ -f $W/booted ] && { [ -z "$wd_mt" ] || [ "$wd_mt" -lt 700000 ] 2>/dev/null; }; then
                 ( lmk_tune ) &
             fi
             # system_server 重启（Watchdog 杀掉后软重启）以后 ActivityManager 会在 +72~239s 把 lmkd 的门槛写回原厂大屏手机档，

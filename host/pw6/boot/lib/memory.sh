@@ -27,6 +27,8 @@ overcommit_restore() {
 # 反复回收、卡死，严重时看门狗整机重启（2026-11-21 社区“用完微信读书 Kindle 无限重启”排查时发现；不是重启循环的直接原因）。
 LMK_SYS=${LMK_SYS:-/sys/module/lowmemorykiller/parameters}
 lmk_kernel_tune() {
+    mf=$LMK_SYS/minfree
+    [ -f "$mf" ] || return 0
     mt=
     if [ -z "$LMK_MEMINFO" ] && [ -n "$_LMK_MEMTOTAL" ]; then
         mt=$_LMK_MEMTOTAL
@@ -37,9 +39,11 @@ lmk_kernel_tune() {
         [ -z "$LMK_MEMINFO" ] && _LMK_MEMTOTAL=$mt
     fi
     [ -n "$mt" ] && [ "$mt" -lt 700000 ] 2>/dev/null || return 0
-    mf=$LMK_SYS/minfree
     ad=$LMK_SYS/adj
-    [ -f "$mf" ] || return 0
+    if [ -f $W/lmk.state ]; then
+        lk_cur=; read -r lk_cur < "$mf" 2>/dev/null || true
+        [ "$lk_cur" = "2048,3072,4096,8192,14336,16384" ] && return 0
+    fi
     # 第一次改之前记下 Kindle 原来的值（看门狗每一轮都会再调一次：已经记过就不再记，免得把我们自己的值当成原值）
     lk_new=; [ -f $W/lmk.state ] || { { cat "$mf"; [ -f "$ad" ] && cat "$ad"; } > $W/lmk.state.tmp 2>/dev/null && mv -f $W/lmk.state.tmp $W/lmk.state && lk_new=1; }
     echo 2048,3072,4096,8192,14336,16384 > "$mf" 2>/dev/null || return 1

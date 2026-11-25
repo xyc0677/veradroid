@@ -49,17 +49,26 @@ wifi_ps_tick() {
         on)  wifi_ps_restore ;;
         off) wifi_ps_off ;;
         *)
-            d=$(wifi_dev); now=$(cut -d. -f1 /proc/uptime)
-            rx=$(cat /sys/class/net/$d/statistics/rx_bytes 2>/dev/null || echo 0)
-            tx=$(cat /sys/class/net/$d/statistics/tx_bytes 2>/dev/null || echo 0)
+            d=$(wifi_dev)
+            wp_up=; [ -r "${WIFI_UPTIME:-/proc/uptime}" ] && { read -r wp_up _ < "${WIFI_UPTIME:-/proc/uptime}" 2>/dev/null || true; }
+            now=${wp_up%%.*}; case "$now" in ''|*[!0-9]*) return 0 ;; esac
+            rx=0; [ -r "${WIFI_NET_SYS:-/sys/class/net}/$d/statistics/rx_bytes" ] && { read -r rx < "${WIFI_NET_SYS:-/sys/class/net}/$d/statistics/rx_bytes" 2>/dev/null || rx=0; }
+            tx=0; [ -r "${WIFI_NET_SYS:-/sys/class/net}/$d/statistics/tx_bytes" ] && { read -r tx < "${WIFI_NET_SYS:-/sys/class/net}/$d/statistics/tx_bytes" 2>/dev/null || tx=0; }
+            case "$rx" in ''|*[!0-9]*) rx=0 ;; esac
+            case "$tx" in ''|*[!0-9]*) tx=0 ;; esac
             tot=$((rx + tx))
-            set -- $(cat $W/wifi.rx 2>/dev/null); prx=${2:-$tot}; pt=${1:-$now}
+            pt=; prx=; [ -r $W/wifi.rx ] && { read -r pt prx _ < $W/wifi.rx 2>/dev/null || true; }
+            case "$pt" in ''|*[!0-9]*) pt=$now ;; esac
+            case "$prx" in ''|*[!0-9]*) prx=$tot ;; esac
             echo "$now $tot" > $W/wifi.rx
             busy=
             [ -f $W/fwd.id ] && busy=fwd                                  # 传书网页开着
             dt=$((now - pt)); [ $dt -gt 0 ] && [ $(( (tot - prx) / dt )) -ge ${WIFI_BUSY_BPS:-2048} ] && busy=rx   # ≥ 2 KB/s 即判定在联网交互，立刻唤醒 Wi-Fi 降延迟
             if [ -n "$busy" ]; then echo $now > $W/wifi.busy; wifi_ps_off
-            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge 120 ]; then wifi_ps_restore
+            elif [ -f $W/wifi.ps ]; then
+                wb=0; [ -r $W/wifi.busy ] && { read -r wb < $W/wifi.busy 2>/dev/null || wb=0; }
+                case "$wb" in ''|*[!0-9]*) wb=0 ;; esac
+                [ $((now - wb)) -ge 120 ] && wifi_ps_restore
             fi ;;
     esac
 }
