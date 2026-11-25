@@ -1833,7 +1833,7 @@ done
 #  3. 安装期间每 5 秒清一次 lab126_gui / framework 的重启计数，框架真起不来时也不会在安装途中重启整机（安装结束就不再管）。
 # 大量写盘期间（解压）每 2 秒 sync 一次：小内存的老机型上脏页攒多了一次刷盘会把整机卡住（见下面建系统盘的说明）
 SYNCER=
-syncer_on() { [ -n "$LOWPRI" ] || return 0; ( while :; do sleep 2; sync; done ) </dev/null >/dev/null 2>&1 & SYNCER=$!; }
+syncer_on() { [ -n "$LOWPRI" ] || return 0; ( while [ -d /proc/$$ ]; do sleep 2; sync; done ) </dev/null >/dev/null 2>&1 & SYNCER=$!; }
 syncer_off() { [ -n "$SYNCER" ] && kill "$SYNCER" 2>/dev/null; SYNCER=; return 0; }
 LOWPRI=
 if [ "$MODEL" = legacy ] || [ "$MODEL" = imx41 ]; then
