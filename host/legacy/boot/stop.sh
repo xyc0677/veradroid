@@ -68,16 +68,28 @@ RS=; [ -f $W/restarting ] && RS=1
 [ -d $FZ ] && android_thaw 2>/dev/null          # 冻着的进程收不到 SIGKILL
 type net_resume >/dev/null 2>&1 && net_resume     # 冻结时停下的 slirp4netns（freeze.sh）：停着收不到 SIGTERM
 ps=
-for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do
+for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile netheal; do
     p=$(cat $W/$f.pid 2>/dev/null)
+    [ "$f" = netheal ] && [ -z "$p" ] && p=$(cat $W/netheal.lock/pid 2>/dev/null)
     [ "$p" = "$PPID" ] && continue              # 看门狗自己调的：它在等这个脚本跑完
     [ "$p" = "$$" ] && continue                 # vdshutwatch exec 成了本脚本：pid 就是自己
     # 先杀子进程（watchdog 的 sleep 20 之类）：父进程死了它们还会继承着打开的脚本文件，让 /mnt/base-us 卸不掉
     # 只限这几个循环：cmd 的子进程里有脱离出去的卸载 / 整包更新，不能杀
-    # legacy：after_boot 在容器里跑命令用的是 chroot /proc/<init>/root（没有 PID 命名空间可进），这些子进程不会随容器
-    # 一起死；after_boot 不停，它就在我们杀完容器之后继续起新的，占着系统盘（PW3 模拟器实测：返回 Kindle 后系统盘卸不掉）
-    case "$f" in guard|watchdog|sleep|lipc|usb|boot|afterboot|compile) [ -n "$p" ] && for c in $(pgrep -P "$p" 2>/dev/null); do kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
-    [ -n "$p" ] && kill $p 2>/dev/null && ps="$ps $p"
+    # legacy：after_boot / net_heal 在容器里跑命令用的是 chroot /proc/<init>/root（没有 PID 命名空间可进），这些子进程不会随容器
+    # 一起死；不停干净就会继续起新的或占着系统盘 / $LOG（PW3 模拟器实测：返回 Kindle 后系统盘卸不掉）
+    case "$f" in guard|watchdog|sleep|lipc|usb|boot|afterboot|compile|netheal)
+        if [ -n "$p" ]; then
+            kill -STOP "$p" 2>/dev/null
+            for c in $(pgrep -P "$p" 2>/dev/null); do
+                for cc in $(pgrep -P "$c" 2>/dev/null); do
+                    for ccc in $(pgrep -P "$cc" 2>/dev/null); do kill $ccc 2>/dev/null && ps="$ps $ccc"; done
+                    kill $cc 2>/dev/null && ps="$ps $cc"
+                done
+                kill $c 2>/dev/null && ps="$ps $c"
+            done
+        fi ;;
+    esac
+    [ -n "$p" ] && { kill $p 2>/dev/null && ps="$ps $p"; kill -CONT $p 2>/dev/null; }
 done
 # 预编译的看守循环（compile_hold 起的，pid 在 compile.guard）也写 $LOG：一起停。工作进程看到 compile.quit 就不再开始新的等待
 : > $W/compile.quit 2>/dev/null
@@ -94,16 +106,16 @@ done
 for p in $ps; do kill -9 $p 2>/dev/null; done
 kmsg "helpers and container killed"
 for p in $(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null); do kill $p 2>/dev/null; done
-for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do rm -f $W/$f.pid; done
-rm -rf $W/compile.quit $W/compile.guard $W/compile.stale $W/compile.lock $W/compile.queue $W/compile.total $W/compile.index $W/booted $W/pkglist.stamp $W/wifi.rx $W/wifi.busy
+for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile netheal; do rm -f $W/$f.pid; done
+rm -rf $W/netheal.lock $W/compile.quit $W/compile.guard $W/compile.stale $W/compile.lock $W/compile.queue $W/compile.total $W/compile.index $W/booted $W/pkglist.stamp $W/wifi.rx $W/wifi.busy
 croot=$(chroot_root)        # legacy：容器根的 设备号:inode，要在删 $W/pid、杀 init 之前记下来（之后就读不到了）
 input_stop
 display_stop
 # 共用网络模式下传书开着时放行过的端口（cmd.sh fwd_on）：撤掉，不让 Kindle 的防火墙一直开着这个口
 case "$(cat $W/fwd.id 2>/dev/null)" in ipt:*) iptables -D INPUT -i "$(cut -d: -f3 $W/fwd.id)" -p tcp --dport "$(cut -d: -f2 $W/fwd.id)" -j ACCEPT 2>/dev/null ;; esac
 # saver_*：屏保期间被停掉时 sleep.sh 来不及删；残留的 saver_frozen 让下一次运行的看门狗一直当作在屏保（不预编译、不应用设置、蓝牙按键全丢；PW6 真机遇到）
-kill $(cat $W/netheal.pid 2>/dev/null) 2>/dev/null
 rm -f $W/netheal.pid $W/net.sig $W/net.last $W/resolv.new
+rm -rf $W/netheal.lock
 rm -f $W/fwd.id $W/epd.log $W/pid $W/unshare.pid $W/frozen $W/saver_frozen $W/saver_nofreeze $W/slirp.sock $W/slirp.log $W/resolv.conf $W/input.log $W/input.err
 
 # legacy（3.0 内核，只有挂载命名空间）：容器进程不会随 init 一起消失，按“根目录和容器 init 相同”逐个杀；

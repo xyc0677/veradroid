@@ -26,6 +26,10 @@ for h in pw6 k49 legacy; do
     grep -q 'net_heal_kick resume' $b/lib/sleep.sh || fail "$h: no net check after the screensaver"
     grep -q 'net_watch_tick' $b/lib/watchdog.sh || fail "$h: watchdog does not watch the network"
     grep -q 'mkdir \$W/netheal.lock' $b/lib/network.sh || fail "$h: net_heal_kick has no atomic lock"
+    [ "$(grep -c 'for f in .* netheal; do' $b/stop.sh)" = 2 ] || fail "$h: stop.sh does not include netheal in helper stop/cleanup loops"
+    grep -q 'case "\$f" in .*|netheal)' $b/stop.sh || fail "$h: stop.sh does not reap netheal descendant processes"
+    grep -q '\$W/netheal.lock' $b/stop.sh || fail "$h: stop.sh does not clean up netheal.lock"
+    ! grep -q '^kill \$(cat \$W/netheal.pid' $b/stop.sh || fail "$h: stop.sh still has late bare kill of netheal.pid"
     grep -q 'rm -f \$W/netheal.pid \$W/net.sig \$W/net.last' $b/stop.sh || fail "$h: stop.sh leaves net check files (stop --stale fast path would never be clean)"
 done
 cmp -s host/pw6/boot/lib/network.sh host/k49/boot/lib/network.sh || fail "network.sh differs between pw6 and k49"
@@ -88,5 +92,23 @@ for h in pw6 legacy; do
     i=0; while { [ -d $W/netheal.lock ] || [ -f $W/netheal.pid ]; } && [ $i -lt 40 ]; do sleep 0.1; i=$((i + 1)); done
     [ "$(cat $runs)" = stale ] || fail "$h: stale netheal.lock was not taken over"
     [ ! -d $W/netheal.lock ] && [ ! -f $W/netheal.pid ] || fail "$h: lock or pid left behind after fast net_heal"
+
+    # stop.sh helper cleanup kills netheal, its multi-level descendants (even ignoring SIGTERM), netheal.pid, and netheal.lock
+    rm -f $T/leaf-$h.pid
+    net_heal() { sh -c "trap '' TERM; sh -c 'trap \"\" TERM; echo \$\$ > $T/leaf-$h.pid; sleep 60'"; }
+    ( net_heal_kick stoptest )
+    i=0; while [ ! -s $T/leaf-$h.pid ] && [ $i -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+    nhp=$(cat $W/netheal.pid 2>/dev/null); lfp=$(cat $T/leaf-$h.pid 2>/dev/null)
+    [ -n "$nhp" ] && [ -n "$lfp" ] && kill -0 "$lfp" 2>/dev/null || fail "$h: netheal descendant tree did not start"
+    cat > $T/stop-part-$h.sh <<EOF
+W=$W
+kmsg() { :; }
+usleep() { sleep 0.05; }
+$(awk '/^ps=$/{p=1} p{print} /^rm -rf \$W\/netheal\.lock/{if(p){exit}}' host/$h/boot/stop.sh)
+EOF
+    sh $T/stop-part-$h.sh
+    kill -0 "$nhp" 2>/dev/null && { kill -9 "$nhp" 2>/dev/null; fail "$h: stop.sh left netheal subshell alive"; }
+    kill -0 "$lfp" 2>/dev/null && { kill -9 "$lfp" 2>/dev/null; fail "$h: stop.sh left netheal grandchild alive"; }
+    [ ! -f $W/netheal.pid ] && [ ! -d $W/netheal.lock ] || fail "$h: stop.sh left netheal.pid or netheal.lock"
 done
 echo "PASS net-resume"
