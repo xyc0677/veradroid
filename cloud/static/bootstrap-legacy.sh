@@ -1975,7 +1975,9 @@ if [ "$LOOP" = 1 ]; then
             case "$free_mb" in ''|*[!0-9]*) IMGMB=$c; break ;; esac        # 读不到剩余空间：按默认值试
             [ "$free_mb" -ge $((c + IMGSLACK + IMGKEEP)) ] && { IMGMB=$c; break; }
         done
-        # 测试 / 存储很小的机器（模拟器的入门款 2019 只有 800 MB）：VD_IMGMB 指定系统盘大小（MB）。legacy 系统解开约 270 MB；
+        # 测试 / 存储很小的机器（模拟器的入门款 2019 只有 800 MB）：VD_IMGMB 指定新建系统盘大小（MB）。
+        # 注意：VD_IMGMB 仅在尚未创建 $SYSTEM_IMG（新建系统盘）时生效；已有系统盘不会重建
+        # （可在「设置 → 存储空间」调整大小，或先手动删除旧镜像再安装）。legacy 系统解开约 270 MB；
         # 余量只留后面下载 + 解开整包要的 360 MB
         case "${VD_IMGMB:-}" in ''|*[!0-9]*) ;; *) [ "$VD_IMGMB" -ge 300 ] && { IMGMB=$VD_IMGMB; IMGMIN=$VD_IMGMB; IMGSLACK=360; IMGKEEP=0
             [ -n "$free_mb" ] && [ "$free_mb" -lt $((IMGMB + IMGSLACK)) ] 2>/dev/null && IMGMB=; } ;; esac
@@ -1995,6 +1997,8 @@ if [ "$LOOP" = 1 ]; then
             ( truncate -s ${IMGMB}M "$SYSTEM_IMG" 2>/dev/null || dd if=/dev/zero of="$SYSTEM_IMG" bs=1M count=$IMGMB 2>/dev/null ) || die "无法创建系统盘"
         fi
         $LOWPRI mkfs.$IMGFS -F -q -L VeraDroid "$SYSTEM_IMG" || die "mkfs.$IMGFS 失败"
+    elif [ -n "${VD_IMGMB:-}" ]; then
+        vlog "VD_IMGMB=$VD_IMGMB: $SYSTEM_IMG already exists, keeping existing system disk without recreating (resize via Settings -> Storage or delete $SYSTEM_IMG first)"
     fi
     if ! grep -q " $SYS " /proc/mounts; then
         if [ -d "$SYS" ] && [ -n "$(ls -A "$SYS" 2>/dev/null)" ]; then
