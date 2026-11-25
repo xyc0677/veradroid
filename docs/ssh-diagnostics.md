@@ -115,6 +115,68 @@ ssh -p 2222 root@<屏幕上的 IP>
 
 想彻底删除：先关掉 SSH，再删掉 `documents/VeraDroid-SSH` 和 `veradroid/ssh` 两个文件夹。
 
+## 容器命令执行与文件传输注意事项
+
+通过 SSH 排查 Android 容器问题、传包调试或执行自动化脚本时，请注意以下 6 个实测常见坑点：
+
+### 1. 宿主 `/tmp` 仅约 64 MB，传大体积 APK 切勿 `scp` 到 `/tmp`
+
+Kindle 宿主的 `/tmp` 挂在 `/var` 内存盘（tmpfs）上，总容量只有约 **64 MB**。直接把几十上百 MB 的 APK `scp` 到 `/tmp` 会撑满内存盘，导致拷贝截断甚至影响 Kindle 宿主服务。
+
+传大文件请通过 SSH 标准输入**直接流式写入**用户存储上的数据目录，写完后核对两端字节数（装完记得删掉临时包）：
+
+```sh
+ssh -p 2222 root@<kindle-ip> \
+  "cat > /mnt/base-us/system/veradroid/data/local/tmp/x.apk && wc -c /mnt/base-us/system/veradroid/data/local/tmp/x.apk" \
+  < local.apk
+wc -c local.apk
+```
+
+（启用 `veradroid-sys.img` 系统盘镜像的机型，需在 VeraDroid 已启动、`/mnt/base-us/system/veradroid` 已挂载后写入；未启动时可放进 `/mnt/base-us/veradroid/apps/`。）
+
+### 2. SSH 登录的是 Kindle 宿主命名空间，进容器请统一走 `ashell.sh`
+
+2222 端口连进去的是 **Kindle 宿主根环境与挂载命名空间**，不是 Android 容器内部（直接敲 `pm`、`am`、`logcat` 会提示找不到命令）。进入容器或单次执行容器内命令，请统一调用 `ashell.sh`：
+
+```sh
+# 交互式进入 Android 容器 shell
+ssh -p 2222 root@<kindle-ip> "sh /mnt/base-us/veradroid/boot/ashell.sh"
+
+# 单次执行容器命令（如安装 APK、启动 Activity、查看服务状态）
+ssh -p 2222 root@<kindle-ip> \
+  "sh /mnt/base-us/veradroid/boot/ashell.sh pm install -r /data/local/tmp/x.apk"
+```
+
+`ashell.sh` 会自动切换命名空间（`nsenter` / `chroot`）、导出 `ANDROID_ROOT=/system` 与 `ANDROID_DATA=/data`（缺了会导致 `app_process` 初始化 ICU 失败直接 `Aborted`），并在 3.x / 4.1 内核机型（PW4 / Oasis 2 / Oasis 3 / KT4 等 `CONFIG_VMSPLIT_2G` 内核）上按当前镜像自动设置 `ulimit -s` 地址空间布局——**切勿自己手敲裸 `nsenter` 调 `am`/`pm`**，否则在 4.1 内核上会因 mmap 地址冲突触发 `libart` 的 `PruneDalvikCache()` 清空 `/data/dalvik-cache/arm`。
+
+### 3. 通过标准输入传脚本时切勿带 `ssh -n`
+
+`ssh -n` 会把标准输入重定向到 `/dev/null`。如果执行 `ssh -n -p 2222 root@<kindle-ip> sh < script.sh`，远端 `sh` 读到的是空输入，会静默空跑并以状态码 `0` 退出，容易误以为脚本已跑完。传脚本或流式传文件时**不要加 `-n`**：
+
+```sh
+ssh -p 2222 root@<kindle-ip> sh < script.sh
+```
+
+### 4. 喂脚本执行时，脚本内部切勿再用 `cat > file` 读默认 stdin
+
+用 `ssh -p 2222 root@<kindle-ip> sh < script.sh` 执行脚本时，远端 `sh` 自身的标准输入流就是**脚本文件剩余的代码内容**。若脚本中途写了不带重定向输入的 `cat > /path/to/file`，`cat` 会把脚本后续所有命令全部吞进目标文件里，导致后面的语句完全不执行。
+
+脚本内部需要生成文件时，请改用带单引号的 heredoc（`cat <<'EOF' > /path/to/file`）或 `printf`，或先把数据文件单独传好再执行脚本。
+
+### 5. 新装应用写 `shared_prefs` 前需先首次启动一次
+
+刚通过 `pm install` 安装但**从未启动过**的应用，`/data/data/<pkg>` 下的应用私有目录（如 `shared_prefs/`、`files/`）、默认配置及目录权限往往尚未由包管理器与应用首次启动流程初始化完成。若在首次启动前手工创建 `shared_prefs/*.xml`，很容易因目录缺失、root UID 归属不对导致应用读不到，或在首次启动时被覆盖。
+
+需要先启动一次应用让其完成初始化，再 `am force-stop <pkg>` 写入配置，并将文件 `chown` 回该应用对应的 UID/GID（可通过容器内 `dumpsys package <pkg> | grep userId=` 查询）。
+
+### 6. 容器内精简 `toybox` 与常见命令行工具差异
+
+Android 7.1 容器自带的 `toybox` 与系统工具较为精简，写排障命令时注意以下差异：
+
+- **`logcat` 无 `--pid` 参数**：Android 7.1 的 `logcat` 不支持 `--pid=<pid>`，请改用 `logcat -d -v time`（或 `-v threadtime`）导出后配合 `grep` / `awk` 过滤进程号或标签。
+- **`stat -c` 受限**：容器内 `toybox stat` 支持的格式符有限；查看字节数和数字 UID/GID 请优先用 `ls -ln`，查包 UID 可用 `dumpsys package <pkg>`，或直接在 Kindle 宿主侧查看 `/mnt/base-us/system/veradroid/data/...`。
+- **数值计算与格式化优先用宿主或 `awk`**：容器内 shell 与工具链对复杂格式化支持较弱，统计汇总、字节换算与格式化输出建议放在 Kindle 宿主侧（BusyBox `awk`）或本地电脑完成。
+
 ## 给开发者
 
 - 源文件在 `diagnostics/ssh/`，`sh diagnostics/ssh/build.sh [输出.zip]` 打包；打包脚本发现任何密钥文件会直接失败。
