@@ -208,11 +208,31 @@ net_heal() {
     vd_slog "network: android had no network after $nh_why and the automatic repair did not help (kindle: $(net_sig))"
     return 1
 }
-net_heal_kick() { # 后台查一次（已经在查就不再起）
+net_heal_kick() { # 后台查一次（已经在查就不再起；用原子目录锁防并发竞态）
     [ "${NET_CHECK:-1}" = 1 ] || return 0
     alive $W/netheal.pid && return 0
-    ( net_heal "$1"; rm -f $W/netheal.pid ) </dev/null >>$LOG 2>&1 &
-    echo $! > $W/netheal.pid
+    if ! mkdir $W/netheal.lock 2>/dev/null; then
+        nh_i=0
+        while [ ! -s $W/netheal.lock/pid ] && [ -d $W/netheal.lock ] && [ $nh_i -lt 5 ]; do
+            usleep 20000 2>/dev/null || sleep 0.05 2>/dev/null || sleep 1
+            nh_i=$((nh_i + 1))
+        done
+        op=$(cat $W/netheal.lock/pid 2>/dev/null)
+        if { [ -n "$op" ] && kill -0 "$op" 2>/dev/null; } || alive $W/netheal.pid; then return 0; fi
+        rm -f $W/netheal.lock/pid $W/netheal.pid
+        rmdir $W/netheal.lock 2>/dev/null || return 0
+        mkdir $W/netheal.lock 2>/dev/null || return 0
+    fi
+    echo $$ > $W/netheal.lock/pid
+    (
+        trap 'rm -f $W/netheal.pid $W/netheal.lock/pid; rmdir $W/netheal.lock 2>/dev/null' EXIT
+        trap 'exit 0' INT TERM
+        net_heal "$1"
+        nh_w=0; while [ ! -f $W/netheal.pid ] && [ $nh_w -lt 10 ]; do usleep 10000 2>/dev/null || sleep 0.02 2>/dev/null || sleep 1; nh_w=$((nh_w + 1)); done
+    ) </dev/null >>$LOG 2>&1 &
+    nh_p=$!
+    echo "$nh_p" > $W/netheal.lock/pid
+    echo "$nh_p" > $W/netheal.pid
 }
 # 看门狗每轮（没冻结时）调：Kindle 的网络变了 → 查；用着的时候每 NET_CHECK_S 秒查一次（屏保 / 冻结时不查）
 net_watch_tick() {

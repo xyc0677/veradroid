@@ -13,17 +13,20 @@ fail() { echo "FAIL: $*"; exit 1; }
 T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT
 grep -q 'int clearTetheringRules(const char\* inputInterface) {\\n    if (vdHostNet()) return 0;' android/small-patches.py || fail "netd clearTetheringRules patch missing in small-patches.py"
-for h in pw6 k49; do
+for h in pw6 k49 legacy; do
     b=host/$h/boot
-    [ ! -d host/$h/bin ] || [ -s host/$h/bin/netd-hostnet ] || fail "$h: bin/netd-hostnet missing"
+    if [ "$h" != legacy ]; then
+        [ ! -d host/$h/bin ] || [ -s host/$h/bin/netd-hostnet ] || fail "$h: bin/netd-hostnet missing"
+        grep -q '^netd_hostnet_fix   #' $b/veradroid.sh || fail "$h: veradroid.sh does not install the fixed netd"
+        awk '/if hostns; then/ { h = 1 } h && /freezer_enter/ { e = 1 } h && /--in-chroot/ { print (e ? "ok" : "late"); exit }' $b/lib/container.sh | grep -qx ok \
+            || fail "$h: chroot container is started outside the freezer group"
+    fi
     for f in $b/lib/network.sh $b/lib/sleep.sh $b/lib/watchdog.sh $b/lib/container.sh $b/stop.sh $b/veradroid.sh; do sh -n $f || fail "syntax $f"; done
-    grep -q '^netd_hostnet_fix   #' $b/veradroid.sh || fail "$h: veradroid.sh does not install the fixed netd"
     grep -q 'net_heal_kick thaw' $b/veradroid.sh || fail "$h: no net check after thaw"
     grep -q 'net_heal_kick resume' $b/lib/sleep.sh || fail "$h: no net check after the screensaver"
     grep -q 'net_watch_tick' $b/lib/watchdog.sh || fail "$h: watchdog does not watch the network"
+    grep -q 'mkdir \$W/netheal.lock' $b/lib/network.sh || fail "$h: net_heal_kick has no atomic lock"
     grep -q 'rm -f \$W/netheal.pid \$W/net.sig \$W/net.last' $b/stop.sh || fail "$h: stop.sh leaves net check files (stop --stale fast path would never be clean)"
-    awk '/if hostns; then/ { h = 1 } h && /freezer_enter/ { e = 1 } h && /--in-chroot/ { print (e ? "ok" : "late"); exit }' $b/lib/container.sh | grep -qx ok \
-        || fail "$h: chroot container is started outside the freezer group"
 done
 cmp -s host/pw6/boot/lib/network.sh host/k49/boot/lib/network.sh || fail "network.sh differs between pw6 and k49"
 
@@ -64,4 +67,26 @@ hostns() { return 0; }
 echo new > $VD/bin/netd-hostnet; echo old > $R/system/bin/netd
 netd_hostnet_fix; cmp -s $VD/bin/netd-hostnet $R/system/bin/netd || fail "fixed netd not installed"
 : > $LOG; netd_hostnet_fix; [ -s $LOG ] && fail "netd replaced again although it was already the fixed one"
+
+# net_heal_kick atomic lock: concurrent callers start only one net_heal; stale lock is taken over; lock cleaned on exit
+for h in pw6 legacy; do
+    W=$T/w-lock-$h; mkdir -p $W; LOG=$T/log-$h; : > $LOG
+    . host/$h/boot/lib/network.sh
+    runs=$T/runs-$h; : > $runs
+    net_heal() { echo "$1" >> $runs; sleep 1; }
+    ( NET_CHECK=0; net_heal_kick disabled )
+    [ -s $runs ] && fail "$h: net_heal_kick ran when NET_CHECK=0"
+    for i in 1 2 3 4 5 6 7 8 9 10; do ( net_heal_kick "c$i" ) & done
+    wait
+    i=0; while { [ -d $W/netheal.lock ] || [ -f $W/netheal.pid ]; } && [ $i -lt 40 ]; do sleep 0.1; i=$((i + 1)); done
+    [ "$(wc -l < $runs | tr -d ' ')" = 1 ] || fail "$h: concurrent net_heal_kick ran $(wc -l < $runs | tr -d ' ') times, want 1"
+    [ ! -d $W/netheal.lock ] && [ ! -f $W/netheal.pid ] || fail "$h: lock or pid left behind after net_heal exited"
+    # stale lock with dead pid -> taken over cleanly
+    : > $runs; mkdir -p $W/netheal.lock; echo 999999 > $W/netheal.lock/pid; echo 999999 > $W/netheal.pid
+    net_heal() { echo "$1" >> $runs; }
+    net_heal_kick stale
+    i=0; while { [ -d $W/netheal.lock ] || [ -f $W/netheal.pid ]; } && [ $i -lt 40 ]; do sleep 0.1; i=$((i + 1)); done
+    [ "$(cat $runs)" = stale ] || fail "$h: stale netheal.lock was not taken over"
+    [ ! -d $W/netheal.lock ] && [ ! -f $W/netheal.pid ] || fail "$h: lock or pid left behind after fast net_heal"
+done
 echo "PASS net-resume"
