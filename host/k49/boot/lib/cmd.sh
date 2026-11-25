@@ -346,7 +346,7 @@ cmd_listen() {
             # 却把全局的翻页动画和刷新合并关掉了（滑动时闪）。不认这组写死的值，按全局设置来。
             [ "$aspec" = "KFB_ANIM_MODE=0;KFB_SETTLE=25;KFB_MODE=0;KFB_CONTRAST=1.3" ] && aspec=
             if [ "$apkg" != home ] && [ -n "$aspec" ] && [ "$aspec" != "$a" ]; then
-                printf '%s\n' "$aspec" | tr ';' '\n' | grep -E '^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$' > $SYS/settings.app.tmp
+                printf '%s\n' "$aspec" | tr ';' '\n' | grep -E '^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|QPASS|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$' > $SYS/settings.app.tmp
                 [ -s $SYS/settings.app.tmp ] && mv -f $SYS/settings.app.tmp $SYS/settings.app || rm -f $SYS/settings.app.tmp
             fi
             settings_load 2>/dev/null || true

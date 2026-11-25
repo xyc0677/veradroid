@@ -13,7 +13,7 @@
 # 命令（cmd.sh）：
 #   fg <pkg>|home              前台变了
 #   appset <pkg>|<spec>        存用户的设置（spec 空 = 删掉这一行，回到内置推荐 / 全局；"-" = 全跟随）；"appset *|" 全部清掉
-APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$'
+APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|QPASS|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$'
 
 appprof_valid_pkg() { case "$1" in ''|*[!A-Za-z0-9._]*) return 1 ;; esac; [ ${#1} -le 200 ]; }
 
@@ -42,7 +42,8 @@ appprof_publish() {
         'KFB_GCN|界面残影定时全刷|关=0,每 20 次刷新=20,每 30 次刷新=30,每 50 次刷新=50' \
         'KFB_NEWWIN|打开时整屏刷新|关=0,开=1' \
         'KFB_MONO|快刷黑白分明|关=0,开=128' \
-        'KFB_MAXDEFER|画面最长等待|0.6 秒=600,1.2 秒=1200,不限=0' > $X/appknobs.d/epd.tmp 2>/dev/null \
+        'KFB_MAXDEFER|画面最长等待|0.6 秒=600,1.2 秒=1200,不限=0' \
+        'KFB_QPASS|图片补刷（消除分步加载图片残影）|自动 (0.3 秒)=300,关（不补刷）=0,慢速 (0.6 秒)=600' > $X/appknobs.d/epd.tmp 2>/dev/null \
         && mv -f $X/appknobs.d/epd.tmp $X/appknobs.d/epd
     cat $X/appknobs.d/* 2>/dev/null | grep -v '^[[:space:]]*$' > $X/appknobs.tmp; chmod 644 $X/appknobs.tmp 2>/dev/null; mv -f $X/appknobs.tmp $X/appknobs
     # 要换显示密度的包（内置表里带 DENSITY 的规则，可以以 * 结尾）：桌面打开它们之前等宿主换好密度（/dev/kfb/density.apps）
@@ -114,6 +115,7 @@ appprof_send() {
     ap_msg=$({ echo "SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}"
       echo "ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN"
       echo "HOLD ${KFB_HOLD:-70}"
+      echo "QPASS ${KFB_QPASS:-300}"
       # 桌面在前台时不数页（桌面换页、切标签不是读书翻页，用不着按页数全刷）
       [ -n "$ap_pkg" ] && { [ "$ap_pkg" = home ] && echo "FLIPCOUNT 0" || echo "FLIPCOUNT 1"; }
       # 换了前台应用（KFB_NEWWIN=1，按新应用的设置）：新应用的第一屏整屏闪刷一次

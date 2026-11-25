@@ -16,7 +16,7 @@
 # SLIM 不是显示参数：后台瘦身（appslim.sh，停用 / 恢复应用的后台组件），不发给显示桥
 # KEEPALIVE / BGSTOP 不是显示参数：保持后台 / 离开后几分钟自动停止（memkeep.sh 读合并表 $X/appprof），不发给显示桥
 # OEC_* 不是显示桥的参数：系统镜像（feat/fw-oec，ro.vd.oec=1）里每个应用进程自己读 $X/appoec（见下面 appprof_oec_publish）
-APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^SLIM=[01]$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
+APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|QPASS|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^SLIM=[01]$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
 
 appprof_valid_pkg() { case "$1" in ''|*[!A-Za-z0-9._]*) return 1 ;; esac; [ ${#1} -le 200 ]; }
 
@@ -46,7 +46,8 @@ appprof_publish() {
         'KFB_NEWWIN|打开时整屏刷新|关=0,开=1' \
         'KFB_MONO|快刷黑白分明|关=0,开=128' \
         'KFB_MAXDEFER|画面最长等待|0.6 秒=600,1.2 秒=1200,不限=0' \
-        'KFB_TURNHOLD|翻页动画合并（应用自己有翻页动画时只刷最后一帧）|关=0,0.1 秒=100,0.15 秒=150,0.25 秒=250' > $X/appknobs.d/epd.tmp 2>/dev/null \
+        'KFB_TURNHOLD|翻页动画合并（应用自己有翻页动画时只刷最后一帧）|关=0,0.1 秒=100,0.15 秒=150,0.25 秒=250' \
+        'KFB_QPASS|图片补刷（消除分步加载图片残影）|自动 (0.3 秒)=300,关（不补刷）=0,慢速 (0.6 秒)=600' > $X/appknobs.d/epd.tmp 2>/dev/null \
         && mv -f $X/appknobs.d/epd.tmp $X/appknobs.d/epd
     # 要换显示密度的包（内置表里带 DENSITY 的规则，可以以 * 结尾）：桌面打开它们之前等宿主换好密度（/dev/kfb/density.apps）
     # 系统镜像自己按应用换密度（appprof_oec_density）时，宿主不换、桌面也不用等：表是空的
@@ -124,6 +125,7 @@ appprof_send() {
     ap_msg=$({ echo "SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}"
       echo "ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN"
       echo "HOLD ${KFB_HOLD:-70}"
+      echo "QPASS ${KFB_QPASS:-300}"
       # 桌面在前台时不数页（桌面换页、切标签不是读书翻页，用不着按页数全刷）
       [ -n "$ap_pkg" ] && { [ "$ap_pkg" = home ] && echo "FLIPCOUNT 0" || echo "FLIPCOUNT 1"; }
       # 换了前台应用（KFB_NEWWIN=1，按新应用的设置）：新应用的第一屏整屏闪刷一次

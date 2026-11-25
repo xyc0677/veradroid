@@ -244,6 +244,31 @@ def main():
     time.sleep(0.5); m = b.mark(); b.send('SWIPE 2 2'); b.page(); time.sleep(0.8)
     _, txt = b.refreshes(m)
     check('stub: swipe refresh' in txt, 'SWIPE one-shot: the next page is a swipe')
+    # Issue #33: a clean single-frame swipe of an illustrated page must not trigger a second QPASS refresh 300 ms later
+    def illus_page(b, shade=128):
+        b.fill(0, H)
+        with open(b.shm, 'r+b') as f:
+            for y in range(400, 720):
+                f.seek(y * W * 4 + 400 * 4); f.write(bytes([shade, shade, shade, 255]) * 320)
+        b.send('P 0')
+    b.send('SET 1.0 3 0 0 0 40', 'ANIM 2 2 12 45', 'QPASS 300'); time.sleep(0.5)
+    m = b.mark(); illus_page(b, 128); time.sleep(0.9)
+    r, txt = b.refreshes(m)
+    check(len(r) == 1 and 'stub: swipe refresh' in txt and 'quality pass' not in txt,
+          f'clean animated turn of an illustrated page: one swipe refresh, no extra QPASS ({len(r)})')
+    # Multi-step illustration loading after a swipe (qp_n >= 2) still triggers QPASS; QPASS 0 disables it
+    time.sleep(2.1); m = b.mark(); illus_page(b, 112); time.sleep(0.25)
+    with open(b.shm, 'r+b') as f:
+        for y in range(420, 700):
+            f.seek(y * W * 4 + 420 * 4); f.write(bytes([160, 160, 160, 255]) * 280)
+    b.send('P 0 420 700'); time.sleep(0.9)
+    r, txt = b.refreshes(m)
+    check('quality pass' in txt, 'multi-step picture loading after a swipe still gets QPASS')
+    b.send('QPASS 0', 'ANIM 0 2 12 45', 'SET 1.0 3 0 0 2 40'); time.sleep(0.4)
+    m = b.mark(); illus_page(b, 136); time.sleep(0.9)
+    r, txt = b.refreshes(m)
+    check('quality pass' not in txt and len(r) == 1, f'QPASS 0 disables the picture quality pass even in 1-bit mode ({len(r)})')
+    b.send('QPASS 300', 'SET 1.0 0 0 0 3 120')
     b.send('SWIPEOK 0'); time.sleep(0.3)
     m = b.mark(); b.send('SWIPE 2 2'); b.page(); time.sleep(0.8)
     _, txt = b.refreshes(m)

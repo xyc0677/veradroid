@@ -42,7 +42,7 @@
  *                             the app's theme background, white or black) are not drawn; the last picture stays and
  *                             after 600 ms a small "加载中" badge goes on it. The first frame with real content (or the
  *                             end of <ms>) ends it. LAUNCH 0 ends it at once
- *     QPASS <ms>              picture quality pass: a picture area that got a 1-bit / AUTO / animated refresh or several
+ *     QPASS <ms>              picture quality pass: a picture area that got a 1-bit refresh, a colliding refresh or several
  *                             overlapping ones gets one REAGL (FULL) once the picture was still for <ms> (300; 0 = off),
  *                             see qpass_ms
  *     VERIFY                  test aid: log whether the newest page differs from what was sent to the panel
@@ -278,15 +278,16 @@ static int scroll_active(long long t)
 static int img_gray_pct = 0;
 /* Picture quality pass (QPASS <ms>, --qpass; 0 = off, default 300). A picture that loads in steps (微信读书 covers and
    illustrations: placeholder, then the picture, in 2-4 overlapping refreshes 70-170 ms apart, each sent while the previous
-   one is still running on the panel), or that went out 1-bit (DU in 均衡, the driver's AUTO choice, a swipe), stayed
+   one is still running on the panel), or that went out 1-bit (DU in 均衡 / 最快), stayed
    half drawn / ghosted on the panel until the next page-count flash (KPW5 report, 0.96): the partial waveforms only drive
    the pixels whose value changed, so nothing ever repaints the pixels the colliding updates left behind. Now every
    refresh that is not already a full-quality update (REAGL / GC16 FULL) remembers the part of it that holds a picture
-   (32x32 tiles that are mostly mid-gray, img_box). When that part got a 1-bit / animated refresh, a refresh sent
-   while an earlier one of the same pixels was still running (collision), or two or more refreshes that overlap without
-   one covering the other (a picture drawn in bands), it gets one REAGL (FULL: every pixel driven, no flash; GL16 FULL on 4-bit i.MX panels) of
-   what is on the panel once no frame came for <ms> and the panel is idle. Text (no picture tiles) and page turns that
-   already went out as REAGL never get it. */
+   (32x32 tiles that are mostly mid-gray, img_box; an MTK hardware swipe is also remembered since it is PARTIAL, though
+   hwtcon_v2 already draws it in 16-gray GLR16 so a clean single-frame swipe does not set lowq on its own). When that part
+   got a 1-bit refresh, a refresh sent while an earlier one of the same pixels was still running (collision), or two or
+   more refreshes that overlap without one covering the other (a picture drawn in bands / steps), it gets one REAGL (FULL:
+   every pixel driven, no flash; GL16 FULL on 4-bit i.MX panels) of what is on the panel once no frame came for <ms> and
+   the panel is idle. Text (no picture tiles) and clean single-frame page turns (REAGL or hardware swipe) never get it. */
 static int qpass_ms = 300;
 static int qp_x0, qp_y0, qp_x1, qp_y1, qp_valid = 0, qp_n = 0, qp_lowq = 0;
 static long long qp_last = 0, qp_done = -100000;
@@ -1132,10 +1133,13 @@ static int push_y8(const uint8_t *buf, int x, int y, int w, int h, int mode)
         int coll = !g_cleaning && qpass_ms > 0 && busy_overlap(x, y, x + w, y + h, t0) > 0;
         busy_add(x, y, w, h, t0, c.is_animated);
         {   /* quality pass bookkeeping: REAGL (sent FULL) and the GC16 FULL flash are full quality; GL16 FULL is full quality
-               only where it stands in for REAGL (4-bit i.MX). 1-bit, swipes and collisions count as low quality. */
+               only where it stands in for REAGL (4-bit i.MX). 1-bit and collisions count as low quality; an MTK hardware swipe
+               already runs as 16-gray GLR16, so on its own (ui_mode != 2, no collision) it does not force a second refresh of
+               a clean single-frame illustrated page, while !full still tracks multi-step / colliding loads. */
             int fullq = c.is_flashing && (c.wfm_mode == WFM_GC16 || c.wfm_mode == WFM_REAGL || c.wfm_mode == WFM_GLRC16 ||
                                           c.wfm_mode == WFM_GL16);
-            int lowq = c.wfm_mode == WFM_DU || c.wfm_mode == WFM_A2 || c.is_animated || coll;   /* AUTO picks a 16-gray waveform for gray content itself */
+            int onebit = (c.wfm_mode == WFM_DU || c.wfm_mode == WFM_A2) && (!c.is_animated || ui_mode == 2 || mono != NULL);
+            int lowq = onebit || (c.is_animated && ui_mode == 2) || coll;   /* AUTO picks a 16-gray waveform for gray content itself */
             qp_note(buf, x, y, w, h, fullq && !c.is_animated, lowq, t0, ib_done, ib_nt, ib_x0, ib_y0, ib_x1, ib_y1);
         }
         if ((c.wfm_mode == WFM_DU || c.wfm_mode == WFM_A2) && mode != M_CLEAN) {          /* remember what was drawn 1-bit, for CLEAN */
