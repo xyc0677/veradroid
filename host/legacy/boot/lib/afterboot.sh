@@ -395,8 +395,14 @@ lmk_tune() {
     s=/proc/$P/root/dev/socket/lmkd
     i=0; while [ ! -S "$s" ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
     if [ -S "$s" ]; then
-        "$VD/bin/vdlmk" "$s" 2048:0 3072:100 4096:200 8192:300 14336:900 16384:906 >>$LOG 2>&1 \
-            && t "lmk: lmkd thresholds set" || t "lmk: vdlmk failed"
+        lt_ok=
+        for lt_w in 2 4 0; do
+            if "$VD/bin/vdlmk" "$s" 2048:0 3072:100 4096:200 8192:300 14336:900 16384:906 >>$LOG 2>&1; then
+                t "lmk: lmkd thresholds set"; lt_ok=1; break
+            fi
+            [ "$lt_w" -gt 0 ] && sleep "$lt_w"
+        done
+        [ -n "$lt_ok" ] || t "lmk: vdlmk failed (after 3 tries)"
     else
         t "lmk: lmkd socket missing, kernel minfree only"
     fi

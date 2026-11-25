@@ -280,6 +280,8 @@ watchdog() {
             [ "$wd_k" = "MemTotal:" ] && { wd_mt=$wd_v; break; }
         done < "${LMK_MEMINFO:-/proc/meminfo}"
     fi
+    [ -f $W/booted ] || rm -f $W/ss.pid
+    wd_was_frozen=
     wd_tick=0
     while :; do
         if [ -f $W/saver_frozen ]; then sleep_for=120
@@ -296,6 +298,7 @@ watchdog() {
         fi
         # 空闲冻结（idle.sh，IDLE_FREEZE）：冻 / 定时唤醒 / 放回 watchdog 线程。屏保冻结、返回 Kindle 时不管
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { type idle_tick >/dev/null 2>&1 && idle_tick; }
+        if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then wd_was_frozen=1; fi
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ] && [ ! -f $W/idlefz ]; then
             # 命令监听没了（FIFO 建不起来、被杀）：桌面的“返回 Kindle”、设置、手势全都没反应，只能重启 Kindle。重新起一个。
             alive $W/cmd.pid || { t "cmd listener gone, restarting it"; cmd_listen & echo $! > $W/cmd.pid; }
@@ -306,12 +309,41 @@ watchdog() {
             type mem_keep_tick >/dev/null 2>&1 && { mem_keep_tick; bg_stop_tick; wifi_idle_tick; }
             # 清单里的应用装了 / 更新了（应用自己更新也算）：按新版本的清单再做一遍瘦身（appslim.sh）
             type appslim_tick >/dev/null 2>&1 && appslim_tick
-            # system_server 重启（Watchdog 杀掉后软重启）以后 ActivityManager 会把 lmkd 的门槛写回原厂的大屏手机档，
-            # 512 MB 机型上前台的微信读书又会被反复杀掉（用户诊断）。pid 变了就重新设一次。
-            ss=$(pidof system_server 2>/dev/null | cut -d' ' -f1)
-            if [ -n "$ss" ] && [ "$ss" != "$(cat $W/ss.pid 2>/dev/null)" ]; then
-                [ -f $W/ss.pid ] && [ -f $W/booted ] && { t "system_server restarted ($(cat $W/ss.pid) -> $ss): re-tuning lmkd"; ( sleep 20; lmk_tune; i=0; while [ $i -lt 30 ] && [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" != 1 ]; do sleep 5; i=$((i+1)); done; trust_unlock ) & }
-                echo "$ss" > $W/ss.pid
+            # 解冻首圈补发一次 lmkd 档位，未冻结时每 15 轮（约 5 分钟）周期兜底（仅 <700 MB 低内存机）
+            if [ -n "$wd_was_frozen" ]; then
+                wd_was_frozen=
+                [ -f $W/booted ] && [ -n "$wd_mt" ] && [ "$wd_mt" -lt 700000 ] 2>/dev/null && ( lmk_tune ) &
+            elif [ $((wd_tick % 15)) -eq 0 ] && [ -f $W/booted ] && [ -n "$wd_mt" ] && [ "$wd_mt" -lt 700000 ] 2>/dev/null; then
+                ( lmk_tune ) &
+            fi
+            # system_server 重启（Watchdog 杀掉后软重启）以后 ActivityManager 会在 +72~239s 把 lmkd 的门槛写回原厂大屏手机档，
+            # 512 MB 机型上前台的微信读书又会被反复杀掉（用户诊断）。booted 之前不写 ss.pid，重启后按阶梯多次重设。
+            if [ -f $W/booted ]; then
+                ss=$(pidof system_server 2>/dev/null); ss=${ss%% *}
+                ss_old=; [ -r $W/ss.pid ] && { read -r ss_old < $W/ss.pid 2>/dev/null || true; }
+                if [ -n "$ss" ] && [ "$ss" != "$ss_old" ]; then
+                    ss_had=; [ -f $W/ss.pid ] && ss_had=1
+                    echo "$ss" > $W/ss.pid
+                    if [ -n "$ss_had" ]; then
+                        t "system_server restarted ($ss_old -> $ss): re-tuning lmkd"
+                        (
+                            for ss_d in 20 70 90 80; do
+                                sleep $ss_d
+                                [ -n "$P" ] && kill -0 $P 2>/dev/null && [ "$(cat $W/ss.pid 2>/dev/null)" = "$ss" ] || exit 0
+                                lmk_tune
+                                if [ "$ss_d" = 20 ]; then
+                                    i=0
+                                    while [ $i -lt 30 ] && [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" != 1 ]; do
+                                        sleep 5
+                                        [ -n "$P" ] && kill -0 $P 2>/dev/null && [ "$(cat $W/ss.pid 2>/dev/null)" = "$ss" ] || exit 0
+                                        i=$((i + 1))
+                                    done
+                                    trust_unlock
+                                fi
+                            done
+                        ) &
+                    fi
+                fi
             fi
         fi
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ] || { [ -f $X/ctl/settings.new ] && settings_apply; }

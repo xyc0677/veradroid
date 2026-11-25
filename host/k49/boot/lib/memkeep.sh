@@ -52,7 +52,14 @@ lmk_send() {
     lt_s=/proc/$P/root/dev/socket/lmkd
     lt_i=0; while [ ! -S "$lt_s" ] && [ $lt_i -lt 30 ]; do sleep 1; lt_i=$((lt_i + 1)); done
     if [ -S "$lt_s" ]; then
-        "$VD/bin/vdlmk" "$lt_s" $lt_t >>$LOG 2>&1 && t "lmk: lmkd thresholds set ($lt_t)" || t "lmk: vdlmk failed"
+        lt_ok=
+        for lt_w in 2 4 0; do
+            if "$VD/bin/vdlmk" "$lt_s" $lt_t >>$LOG 2>&1; then
+                t "lmk: lmkd thresholds set ($lt_t)"; lt_ok=1; break
+            fi
+            [ "$lt_w" -gt 0 ] && sleep "$lt_w"
+        done
+        [ -n "$lt_ok" ] || t "lmk: vdlmk failed (after 3 tries)"
     else
         t "lmk: lmkd socket missing, kernel minfree only"
     fi
