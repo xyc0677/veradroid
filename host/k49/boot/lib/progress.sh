@@ -345,7 +345,12 @@ vp_error() { # code 标题 说明（可多行）
             vp_stepbox; VP_CUR=$c
             vp_t $G_IX $((G_SY + $(vp_sc 232))) $G_IW $((G_SHH - $(vp_sc 260))) $(vp_sc 32) "$VP_FZR" BLACK WHITE 0 "$3"
             vp_ref $G_M $G_SY $G_BW $G_SHH GC16 ;;
-        eips) vp_eips 4 "FAILED, code $1"; vp_eips 5 ""; vp_eips 6 "$(vp_en_err "$1" | cut -c1-46)"; vp_eips 7 "$(vp_en_err "$1" | cut -c47-92)"; vp_eips 8 "$(vp_en_err "$1" | cut -c93-140)" ;;
+        eips)
+            vp_eips 4 "FAILED, code $1"; vp_eips 5 ""
+            vp_eips 6 "$(vp_en_err "$1" | cut -c1-46)"
+            vp_eips 7 "$(vp_en_err "$1" | cut -c47-92)"
+            vp_eips 8 "$(vp_en_err "$1" | cut -c93-138)"
+            if [ -n "$(vp_en_err "$1" | cut -c139-184)" ]; then vp_eips 9 "$(vp_en_err "$1" | cut -c139-184)"; fi ;;
     esac
     return 0
 }
