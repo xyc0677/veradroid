@@ -72,4 +72,22 @@ for h in pw6 k49 legacy; do
     out=$(P=100 W=$T/w FZ=$T/fz AU_PROC=$T/proc UNUSABLE_WAIT_S=0 sh -c 't() { :; }; . '$T'/au.sh; android_unusable')
     [ "$out" = "system_server is gone" ] || fail "$h: dead zygote deferred ($out)"
 done
+
+# KUAL start.sh su candidate fallback (#15): first failing su must try next candidate and reach NOT STARTED if all fail
+mkdir -p $T/kual/logs $T/kual/boot $T/kual/su1 $T/kual/su2 $T/kual/bin
+touch $T/kual/boot/veradroid.sh
+printf '#!/bin/sh\necho 1000\n' > $T/kual/bin/id
+printf '#!/bin/sh\necho "eips $*" >> %s/eips.log\n' "$T/kual" > $T/kual/bin/eips
+printf '#!/bin/sh\necho su1 >> %s/su.log; exit 1\n' "$T/kual" > $T/kual/su1/su
+printf '#!/bin/sh\necho su2 >> %s/su.log; exit 0\n' "$T/kual" > $T/kual/su2/su
+chmod +x $T/kual/bin/* $T/kual/su1/su $T/kual/su2/su
+sed -e "s#/mnt/base-us/veradroid#$T/kual#g" \
+    -e "s#^PATH=.*#PATH=$T/kual/bin:\$PATH; export PATH#" \
+    -e "s#/var/local/kmc/bin/su /usr/bin/su /bin/su#$T/kual/su1/su $T/kual/su2/su $T/kual/missing/su#" \
+    host/pw6/kual/start.sh > $T/kual/start.sh
+sh $T/kual/start.sh || fail "KUAL start.sh failed when second su succeeded"
+grep -q '^su1$' $T/kual/su.log && grep -q '^su2$' $T/kual/su.log || fail "KUAL start.sh did not fall back past failing su"
+printf '#!/bin/sh\necho su2-fail >> %s/su.log; exit 1\n' "$T/kual" > $T/kual/su2/su; chmod +x $T/kual/su2/su
+sh $T/kual/start.sh && fail "KUAL start.sh succeeded when all su candidates failed"
+grep -q 'NOT STARTED: KUAL runs this as uid 1000' $T/kual/logs/start.log || fail "KUAL start.sh did not log NOT STARTED after all su candidates failed"
 echo "PASS launch-health"

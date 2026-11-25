@@ -22,7 +22,7 @@ if [ "$(id -u 2>/dev/null)" != 0 ]; then
     for su in /var/local/kmc/bin/su /usr/bin/su /bin/su; do
         [ -x "$su" ] || continue
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] KUAL: not root, retrying through $su" >> $SL 2>/dev/null
-        exec "$su" -c "sh /mnt/us/extensions/VeraDroid/start.sh" </dev/null >/dev/null 2>&1
+        "$su" -c "sh /mnt/us/extensions/VeraDroid/start.sh" </dev/null >/dev/null 2>&1 && exit 0
     done
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] NOT STARTED: KUAL runs this as uid $(id -u 2>/dev/null), not root, and there is no su" >> $SL 2>/dev/null
     eips -c >/dev/null 2>&1
