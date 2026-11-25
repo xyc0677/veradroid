@@ -465,8 +465,17 @@ vd_sys_grow_locked() { # to resize2fs dev from statefile
     printf 'op=grow\nfrom=%s\nto=%s\nphase=extend\n' "$vg_from" "$1" > "$vg_st" && sync
     truncate -s "${1}M" "$SYSTEM_IMG" 2>/dev/null
     vg_cur=$(stat -c %s "$SYSTEM_IMG" 2>/dev/null | awk '{ printf "%d", $1 / 1048576 }')
-    # FAT 不支持稀疏加长时 truncate 会失败：和 storage.sh 的 st_extend 一样补零
-    [ "$vg_cur" != "$1" ] && [ -n "$vg_cur" ] && [ "$1" -gt "$vg_cur" ] && dd if=/dev/zero of="$SYSTEM_IMG" bs=1M seek="$vg_cur" count=$(($1 - vg_cur)) conv=notrunc 2>/dev/null
+    # FAT 不支持稀疏加长时 truncate 会失败：按最多 8 MB 一块补零并 sync，防脏页攒多触发看门狗复位
+    if [ "$vg_cur" != "$1" ] && [ -n "$vg_cur" ] && [ "$1" -gt "$vg_cur" ]; then
+        LOWPRI=${LOWPRI:-}; vg_o=$vg_cur
+        while [ "$vg_o" -lt "$1" ]; do
+            vg_rem=$(($1 - vg_o))
+            vg_n=8; if [ "$vg_rem" -lt 8 ]; then vg_n=$vg_rem; fi
+            $LOWPRI dd if=/dev/zero of="$SYSTEM_IMG" bs=1M seek="$vg_o" count="$vg_n" conv=notrunc 2>/dev/null || break
+            vg_o=$((vg_o + vg_n))
+            sync; sleep 1
+        done
+    fi
     if [ "$(stat -c %s "$SYSTEM_IMG" 2>/dev/null | awk '{ printf "%d", $1 / 1048576 }')" != "$1" ]; then
         truncate -s "${vg_from}M" "$SYSTEM_IMG" 2>/dev/null; rm -f "$vg_st"; return 1   # 文件系统还没动，截回去
     fi
