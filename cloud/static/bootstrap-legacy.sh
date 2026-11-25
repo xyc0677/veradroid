@@ -2253,9 +2253,26 @@ if [ -n "${VD_BUNDLE:-}" ] && [ -f "$VD_BUNDLE" ]; then
             vlog "offline bundle $ver is older than the server's $ov"
         fi
     fi
-    cp "$VD_BUNDLE" "$TMP/bundle.tar.gz" || die "无法读取离线安装包"
+    if [ -n "$LOWPRI" ]; then
+        rm -f "$TMP/bundle.tar.gz"; : > "$TMP/bundle.tar.gz" || die "无法读取离线安装包"
+        b_mb=$(( ${size:-0} / 1048576 )); if [ $(( ${size:-0} % 1048576 )) -gt 0 ]; then b_mb=$((b_mb + 1)); fi
+        o=0
+        while [ $o -lt $b_mb ]; do
+            $LOWPRI dd if="$VD_BUNDLE" of="$TMP/bundle.tar.gz" bs=1M skip=$o seek=$o count=8 conv=notrunc 2>/dev/null || die "无法读取离线安装包"
+            sync; o=$((o + 8))
+            b_pct=100; if [ $b_mb -gt 0 ] && [ $o -lt $b_mb ]; then b_pct=$((o * 100 / b_mb)); fi
+            progress_line $b_pct "离线包"
+        done
+        got=$(wc -c < "$TMP/bundle.tar.gz" 2>/dev/null | tr -d ' ')
+        [ "$got" = "${size:-0}" ] || die "读取离线安装包不完整（${got:-0}/${size:-0} bytes）"
+    else
+        cp "$VD_BUNDLE" "$TMP/bundle.tar.gz" || die "无法读取离线安装包"
+    fi
     progress_line 100 "离线包"
     sha=
+    if [ -f "$VD_BUNDLE.sha256" ]; then
+        sha=$(awk '{ s = tolower($0); gsub(/[^0-9a-f]+/, " ", s); n = split(s, a, " "); for (i = 1; i <= n; i++) if (length(a[i]) == 64) { print a[i]; exit } }' "$VD_BUNDLE.sha256" 2>/dev/null || true)
+    fi
 else
     show "查询最新 VeraDroid 安装包…"
     # 4.9 内核机型（PW5/KT5/KT6）要用 32 位 binder 的 rootfs，不能用 PW6（5.15）的包。
@@ -2306,6 +2323,7 @@ if [ -n "$sha" ]; then
 fi
 [ -n "$PARTS" ] || { show "正在解压安装包…"; progress_line 100 "解压"; }
 syncer_on
+[ -n "$PARTS" ] || $LOWPRI gzip -t "$TMP/bundle.tar.gz" 2>/dev/null || { syncer_off; die "安装包已损坏（gzip 校验失败），请重新拷贝或下载后再试"; }
 [ -n "$PARTS" ] || $LOWPRI tar -xzf "$TMP/bundle.tar.gz" -C "$TMP" || { syncer_off; die "解压安装包失败"; }
 syncer_off
 [ -d "$TMP/veradroid-pw6" ] || die "安装包结构不对"

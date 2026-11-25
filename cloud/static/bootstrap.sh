@@ -2333,8 +2333,25 @@ if [ -n "${VD_BUNDLE:-}" ] && [ -f "$VD_BUNDLE" ]; then
     space_check_before_download "${size:-0}"
     vp_step copy "VeraDroid $ver 离线整包"
     show "使用离线整包 VeraDroid $ver…"
-    ui_run out "$TMP/bundle.tar.gz" "${size:-0}" "从 documents 里的离线包读出来，不用联网" cp "$VD_BUNDLE" "$TMP/bundle.tar.gz" || die "无法读取离线安装包"
+    if [ -n "$LOWPRI" ]; then
+        rm -f "$TMP/bundle.tar.gz"; : > "$TMP/bundle.tar.gz" || die "无法读取离线安装包"
+        b_mb=$(( ${size:-0} / 1048576 )); if [ $(( ${size:-0} % 1048576 )) -gt 0 ]; then b_mb=$((b_mb + 1)); fi
+        o=0
+        while [ $o -lt $b_mb ]; do
+            $LOWPRI dd if="$VD_BUNDLE" of="$TMP/bundle.tar.gz" bs=1M skip=$o seek=$o count=8 conv=notrunc 2>/dev/null || die "无法读取离线安装包"
+            sync; o=$((o + 8))
+            b_pct=100; if [ $b_mb -gt 0 ] && [ $o -lt $b_mb ]; then b_pct=$((o * 100 / b_mb)); fi
+            progress_line $b_pct "离线包"
+        done
+        got=$(wc -c < "$TMP/bundle.tar.gz" 2>/dev/null | tr -d ' ')
+        [ "$got" = "${size:-0}" ] || die "读取离线安装包不完整（${got:-0}/${size:-0} bytes）"
+    else
+        ui_run out "$TMP/bundle.tar.gz" "${size:-0}" "从 documents 里的离线包读出来，不用联网" cp "$VD_BUNDLE" "$TMP/bundle.tar.gz" || die "无法读取离线安装包"
+    fi
     sha=
+    if [ -f "$VD_BUNDLE.sha256" ]; then
+        sha=$(awk '{ s = tolower($0); gsub(/[^0-9a-f]+/, " ", s); n = split(s, a, " "); for (i = 1; i <= n; i++) if (length(a[i]) == 64) { print a[i]; exit } }' "$VD_BUNDLE.sha256" 2>/dev/null || true)
+    fi
 else
     show "查询最新 VeraDroid 安装包…"
     # 先要这台 Kindle 类别的包（bootstrap-<类别>.json），没有就要通用包：4.9 内核机型（PW5/KT5/KT6）要用 32 位 binder 的
@@ -2368,6 +2385,7 @@ fi
 if [ -n "$sha" ]; then
     vp_step verify "SHA-256" "核对下载的文件和服务器上的一模一样"
     if ! ui_run in "$TMP/bundle.tar.gz" "${size:-0}" "核对下载的文件和服务器上的一模一样" verify_sha "$TMP/bundle.tar.gz" "$sha"; then
+        [ "$offline" = 1 ] && DIE_CODE=15 die "SHA-256 校验失败"
         # 下载损坏（网络传输出错）：自动重下一次
         vlog "sha256 mismatch: downloading again"
         rm -rf "$TMP/bundle.tar.gz" "$TMP/bundle.tar.gz.seg"
@@ -2382,6 +2400,7 @@ vp_step unpack "把安装包解开（不动书和应用）"
 show "正在解压安装包…"
 VP_CMIN=3; VP_MIN=8
 syncer_on
+[ -n "$PARTS" ] || ${LOWPRI:-$UNPACK_PRI} gzip -t "$TMP/bundle.tar.gz" 2>/dev/null || { syncer_off; DIE_CODE=15 die "安装包已损坏（gzip 校验失败），请重新拷贝或下载后再试"; }
 [ -n "$PARTS" ] || ui_run in "$TMP/bundle.tar.gz" "$(fsize "$TMP/bundle.tar.gz")" "把安装包解开（不动书和应用）" ${LOWPRI:-$UNPACK_PRI} tar -xzf "$TMP/bundle.tar.gz" -C "$TMP" || { syncer_off; die "解压安装包失败"; }
 vp_upgrade "$TMP/veradroid-pw6/bin/fbink"     # 整包里的 FBInk：没有能用的 FBInk 时，从这里起换成整屏方块画面
 syncer_off
