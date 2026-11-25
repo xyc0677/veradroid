@@ -26,6 +26,7 @@ for h in pw6 k49 legacy; do
     grep -q 'net_heal_kick resume' $b/lib/sleep.sh || fail "$h: no net check after the screensaver"
     grep -q 'net_watch_tick' $b/lib/watchdog.sh || fail "$h: watchdog does not watch the network"
     grep -q 'mkdir \$W/netheal.lock' $b/lib/network.sh || fail "$h: net_heal_kick has no atomic lock"
+    grep -q 'getconf CLK_TCK' $b/lib/network.sh && grep -q '\$((nh_hz \* 3 / 2))' $b/lib/network.sh || fail "$h: netd_wedged still hardcodes HZ=100"
     [ "$(grep -c 'for f in .* netheal; do' $b/stop.sh)" = 2 ] || fail "$h: stop.sh does not include netheal in helper stop/cleanup loops"
     grep -q 'case "\$f" in .*|netheal)' $b/stop.sh || fail "$h: stop.sh does not reap netheal descendant processes"
     grep -q '\$W/netheal.lock' $b/stop.sh || fail "$h: stop.sh does not clean up netheal.lock"
@@ -110,5 +111,31 @@ EOF
     kill -0 "$nhp" 2>/dev/null && { kill -9 "$nhp" 2>/dev/null; fail "$h: stop.sh left netheal subshell alive"; }
     kill -0 "$lfp" 2>/dev/null && { kill -9 "$lfp" 2>/dev/null; fail "$h: stop.sh left netheal grandchild alive"; }
     [ ! -f $W/netheal.pid ] && [ ! -d $W/netheal.lock ] || fail "$h: stop.sh left netheal.pid or netheal.lock"
+
+    # netd_wedged CLK_TCK scaling (HZ=100, 250, 1000 and fallback to 100 on empty/non-numeric/0)
+    NET_PROC=$T/proc-$h; mkdir -p $NET_PROC/4321/task/4321
+    echo netd > $NET_PROC/4321/comm
+    statf=$NET_PROC/4321/task/4321/stat
+    mkstat() { printf '4321 (netd) R 1 1 1 0 -1 0 0 0 0 0 %s 0 0 0 20 0 1 0 0\n' "$1" > $statf; }
+    check_hz() {
+        FAKE_HZ=$1; DELTA=$2
+        (
+            chroot() { return 1; }
+            getconf() { echo "$FAKE_HZ"; }
+            sleep() { mkstat $((100 + DELTA)); }
+            mkstat 100
+            netd_wedged
+        )
+    }
+    check_hz 100 149 && fail "$h: HZ=100 delta 149 counted as wedged"
+    check_hz 100 150 || fail "$h: HZ=100 delta 150 not counted as wedged"
+    check_hz 250 374 && fail "$h: HZ=250 delta 374 counted as wedged (hardcoded 150?)"
+    check_hz 250 375 || fail "$h: HZ=250 delta 375 not counted as wedged"
+    check_hz 1000 1499 && fail "$h: HZ=1000 delta 1499 counted as wedged"
+    check_hz 1000 1500 || fail "$h: HZ=1000 delta 1500 not counted as wedged"
+    for badhz in "" "invalid" "0"; do
+        check_hz "$badhz" 149 && fail "$h: fallback HZ ($badhz) delta 149 counted as wedged"
+        check_hz "$badhz" 150 || fail "$h: fallback HZ ($badhz) delta 150 not counted as wedged"
+    done
 done
 echo "PASS net-resume"

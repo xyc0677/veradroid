@@ -169,12 +169,14 @@ net_slirp_restart() {
     [ -f $W/fwd.id ] && [ -n "$nf_port" ] && type fwd_on >/dev/null 2>&1 && { fwd_on "$nf_port"; t "net: transfer port $nf_port forwarded again"; }
 }
 netd_wedged() { # chroot 模式：netd 有线程一直在跑（老 netd 的 clearTetheringRules 死循环）
-    np=$(chroot /proc/$(cat $W/pid)/root /system/bin/toybox pidof netd 2>/dev/null | cut -d' ' -f1)
-    [ -n "$np" ] || np=$(for d in /proc/[0-9]*; do [ "$(cat $d/comm 2>/dev/null)" = netd ] && { echo ${d#/proc/}; break; }; done)
+    nh_proc=${NET_PROC:-/proc}
+    np=$(chroot $nh_proc/$(cat $W/pid 2>/dev/null)/root /system/bin/toybox pidof netd 2>/dev/null | cut -d' ' -f1)
+    [ -n "$np" ] || np=$(for d in $nh_proc/[0-9]*; do [ "$(cat $d/comm 2>/dev/null)" = netd ] && { echo ${d#$nh_proc/}; break; }; done)
     [ -n "$np" ] || return 1
-    a=$(awk '{ s += $14 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null); sleep 2
-    b=$(awk '{ s += $14 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null)
-    [ $((b - a)) -ge 150 ] 2>/dev/null   # 2 秒里用户态 ≥ 1.5 秒 = 在空转
+    nh_hz=$(getconf CLK_TCK 2>/dev/null); case "$nh_hz" in ''|*[!0-9]*|0) nh_hz=100 ;; esac
+    a=$(awk '{ s += $14 } END { print s + 0 }' $nh_proc/$np/task/*/stat 2>/dev/null); sleep 2
+    b=$(awk '{ s += $14 } END { print s + 0 }' $nh_proc/$np/task/*/stat 2>/dev/null)
+    [ $((b - a)) -ge $((nh_hz * 3 / 2)) ] 2>/dev/null   # 2 秒里用户态 ≥ 1.5 秒 = 在空转
 }
 # $1 = 为什么查（resume / thaw / change / periodic / manual）。在后台跑；同时只有一个。
 net_heal() {
