@@ -1983,11 +1983,12 @@ if [ "$LOOP" = 1 ]; then
         show "创建 $IMGFS 系统盘（$IMGMB MB）…"
         if [ -n "$LOWPRI" ]; then
             # 老机型（vfat 用户分区不支持稀疏文件，整盘全要真写）：一次写完会在 256 / 512 MB 内存里攒满脏页，
-            # 整机卡死几十秒（PW2 / Voyage 模拟器在这一步被硬件看门狗复位过好几次）。每 32 MB 落盘一次、歇一下。
+            # 整机卡死几十秒（PW2 / Voyage / PW4 在这一步被硬件或 eMMC 看门狗复位过）。每 8 MB 落盘一次、歇一下。
             rm -f "$SYSTEM_IMG"; o=0
             while [ $o -lt $IMGMB ]; do
-                $LOWPRI dd if=/dev/zero of="$SYSTEM_IMG" bs=1M count=32 seek=$o conv=notrunc 2>/dev/null || die "无法创建系统盘"
-                sync; o=$((o + 32)); progress_line $((o * 100 / IMGMB)) "建系统盘"; sleep 1
+                chunk=$((IMGMB - o)); if [ $chunk -gt 8 ]; then chunk=8; fi
+                $LOWPRI dd if=/dev/zero of="$SYSTEM_IMG" bs=1M count=$chunk seek=$o conv=notrunc 2>/dev/null || die "无法创建系统盘"
+                sync; o=$((o + chunk)); progress_line $((o * 100 / IMGMB)) "建系统盘"; sleep 1
             done
             [ "$(stat -c %s "$SYSTEM_IMG" 2>/dev/null)" -ge $((IMGMB * 1048576)) ] 2>/dev/null || die "无法创建系统盘"
         else
