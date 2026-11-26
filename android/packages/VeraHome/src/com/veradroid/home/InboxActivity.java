@@ -17,6 +17,8 @@ public class InboxActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private TextView status;
     private LinearLayout list;
+    private View syncBtn;
+    private volatile boolean syncing;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -53,9 +55,10 @@ public class InboxActivity extends Activity {
         actions.addView(Ui.button(this, "返回", 16, false, new View.OnClickListener() {
             @Override public void onClick(View v) { finish(); }
         }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        actions.addView(Ui.button(this, "同步", 16, true, new View.OnClickListener() {
+        syncBtn = Ui.button(this, "同步", 16, true, new View.OnClickListener() {
             @Override public void onClick(View v) { sync(); }
-        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        });
+        actions.addView(syncBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         page.addView(actions);
         Blocks.restyle(this, page, title, actions, "Inbox / mail to Kindle");
 
@@ -63,12 +66,21 @@ public class InboxActivity extends Activity {
     }
 
     private void sync() {
+        if (syncing) return;
+        syncing = true;
+        if (syncBtn != null) syncBtn.setEnabled(false);
         status.setText("正在同步到 Books…");
         new Thread(new Runnable() {
             @Override public void run() {
                 InboxSync.sync(InboxActivity.this, new InboxSync.Result() {
                     @Override public void done(final int count, final String error) {
+                        if (count > 0) {
+                            try { Lib.scan(InboxActivity.this, 0); } catch (Throwable ignored) { }
+                        }
                         ui.post(new Runnable() { @Override public void run() {
+                            syncing = false;
+                            if (isFinishing()) return;
+                            if (syncBtn != null) syncBtn.setEnabled(true);
                             if (error != null) { status.setText("同步失败"); say(error); return; }
                             status.setText(count > 0 ? "已收 " + count + " 个文件到 Books" : "没有待收文件");
                             VeraToast.show(InboxActivity.this, count > 0 ? "已放到书架" : "邮箱是空的");
@@ -81,6 +93,11 @@ public class InboxActivity extends Activity {
 
     private void say(String s) { VeraToast.show(this, s); }
     private int dp(int v) { return Ui.dp(this, v); }
+
+    @Override protected void onDestroy() {
+        ui.removeCallbacksAndMessages(null);
+        super.onDestroy();
+    }
 
     @Override protected void onResume() {
         super.onResume();

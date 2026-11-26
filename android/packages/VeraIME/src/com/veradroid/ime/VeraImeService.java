@@ -49,24 +49,30 @@ import java.util.List;
  */
 public class VeraImeService extends InputMethodService {
     private static final String TAG = "VeraIME";
+    /** API 26 constant (EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING); defined here for API 25 builds. */
+    private static final int IME_FLAG_NO_PERSONALIZED_LEARNING = 0x1000000;
 
     private LinearLayout root, keyboard;
     private CandidateBar bar;
     private TextView composing, optionsKey;
     private final List<TextView> letterKeys = new ArrayList<TextView>();
-    private TextView shiftKey, modeKey, spaceKey;
+    private TextView shiftKey, modeKey, spaceKey, commaKey, periodKey;
     private int rowH = 140;
+    private int lastScreenW, lastScreenH;
 
-    private boolean chinese = true, shift = false, numeric = false, symbols = false;
+    private boolean chinese = true, shift = false, numeric = false, symbols = false, passwordField = false;
     private boolean userChinese = true;   // 用户自己按“中/英”选的模式；密码 / 网址框临时切英文后要回到它
     /** Edit panel (copy / paste / cursor) shown instead of the letter keys; selecting = arrows extend the selection. */
     private boolean editMode = false, selecting = false;
     private int selAnchor = -1;
     private long editHiddenAt;
     private String editHiddenPkg;
-    /** Last text we copied: pasted when the system clipboard cannot be read (ClipboardService hides it while
-     *  TrustManager still thinks the device is locked, which is the default until keyguard reports in). */
+    /** Last text we copied (cleared on clip change / input finish; never pasted as fallback). */
     private String lastCopied;
+    private final ClipboardManager.OnPrimaryClipChangedListener clipListener =
+        new ClipboardManager.OnPrimaryClipChangedListener() {
+            @Override public void onPrimaryClipChanged() { lastCopied = null; }
+        };
     private TextView selectKey;
     private final StringBuilder pinyin = new StringBuilder();
 
@@ -90,17 +96,37 @@ public class VeraImeService extends InputMethodService {
     private boolean awaitSel;
     private int ctxAt = -1;
     // ---- options (the 选项 key in the top line)
-    private boolean optionsMode, predictOn = true, learnOn = true;
+    private boolean optionsMode, predictOn = true, learnOn = true, noLearn = false;
     private long clearArmed;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
+    private final java.util.concurrent.ExecutorService saveWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.atomic.AtomicInteger saveGen = new java.util.concurrent.atomic.AtomicInteger();
+    private float keySp = 24f;
+    private float smallKeySp = 16f;
+    private float editKeySp = 22f;
 
     @Override public void onCreate() {
         super.onCreate();
         SharedPreferences sp = getSharedPreferences("ime", MODE_PRIVATE);
         predictOn = sp.getBoolean("predict", true);
         learnOn = sp.getBoolean("learn", true);
+        try {
+            ClipboardManager cm = clipboard();
+            if (cm != null) cm.addPrimaryClipChangedListener(clipListener);
+        } catch (Throwable ignored) { }
         openEngine();
+    }
+
+    @Override public void onDestroy() {
+        lastCopied = null;
+        try {
+            ClipboardManager cm = clipboard();
+            if (cm != null) cm.removePrimaryClipChangedListener(clipListener);
+        } catch (Throwable ignored) { }
+        saveUser();
+        saveWorker.shutdown();
+        super.onDestroy();
     }
 
     private int dp(float v) {
@@ -133,7 +159,7 @@ public class VeraImeService extends InputMethodService {
     }
 
     private TextView key(String label, float weight, View.OnClickListener l) {
-        TextView t = text(label, 24, false);
+        TextView t = text(label, keySp, false);
         t.setGravity(Gravity.CENTER);
         t.setBackground(keyBackground());
         t.setTextColor(new android.content.res.ColorStateList(
@@ -156,11 +182,23 @@ public class VeraImeService extends InputMethodService {
         root.setPadding(dp(6), dp(2), dp(6), dp(4));
 
         // Fixed height: the candidate bar must not make the keyboard jump under the finger when the first
-        // pinyin letter turns into candidates.  The whole IME occupies about 44% of the panel.
-        int total = (int) (getResources().getDisplayMetrics().heightPixels * 0.44f);
-        int topH = dp(26), candH = dp(44);
-        int kbH = Math.max(dp(280), total - topH - candH);
-        rowH = kbH / 4;
+        // pinyin letter turns into candidates. Adapt height cleanly to landscape panels so row 4 is never clipped.
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        lastScreenW = dm.widthPixels;
+        lastScreenH = dm.heightPixels;
+        boolean land = dm.widthPixels > dm.heightPixels;
+        int padY = root.getPaddingTop() + root.getPaddingBottom();
+        int topH = dp(land ? 24 : 26), candH = dp(land ? 40 : 44);
+        int targetTotal = (int) (dm.heightPixels * (land ? 0.50f : 0.44f));
+        int minKb = dp(land ? 180 : 280);
+        int maxKb = Math.max(dp(160), (int) (dm.heightPixels * (land ? 0.58f : 0.52f)) - topH - candH - padY);
+        int kbH = Math.min(maxKb, Math.max(minKb, targetTotal - topH - candH - padY));
+        rowH = Math.max(dp(38), kbH / 4);
+        kbH = rowH * 4;
+        keySp = rowH < dp(52) ? 18f : rowH < dp(62) ? 21f : 24f;
+        smallKeySp = rowH < dp(52) ? 13f : rowH < dp(62) ? 15f : 16f;
+        editKeySp = rowH < dp(52) ? 16f : rowH < dp(62) ? 19f : 22f;
+        int total = padY + topH + candH + kbH;
         root.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, total));
 
         LinearLayout top = new LinearLayout(this);
@@ -195,6 +233,34 @@ public class VeraImeService extends InputMethodService {
         return root;
     }
 
+    @Override public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (root == null) return;
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        if (dm.widthPixels == lastScreenW && dm.heightPixels == lastScreenH) return;
+        setInputView(onCreateInputView());
+    }
+
+    private static boolean isNoLearnEditor(EditorInfo info) {
+        if (info == null) return false;
+        if ((info.imeOptions & IME_FLAG_NO_PERSONALIZED_LEARNING) != 0) return true;
+        int cls = info.inputType & InputType.TYPE_MASK_CLASS;
+        int var = info.inputType & InputType.TYPE_MASK_VARIATION;
+        if (cls == InputType.TYPE_CLASS_TEXT) {
+            if ((info.inputType & InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS) != 0) return true;
+            if (var == InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    || var == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    || var == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) return true;
+        } else if (cls == InputType.TYPE_CLASS_NUMBER) {
+            if (var == InputType.TYPE_NUMBER_VARIATION_PASSWORD) return true;
+        }
+        return false;
+    }
+
+    private boolean canLearn() {
+        return learnOn && !noLearn && user != null;
+    }
+
     @Override public void onStartInput(EditorInfo info, boolean restarting) {
         super.onStartInput(info, restarting);
         pinyin.setLength(0);
@@ -205,15 +271,21 @@ public class VeraImeService extends InputMethodService {
         // 变体是枚举值，不是位：以前按位与 PASSWORD(0x80)，网页输入框(0xa0)、搜索过滤框(0xb0)也被当成密码框切成英文，
         // 而且之后所有普通输入框都一直是英文。现在密码 / 网址 / 邮箱框临时用英文，别的框回到用户自己选的模式。
         chinese = userChinese;
+        passwordField = false;
+        noLearn = isNoLearnEditor(info);
         if (info != null) {
             int cls = info.inputType & InputType.TYPE_MASK_CLASS;
             int var = info.inputType & InputType.TYPE_MASK_VARIATION;
             boolean text = cls == InputType.TYPE_CLASS_TEXT;
-            boolean password = text && (var == InputType.TYPE_TEXT_VARIATION_PASSWORD
+            boolean password = (text && (var == InputType.TYPE_TEXT_VARIATION_PASSWORD
                 || var == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                || var == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD);
+                || var == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD))
+                || (cls == InputType.TYPE_CLASS_NUMBER && var == InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+            passwordField = password;
             if (password) chinese = false;
-            numeric = cls == InputType.TYPE_CLASS_NUMBER;
+            numeric = cls == InputType.TYPE_CLASS_NUMBER
+                || cls == InputType.TYPE_CLASS_PHONE
+                || cls == InputType.TYPE_CLASS_DATETIME;
             symbols = text && (var == InputType.TYPE_TEXT_VARIATION_URI
                 || var == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
                 || var == InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS);
@@ -231,6 +303,7 @@ public class VeraImeService extends InputMethodService {
      *  stays, so copy in one field and paste in the next works without reopening it. */
     @Override public void onFinishInputView(boolean finishingInput) {
         super.onFinishInputView(finishingInput);
+        if (finishingInput) lastCopied = null;
         if (optionsMode) { optionsMode = false; if (root != null) { buildKeyboard(); updateCandidates(); } }
         if (editMode) {
             EditorInfo ei = getCurrentInputEditorInfo();
@@ -279,6 +352,7 @@ public class VeraImeService extends InputMethodService {
 
     @Override public void onStartInputView(EditorInfo info, boolean restarting) {
         super.onStartInputView(info, restarting);
+        noLearn = isNoLearnEditor(info != null ? info : getCurrentInputEditorInfo());
         boolean back = editHiddenAt > 0 && SystemClock.uptimeMillis() - editHiddenAt < 2000
             && info != null && editHiddenPkg != null && editHiddenPkg.equals(info.packageName);
         editHiddenAt = 0;
@@ -293,6 +367,7 @@ public class VeraImeService extends InputMethodService {
         pinyin.setLength(0);
         picks.clear();
         predictions = null;
+        lastCopied = null;
         saveUser();
         super.onFinishInput();
     }
@@ -327,15 +402,25 @@ public class VeraImeService extends InputMethodService {
             AssetFileDescriptor fd = null;
             try { fd = getAssets().openFd("pinyin.dat"); } catch (Exception compressed) { }
             if (fd != null) {
-                FileInputStream in = fd.createInputStream();
-                buf = in.getChannel().map(FileChannel.MapMode.READ_ONLY, fd.getStartOffset(), fd.getLength());
-                in.close();
+                try {
+                    FileInputStream in = fd.createInputStream();
+                    try {
+                        buf = in.getChannel().map(FileChannel.MapMode.READ_ONLY, fd.getStartOffset(), fd.getLength());
+                    } finally {
+                        try { in.close(); } catch (Throwable ignored) { }
+                    }
+                } finally {
+                    try { fd.close(); } catch (Throwable ignored) { }
+                }
             } else {                            // stored compressed after all: read it once into native memory
                 InputStream in = getAssets().open("pinyin.dat");
                 java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream(1 << 22);
-                byte[] b = new byte[65536];
-                for (int n; (n = in.read(b)) > 0; ) o.write(b, 0, n);
-                in.close();
+                try {
+                    byte[] b = new byte[65536];
+                    for (int n; (n = in.read(b)) > 0; ) o.write(b, 0, n);
+                } finally {
+                    try { in.close(); } catch (Throwable ignored) { }
+                }
                 buf = ByteBuffer.allocateDirect(o.size());
                 buf.put(o.toByteArray()).flip();
             }
@@ -362,30 +447,77 @@ public class VeraImeService extends InputMethodService {
     private long lastSave;
 
     private void saveUser() {
-        if (user == null || !user.dirty) return;
+        if (user == null || !user.dirty || saveWorker.isShutdown()) return;
         lastSave = SystemClock.uptimeMillis();
         final StringWriter w = new StringWriter();
         try { user.save(w); } catch (Exception e) { return; }
-        user.dirty = false;
+        final UserDict u = user;
+        final int rev = u.rev;
+        final String snapshot = w.toString();
+        final int gen = saveGen.incrementAndGet();
         final File f = userFile(), tmp = new File(f.getPath() + ".tmp");
-        new Thread("VeraIME-save") {
-            @Override public void run() {
-                synchronized (VeraImeService.class) {
-                    try {
-                        Writer o = new OutputStreamWriter(new FileOutputStream(tmp), "UTF-8");
-                        try { o.write(w.toString()); } finally { o.close(); }
-                        if (!tmp.renameTo(f)) Log.w(TAG, "userdict: rename failed");
-                    } catch (Exception e) { Log.w(TAG, "userdict: " + e); }
+        try {
+            saveWorker.execute(new Runnable() {
+                @Override public void run() {
+                    boolean ok = false;
+                    synchronized (VeraImeService.class) {
+                        if (saveGen.get() != gen) return;
+                        FileOutputStream fos = null;
+                        try {
+                            fos = new FileOutputStream(tmp);
+                            Writer o = new OutputStreamWriter(fos, "UTF-8");
+                            o.write(snapshot);
+                            o.flush();
+                            fos.getFD().sync();
+                            o.close();
+                            fos = null;
+                            if (saveGen.get() != gen) { tmp.delete(); return; }
+                            if (tmp.renameTo(f)) {
+                                ok = true;
+                            } else {
+                                tmp.delete();
+                                Log.w(TAG, "userdict: rename failed");
+                            }
+                        } catch (Exception e) {
+                            tmp.delete();
+                            Log.w(TAG, "userdict: " + e);
+                        } finally {
+                            if (fos != null) try { fos.close(); } catch (Exception ignored) { }
+                        }
+                    }
+                    if (ok) {
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                if (user == u && user.rev == rev && saveGen.get() == gen) user.dirty = false;
+                            }
+                        });
+                    }
                 }
-            }
-        }.start();
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
     }
 
     private void clearUser() {
-        if (user != null) user.clear();
+        final int gen = saveGen.incrementAndGet();
+        if (user != null) {
+            user.clear();
+            user.dirty = false;
+        }
         clearContext();
-        synchronized (VeraImeService.class) { userFile().delete(); }
-        if (user != null) user.dirty = false;
+        final File f = userFile(), tmp = new File(f.getPath() + ".tmp");
+        if (!saveWorker.isShutdown()) {
+            try {
+                saveWorker.execute(new Runnable() {
+                    @Override public void run() {
+                        synchronized (VeraImeService.class) {
+                            if (saveGen.get() != gen) return;
+                            f.delete();
+                            tmp.delete();
+                        }
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException ignored) { }
+        }
         Log.i(TAG, "userdict cleared");
     }
 
@@ -406,6 +538,8 @@ public class VeraImeService extends InputMethodService {
             bar.setSource(null);
             return;
         }
+        if (numeric) { composing.setText("数字"); bar.setSource(null); return; }
+        if (symbols) { composing.setText("符号 / 网址"); bar.setSource(null); return; }
         if (!chinese) {
             composing.setText("English");
             bar.setSource(null);
@@ -446,7 +580,7 @@ public class VeraImeService extends InputMethodService {
             PinyinDecoder.Cand c = p.get(index);
             String prev = ctxText;
             commitRaw(c.text);
-            if (learnOn && user != null) user.learnPair(prev, c.text);
+            if (canLearn()) user.learnPair(prev, c.text);
             ctxId = c.lastId();
             ctxText = c.text;
             suggest();
@@ -477,22 +611,27 @@ public class VeraImeService extends InputMethodService {
         StringBuilder t = new StringBuilder();
         for (Pick p : picks) t.append(p.text);
         String text = t.toString();
-        if (learnOn && user != null && decoder != null) {
-            // every phrase chosen gets cheaper; several choices make one new phrase of the user's own
-            StringBuilder key = new StringBuilder();
-            boolean whole = true;
-            for (Pick p : picks) {
-                int[] syl = decoder.syllables(p.cand);
-                if (syl == null) { whole = false; continue; }
-                for (int s : syl) key.append((char) s);
-                user.learn(syl, p.text);
+        if (canLearn() && decoder != null) {
+            user.beginBatch();
+            try {
+                // every phrase chosen gets cheaper; several choices make one new phrase of the user's own
+                StringBuilder key = new StringBuilder();
+                boolean whole = true;
+                for (Pick p : picks) {
+                    int[] syl = decoder.syllables(p.cand);
+                    if (syl == null) { whole = false; continue; }
+                    for (int s : syl) key.append((char) s);
+                    user.learn(syl, p.text);
+                }
+                if (whole && picks.size() > 1 && key.length() == text.length()) {
+                    int[] syl = new int[key.length()];
+                    for (int i = 0; i < syl.length; i++) syl[i] = key.charAt(i);
+                    user.learn(syl, text);
+                }
+                user.learnPair(ctxText, text);
+            } finally {
+                user.endBatch();
             }
-            if (whole && picks.size() > 1 && key.length() == text.length()) {
-                int[] syl = new int[key.length()];
-                for (int i = 0; i < syl.length; i++) syl[i] = key.charAt(i);
-                user.learn(syl, text);
-            }
-            user.learnPair(ctxText, text);
         }
         int last = picks.isEmpty() ? -1 : picks.get(picks.size() - 1).cand.lastId();
         if (last < 0 && decoder != null && !picks.isEmpty() && text.length() > 0) {
@@ -619,11 +758,25 @@ public class VeraImeService extends InputMethodService {
         return optionsMode ? "options" : editMode ? "edit" : symbols ? "symbols" : numeric ? "numeric" : "letters";
     }
 
+    private void settleComposing() {
+        if (chinese && composingNow()) finishAll();
+        pinyin.setLength(0);
+        picks.clear();
+        justPicked = false;
+        predictions = null;
+        clearContext();
+    }
+
     private void buildKeyboard() {
         builtPage = page();
         keyboard.removeAllViews();
         letterKeys.clear();
         selectKey = null;
+        modeKey = null;
+        spaceKey = null;
+        commaKey = null;
+        periodKey = null;
+        shiftKey = null;
 
         if (optionsMode) { buildOptions(); return; }
         if (editMode) { buildEditPanel(); return; }
@@ -645,13 +798,13 @@ public class VeraImeService extends InputMethodService {
         shiftKey = key("Shift", 1.5f, new View.OnClickListener() {
             @Override public void onClick(View v) { shift = !shift; updateKeyLabels(); }
         });
-        shiftKey.setTextSize(16);
+        shiftKey.setTextSize(smallKeySp);
         row3.addView(shiftKey);
         for (char c : "zxcvbnm".toCharArray()) addLetter(row3, c);
         TextView back = key("退格", 1.5f, new View.OnClickListener() {
             @Override public void onClick(View v) { backspace(); }
         });
-        back.setTextSize(16);
+        back.setTextSize(smallKeySp);
         row3.addView(back);
         keyboard.addView(row3, rowParams());
 
@@ -664,15 +817,27 @@ public class VeraImeService extends InputMethodService {
             }
         });
         row4.addView(modeKey);
-        row4.addView(key("，", 1f, new View.OnClickListener() { @Override public void onClick(View v) { punct("，"); } }));
+        commaKey = key("，", 1f, new View.OnClickListener() {
+            @Override public void onClick(View v) { punct(useFullWidthPunct() ? "，" : ","); }
+        });
+        row4.addView(commaKey);
         spaceKey = key("空格", 2.6f, new View.OnClickListener() { @Override public void onClick(View v) { space(); } });
         row4.addView(spaceKey);
-        row4.addView(key("。", 1f, new View.OnClickListener() { @Override public void onClick(View v) { punct("。"); } }));
+        periodKey = key("。", 1f, new View.OnClickListener() {
+            @Override public void onClick(View v) { punct(useFullWidthPunct() ? "。" : "."); }
+        });
+        row4.addView(periodKey);
         TextView num = key("123", 1.2f, new View.OnClickListener() {
-            @Override public void onClick(View v) { numeric = true; symbols = false; buildKeyboard(); }
+            @Override public void onClick(View v) {
+                settleComposing();
+                numeric = true; symbols = false; buildKeyboard(); updateCandidates();
+            }
         });
         num.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override public boolean onLongClick(View v) { symbols = true; numeric = false; buildKeyboard(); return true; }
+            @Override public boolean onLongClick(View v) {
+                settleComposing();
+                symbols = true; numeric = false; buildKeyboard(); updateCandidates(); return true;
+            }
         });
         row4.addView(num);
         row4.addView(editKey());
@@ -695,18 +860,21 @@ public class VeraImeService extends InputMethodService {
         keyboard.addView(r3, rowParams());
         LinearLayout r4 = row();
         TextView abc = key("ABC", 1.4f, new View.OnClickListener() {
-            @Override public void onClick(View v) { numeric = false; buildKeyboard(); }
+            @Override public void onClick(View v) { numeric = false; buildKeyboard(); updateCandidates(); }
         });
-        abc.setTextSize(16);
+        abc.setTextSize(smallKeySp);
         r4.addView(abc);
         addDigit(r4, '0');
         TextView back = key("退格", 1.5f, new View.OnClickListener() {
             @Override public void onClick(View v) { backspace(); }
         });
-        back.setTextSize(16);
+        back.setTextSize(smallKeySp);
         r4.addView(back);
         r4.addView(key("符", 1.2f, new View.OnClickListener() {
-            @Override public void onClick(View v) { symbols = true; numeric = false; buildKeyboard(); }
+            @Override public void onClick(View v) {
+                settleComposing();
+                symbols = true; numeric = false; buildKeyboard(); updateCandidates();
+            }
         }));
         r4.addView(editKey());
         r4.addView(key("回车", 1.6f, new View.OnClickListener() { @Override public void onClick(View v) { enter(); } }));
@@ -727,7 +895,7 @@ public class VeraImeService extends InputMethodService {
         keyboard.addView(r3, rowParams());
         LinearLayout r4 = row();
         r4.addView(key("ABC", 1.4f, new View.OnClickListener() {
-            @Override public void onClick(View v) { symbols = false; numeric = false; buildKeyboard(); }
+            @Override public void onClick(View v) { symbols = false; numeric = false; buildKeyboard(); updateCandidates(); }
         }));
         r4.addView(key("空格", 2.0f, new View.OnClickListener() {
             @Override public void onClick(View v) { space(); }
@@ -769,7 +937,7 @@ public class VeraImeService extends InputMethodService {
 
     private TextView editButton(LinearLayout row, String label, float weight, View.OnClickListener l) {
         TextView k = key(label, weight, l);
-        k.setTextSize(22);
+        k.setTextSize(editKeySp);
         row.addView(k);
         return k;
     }
@@ -820,7 +988,7 @@ public class VeraImeService extends InputMethodService {
         if (c == null) return null;
         try {
             ExtractedText et = c.getExtractedText(new ExtractedTextRequest(), 0);
-            return (et != null && et.text != null && et.selectionStart >= 0) ? et : null;
+            return (et != null && et.text != null && et.selectionStart >= 0 && et.selectionEnd >= 0) ? et : null;
         } catch (Throwable t) { return null; }
     }
 
@@ -854,13 +1022,22 @@ public class VeraImeService extends InputMethodService {
             if (et != null && et.selectionStart == et.selectionEnd) sel = "";   // the app reports no selection
         }
         if (sel != null && sel.length() > 0) {
+            boolean copied = false;
             try {
-                lastCopied = sel.toString();
-                clipboard().setPrimaryClip(ClipData.newPlainText("VeraIME", lastCopied));
+                String s = sel.toString();
+                ClipboardManager cm = clipboard();
+                if (cm == null) throw new IllegalStateException("no clipboard");
+                cm.setPrimaryClip(ClipData.newPlainText("VeraIME", s));
+                lastCopied = s;
+                copied = true;
             } catch (Throwable t) {
-                c.performContextMenuAction(cut ? android.R.id.cut : android.R.id.copy);
+                lastCopied = null;
+                if (!c.performContextMenuAction(cut ? android.R.id.cut : android.R.id.copy)) {
+                    status(cut ? "剪切失败" : "复制失败");
+                    return;
+                }
             }
-            if (cut) c.commitText("", 1);
+            if (cut && copied) c.commitText("", 1);
             status((cut ? "已剪切 " : "已复制 ") + sel.length() + " 字");
         } else if (sel == null && c.performContextMenuAction(cut ? android.R.id.cut : android.R.id.copy)) {
             status(cut ? "已剪切" : "已复制");
@@ -880,7 +1057,7 @@ public class VeraImeService extends InputMethodService {
         CharSequence text = null;
         try {
             ClipboardManager cm = clipboard();
-            ClipData clip = cm.getPrimaryClip();
+            ClipData clip = cm != null ? cm.getPrimaryClip() : null;
             if (clip != null && clip.getItemCount() > 0) {
                 StringBuilder b = new StringBuilder();
                 for (int i = 0; i < clip.getItemCount(); i++) {
@@ -890,9 +1067,8 @@ public class VeraImeService extends InputMethodService {
                 text = b;
             }
         } catch (Throwable ignored) { }
-        if ((text == null || text.length() == 0) && lastCopied != null) {
-            Log.w(TAG, "clipboard unreadable, pasting the IME's own last copy");
-            text = lastCopied;
+        if (text == null || text.length() == 0) {
+            lastCopied = null;
         }
         if (text != null && text.length() > 0) {
             c.commitText(text.toString(), 1);
@@ -979,6 +1155,7 @@ public class VeraImeService extends InputMethodService {
         } else {
             pos = cursorOf(et);
             int i = pos - et.startOffset;
+            i = Math.max(0, Math.min(t.length(), i));
             if (dir < 0 && i > 0) i -= (i >= 2 && Character.isLowSurrogate(t.charAt(i - 1)) && Character.isHighSurrogate(t.charAt(i - 2))) ? 2 : 1;
             else if (dir > 0 && i < t.length()) i += (i + 1 < t.length() && Character.isHighSurrogate(t.charAt(i)) && Character.isLowSurrogate(t.charAt(i + 1))) ? 2 : 1;
             pos = et.startOffset + i;
@@ -1003,22 +1180,17 @@ public class VeraImeService extends InputMethodService {
 
     private void addSymbol(LinearLayout row, final String s) {
         TextView b = key(s, 1f, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                InputConnection ic = ic();
-                if (ic != null) ic.commitText(s, 1);
-            }
+            @Override public void onClick(View v) { commit(s); }
         });
-        b.setTextSize(24);
+        b.setTextSize(keySp);
         row.addView(b);
     }
 
     private void addDigit(LinearLayout row, final char c) {
         TextView b = key(String.valueOf(c), 1f, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                InputConnection ic = ic(); if (ic != null) ic.commitText(String.valueOf(c), 1);
-            }
+            @Override public void onClick(View v) { commit(String.valueOf(c)); }
         });
-        b.setTextSize(30);
+        b.setTextSize(rowH < dp(52) ? 22f : rowH < dp(62) ? 26f : 30f);
         row.addView(b);
     }
 
@@ -1039,10 +1211,17 @@ public class VeraImeService extends InputMethodService {
         row.addView(b);
     }
 
+    private boolean useFullWidthPunct() {
+        return chinese && !passwordField;
+    }
+
     private void updateKeyLabels() {
         if (numeric) return;
+        boolean fw = useFullWidthPunct();
         if (modeKey != null) modeKey.setText(chinese ? "中" : "EN");
+        if (commaKey != null) commaKey.setText(fw ? "，" : ",");
         if (spaceKey != null) spaceKey.setText(chinese ? "空格" : "space");
+        if (periodKey != null) periodKey.setText(fw ? "。" : ".");
         if (shiftKey != null) shiftKey.setText(shift ? "shift" : "Shift");
         for (TextView b : letterKeys) {
             String s = String.valueOf(b.getText());
@@ -1102,7 +1281,8 @@ public class VeraImeService extends InputMethodService {
         InputConnection c = ic();
         if (c == null) return;
         // 选中了文字（全选 / 选择 + 方向键）：退格删掉选中的部分。deleteSurroundingText 只删选区前面的一个字
-        CharSequence sel = c.getSelectedText(0);
+        CharSequence sel = null;
+        try { sel = c.getSelectedText(0); } catch (Throwable ignored) { }
         if (sel != null && sel.length() > 0) c.commitText("", 1);
         else c.deleteSurroundingText(1, 0);
     }

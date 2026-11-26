@@ -51,7 +51,22 @@ display_prepare() {
     [ -n "$m" ] && echo "$m" > $X/model
     hwc_prepare
     vdshim_prepare
-    chmod -R 777 $X
+    chown 0:0 $X $X/ctl 2>/dev/null || true
+    chmod 0755 $X $X/ctl
+    chmod 0644 $X/info $X/model $X/hwc.off $X/hz $X/hwc.dim $X/onepage $X/rgb565 $X/noaudio 2>/dev/null || true
+    kfb_home_chown
+}
+# 仅限 VeraHome（com.veradroid.home）写入的控制项：独立 0700 目录 $X/home（供 settings.new）与属主文件 $X/fg
+kfb_home_chown() {
+    kh_u=$(awk '$1 == "com.veradroid.home" { print $2; exit }' $SYS/data/system/packages.list 2>/dev/null)
+    case "$kh_u" in ''|*[!0-9]*) return 0 ;; esac
+    mkdir -p $X/home 2>/dev/null || true
+    chown "$kh_u:0" $X/home 2>/dev/null || true
+    chmod 0700 $X/home 2>/dev/null || true
+    [ -f $X/fg ] || : > $X/fg
+    chown "$kh_u:0" $X/fg 2>/dev/null || true
+    chmod 0644 $X/fg 2>/dev/null || true
+    return 0
 }
 # ashmem 垫片（android/device/veradroid/kindle/shim/vdshim.c，init 给每个进程 LD_PRELOAD）也随宿主程序发（bin/libvdshim.so），
 # 开机前换掉镜像里的那份：镜像里的旧版对 ASHMEM_GET_PROT_MASK 一律回答 rwx，应用自带的 Chromium 内核（番茄小说的
@@ -100,7 +115,7 @@ display_start() {
     [ -x "$VD/bin/veradroid-epd" ] || { t "display: veradroid-epd missing"; return 0; }
     epd_pd=-1; case "$KFB_PWRDOWN" in ""|*[!0-9]*) ;; *) epd_pd=$KFB_PWRDOWN ;; esac   # 面板掉电延时，没设 / off = 不碰
     : > $W/epd.log   # 追加方式打开：watchdog 的 log_cap 截短它时，显示桥接着写在新的末尾（不会留下空洞）
-    $VD/bin/veradroid-epd run $X/fb $X/epd.fifo $X/ctl --w ${viewWidth:-1272} --h ${viewHeight:-1696} --contrast ${KFB_CONTRAST:-1.3} --dither ${KFB_DITHER:-3} --flash ${KFB_FLASH:-0} --invert ${KFB_INVERT:-0} --lightf ${KFB_LIGHTF:-0} --darken ${KFB_DARKEN:-0} --mode ${KFB_MODE:-0} --settle ${KFB_SETTLE:-120} --hold ${KFB_HOLD:-70} --pace ${KFB_PACE:-0} --clean ${KFB_CLEAN:-0} --scroll-delay ${KFB_SCROLLDELAY:-500} --scroll-style ${KFB_SCROLLSTYLE:-1} --gcn ${KFB_GCN:-0} --mono ${KFB_MONO:-0} --max-defer ${KFB_MAXDEFER:-1200} --flip-input ${KFB_FLIPINPUT:-1000} --reagl-min ${KFB_REAGL_MIN:-35} --anim-mode ${KFB_ANIM_MODE:-1} --anim-dir ${KFB_ANIM_DIR:-2} --anim-steps ${KFB_ANIM_STEPS:-12} --anim-min ${KFB_ANIM_MIN:-60} --swipe ${KFB_SWIPE:-1} --pwrdown $epd_pd --rt ${EPD_RT:-0} $(rot_args) >>$W/epd.log 2>&1 &
+    $VD/bin/veradroid-epd run $X/fb $X/epd.fifo $X/ctl --w ${viewWidth:-1272} --h ${viewHeight:-1696} --contrast ${KFB_CONTRAST:-1.3} --dither ${KFB_DITHER:-3} --flash ${KFB_FLASH:-0} --invert ${KFB_INVERT:-0} --lightf ${KFB_LIGHTF:-0} --darken ${KFB_DARKEN:-0} --color ${KFB_COLOR:-1} --mode ${KFB_MODE:-0} --settle ${KFB_SETTLE:-120} --hold ${KFB_HOLD:-70} --pace ${KFB_PACE:-0} --clean ${KFB_CLEAN:-0} --scroll-delay ${KFB_SCROLLDELAY:-500} --scroll-style ${KFB_SCROLLSTYLE:-1} --scroll-a2 ${KFB_SCROLLWFM:-0} --scroll-du ${KFB_SCROLLDU:-0} --img-gray ${KFB_IMG:-0} --gcn ${KFB_GCN:-0} --mono ${KFB_MONO:-0} --max-defer ${KFB_MAXDEFER:-1200} --flip-input ${KFB_FLIPINPUT:-1000} --reagl-min ${KFB_REAGL_MIN:-35} --anim-mode ${KFB_ANIM_MODE:-1} --anim-dir ${KFB_ANIM_DIR:-2} --anim-steps ${KFB_ANIM_STEPS:-12} --anim-min ${KFB_ANIM_MIN:-60} --swipe ${KFB_SWIPE:-1} --pwrdown $epd_pd --rt ${EPD_RT:-0} $(rot_args) >>$W/epd.log 2>&1 &
     echo $! > $W/epd.pid
     rot_deg > $W/rotate
     # 以后能不能当场转 180：0 度启动时没传 --vw，可见宽 != 行宽（PW5 无 FBInk）的机器转了会偏 12 像素，只能重启
@@ -286,7 +301,7 @@ ALARMFIX_LIB=system/lib/libandroid_servers.so
 ALARMFIX_TAB=154856; ALARMFIX_TAB_OLD=080000000000000009000000070000000100000000000000; ALARMFIX_TAB_NEW=000000000000000007000000070000000100000000000000
 ALARMFIX_EPW=52736;  ALARMFIX_EPW_OLD=c2f20005; ALARMFIX_EPW_NEW=aff30080
 alarmfix_hex() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; }
-alarmfix_put() { printf "$(printf '%s' "$3" | sed 's/../\\x&/g')" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+alarmfix_put() { printf "$(awk -v s="$3" 'BEGIN{h="0123456789abcdef";s=tolower(s);for(i=1;i<=length(s);i+=2){v=(index(h,substr(s,i,1))-1)*16+index(h,substr(s,i+1,1))-1;printf "\\%03o",v}}')" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
 alarmfix_prepare() {   # 宿主侧，container_start 里、启动容器之前：$W/alarmfix/lib.so = 改好的副本（不改镜像里的文件：它和回退用的旧镜像是硬链接）
     rm -rf $W/alarmfix
     [ "${ALARM_FIX:-1}" = 0 ] && return 0
@@ -611,6 +626,7 @@ run_in_ns() {
     mount --bind $R $R || exit 1                       # pivot_root 要求新根是挂载点
     DEMO=; [ -f $R/.demo ] && DEMO=1
     [ -z "$DEMO" ] && mount -o remount,ro,bind $R
+    [ -d $R/acct ] && mount -t tmpfs -o rw,size=64k tmpfs $R/acct 2>/dev/null || true
     mount -t tmpfs -o nosuid,mode=755 tmpfs $R/dev || exit 1
     for n in null zero full tty random urandom kmsg fuse; do
         [ -e /dev/$n ] && touch $R/dev/$n && mount --bind /dev/$n $R/dev/$n
@@ -676,16 +692,20 @@ run_in_ns() {
     fi
     mount -t sysfs -o ro sysfs $R/sys || exit 1
     # 内核编进了 SELinux 但没加载策略：系统绝不能碰宿主的 SELinux，盖一层只读空目录
-    for d in sys/fs/selinux sys/fs/bpf sys/fs/pstore sys/kernel/tracing sys/kernel/debug; do
+    for d in sys/fs/selinux sys/fs/bpf sys/fs/pstore sys/kernel/tracing; do
         [ -d $R/$d ] && mount -t tmpfs -o ro,size=4k tmpfs $R/$d
     done
     # BatteryStatsService 的 KernelWakelockReader 每隔几分钟读 /proc/wakelocks 或 /d/wakeup_sources（/d -> /sys/kernel/debug）；
-    # 两者都不存在时 system_server 持续触发 Slog.wtf，向 /data/system/dropbox 写入大量 wtf 堆栈文件（用户诊断 实证）。
-    # 在只读空 tmpfs 中放一个 0 字节只读 wakeup_sources 即可彻底静音且保持宿主 debugfs 隔离。
-    if [ ! -e /proc/wakelocks ] && [ -d $R/sys/kernel/debug ]; then
-        mount -o remount,rw $R/sys/kernel/debug 2>/dev/null && \
-            : > $R/sys/kernel/debug/wakeup_sources && chmod 444 $R/sys/kernel/debug/wakeup_sources && \
-            mount -o remount,ro $R/sys/kernel/debug 2>/dev/null || true
+    # 文件不存在会触发 KernelWakelockReader Slog.wtf，0 字节空文件又会触发 BatteryStatsImpl "All kernel wakelocks had time of zero / were set stale"
+    # Slog.wtf（用户诊断 实证：dropbox 积压百余份 wtf）。先 rw 挂载 tmpfs 写入表头+1 条静态占位记录再 remount ro（busybox mount 不支持 ro->remount,rw），双路彻底静音且保持宿主 debugfs 隔离。
+    if [ -d $R/sys/kernel/debug ]; then
+        if mount -t tmpfs -o rw,size=4k tmpfs $R/sys/kernel/debug; then
+            if [ ! -e /proc/wakelocks ]; then
+                printf 'name\tactive_count\tevent_count\twakeup_count\texpire_count\tactive_since\ttotal_time\tmax_time\tlast_change\tprevent_suspend_time\nveradroid\t1\t0\t0\t0\t0\t1\t0\t0\t0\n' > $R/sys/kernel/debug/wakeup_sources 2>/dev/null && \
+                    chmod 444 $R/sys/kernel/debug/wakeup_sources 2>/dev/null || true
+            fi
+            mount -t tmpfs -o remount,ro,size=4k tmpfs $R/sys/kernel/debug 2>/dev/null || mount -o remount,ro $R/sys/kernel/debug 2>/dev/null || true
+        fi
     fi
     # 测延迟用：/dev/shm/vd-tracefs 存在时，把 tracefs 给系统看（atrace / Trace 标记要在 zygote 起来之前就能打开）。
     # 只读空目录换成可写的小 tmpfs + tracefs；宿主的跟踪设置是共用的，测完删掉这个文件、重启安卓即恢复

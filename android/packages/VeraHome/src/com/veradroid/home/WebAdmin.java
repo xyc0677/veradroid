@@ -26,6 +26,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -309,17 +310,18 @@ final class WebAdmin {
         Map<String, Long> m = new HashMap<String, Long>();
         try {
             BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"));
-            String line;
-            while ((line = r.readLine()) != null) {
-                int c = line.indexOf(':');
-                if (c <= 0) continue;
-                String k = line.substring(0, c);
-                if (!k.equals("MemTotal") && !k.equals("MemFree") && !k.equals("MemAvailable") && !k.equals("Cached") && !k.equals("Buffers")
-                    && !k.equals("SwapTotal") && !k.equals("SwapFree")) continue;
-                String v = line.substring(c + 1).trim().split(" ")[0];
-                try { m.put(k, Long.parseLong(v)); } catch (Exception ignored) { }
-            }
-            r.close();
+            try {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    int c = line.indexOf(':');
+                    if (c <= 0) continue;
+                    String k = line.substring(0, c);
+                    if (!k.equals("MemTotal") && !k.equals("MemFree") && !k.equals("MemAvailable") && !k.equals("Cached") && !k.equals("Buffers")
+                        && !k.equals("SwapTotal") && !k.equals("SwapFree")) continue;
+                    String v = line.substring(c + 1).trim().split(" ")[0];
+                    try { m.put(k, Long.parseLong(v)); } catch (Exception ignored) { }
+                }
+            } finally { r.close(); }
         } catch (Exception ignored) { }
         // 3.0 kernels have no MemAvailable
         if (!m.containsKey("MemAvailable") && m.containsKey("MemFree")) {
@@ -344,9 +346,7 @@ final class WebAdmin {
     static String firstLine(String p) {
         try {
             BufferedReader r = new BufferedReader(new FileReader(p));
-            String s = r.readLine();
-            r.close();
-            return s;
+            try { return r.readLine(); } finally { r.close(); }
         } catch (Exception e) { return null; }
     }
 
@@ -410,6 +410,12 @@ final class WebAdmin {
         } catch (IOException e) { return true; }
     }
 
+    /** Bind-mounted Kindle folders inside Android storage: skip in zip/du to avoid double-counting or packing the whole Kindle library. */
+    static boolean isKindleBind(File f) {
+        String p = f.getPath();
+        return (SD + "/KindleLibrary").equals(p) || (SD + "/KindleFonts").equals(p);
+    }
+
     /** Names the page may never create, change or remove anywhere: scripts, dotfiles, SSH material. */
     static boolean isProtected(String name) {
         if (Transfer.isScript(name)) return true;
@@ -439,6 +445,7 @@ final class WebAdmin {
             if (rel.equals("KindleLibrary") || rel.startsWith("KindleLibrary/")) return "Kindle 书库请在“Kindle 书库”里管理";
             return null;
         }
+        if ("ro".equals(HostLink.kv(HostLink.KFB + "settings").get("KLIB_BIND"))) return "Kindle 书库当前为只读安全挂载（可在设置 → 设备与更新里改为读写）";
         if (rel.length() > 0 && hasScriptChild(dir)) return dir.list() == null ? "这个文件夹 Android 这边读不了，网页里只读" : "这个文件夹里有 Kindle 脚本，网页里只读";
         return null;
     }
@@ -495,6 +502,7 @@ final class WebAdmin {
         long total = 0;
         File[] fs = d.listFiles();
         if (fs != null) for (File f : fs) {
+            if (isKindleBind(f)) continue;
             long s = isLink(f) ? 0 : f.isDirectory() ? du(f, budget, 0) : f.length();
             total += s;
             if (f.isDirectory() && !f.getName().startsWith(".")) sizes.put(f.getName(), s);
@@ -509,7 +517,7 @@ final class WebAdmin {
         long s = 0;
         for (File f : fs) {
             if (--budget[1] <= 0) break;
-            if (isLink(f)) continue;
+            if (isLink(f) || isKindleBind(f)) continue;
             s += f.isDirectory() ? du(f, budget, depth + 1) : f.length();
         }
         return s;
@@ -517,7 +525,7 @@ final class WebAdmin {
 
     private void fsGet(String which, String path, OutputStream out) throws Exception {
         File f = resolve(which, path);
-        if (f == null || !f.isFile()) { Transfer.send(out, 404, "text/plain; charset=utf-8", "没有这个文件".getBytes("UTF-8"), null); return; }
+        if (f == null || !f.isFile() || isProtected(f.getName())) { Transfer.send(out, 404, "text/plain; charset=utf-8", "没有这个文件".getBytes("UTF-8"), null); return; }
         long len = f.length();
         String n = f.getName();
         String ascii = n.replaceAll("[^A-Za-z0-9._ ()-]", "_");
@@ -560,8 +568,24 @@ final class WebAdmin {
         String n = checkName(to);
         if (n == null) return Transfer.obj("ok", false, "msg", "新名字不能用（不能以点开头、不能含 / \\ : * ? \" < > |，也不能是脚本）");
         File g = new File(d, n);
-        if (g.exists() && !g.getName().equalsIgnoreCase(f.getName())) return Transfer.obj("ok", false, "msg", "已经有同名的文件或文件夹");
-        return Transfer.obj("ok", f.renameTo(g), "msg", "");
+        if (g.exists() && !sameInode(f, g)) return Transfer.obj("ok", false, "msg", "已经有同名的文件或文件夹");
+        boolean ok = f.renameTo(g);
+        if (ok) {
+            if (Lib.isBook(f.getName()) || Lib.isBook(g.getName())) BlocksFiles.migrateReaderPrefs(ctx, f.getAbsolutePath(), g.getAbsolutePath());
+            Lib.scan(ctx, 0);
+        }
+        return Transfer.obj("ok", ok, "msg", "");
+    }
+
+    /** True only when a and b refer to the exact same underlying inode (e.g. case-only rename on vfat). */
+    private static boolean sameInode(File a, File b) {
+        try {
+            android.system.StructStat sa = android.system.Os.lstat(a.getPath());
+            android.system.StructStat sb = android.system.Os.lstat(b.getPath());
+            return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+        } catch (Throwable e) {
+            return false;
+        }
     }
 
     /** True if anything below is a script / protected name, or a folder the page treats as read-only. */
@@ -594,18 +618,22 @@ final class WebAdmin {
             File rf = resolve(which, (path == null ? "" : path) + "/" + n);
             if (rf == null || !rf.exists()) { failed.put(n); continue; }
             if (rf.isDirectory() && containsLocked(rf, 0, new int[] { 200000 })) { failed.put(n + "（里面有脚本或受保护的文件）"); continue; }
-            if (deleteTree(rf, 0)) done++; else failed.put(n);
+            if (deleteTree(ctx, rf, 0)) done++; else failed.put(n);
         }
+        if (done > 0) Lib.scan(ctx, 0);
         return Transfer.obj("ok", failed.length() == 0, "deleted", done, "failed", failed, "msg", failed.length() == 0 ? "" : "有些没有删掉");
     }
 
-    private static boolean deleteTree(File f, int depth) {
+    private static boolean deleteTree(Context ctx, File f, int depth) {
         if (depth > 64) return false;
-        if (!isLink(f) && f.isDirectory()) {
+        boolean wasDir = !isLink(f) && f.isDirectory();
+        if (wasDir) {
             File[] fs = f.listFiles();
-            if (fs != null) for (File c : fs) if (!deleteTree(c, depth + 1)) return false;
+            if (fs != null) for (File c : fs) if (!deleteTree(ctx, c, depth + 1)) return false;
         }
-        return f.delete();
+        if (!f.delete()) return false;
+        if (!wasDir && ctx != null) Lib.purgeReaderState(ctx, f.getAbsolutePath());
+        return true;
     }
 
     /** Upload target folder for /api/upload?to=dir&root=..&path=..; null + message if not allowed. */
@@ -835,11 +863,12 @@ final class WebAdmin {
     private static int uidOf(int pid) {
         try {
             BufferedReader r = new BufferedReader(new FileReader("/proc/" + pid + "/status"));
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.startsWith("Uid:")) { r.close(); return Integer.parseInt(line.substring(4).trim().split("\\s+")[0]); }
-            }
-            r.close();
+            try {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (line.startsWith("Uid:")) return Integer.parseInt(line.substring(4).trim().split("\\s+")[0]);
+                }
+            } finally { r.close(); }
         } catch (Exception ignored) { }
         return -1;
     }
@@ -968,32 +997,84 @@ final class WebAdmin {
         return Transfer.obj("ok", true, "text", new String(raw, "UTF-8"));
     }
 
-    private void screenshot(OutputStream out) throws Exception {
-        byte[] raw = HostReq.run(ctx, "shot", null, null, 30000);
-        byte[] png = null;
-        if (raw != null && raw.length > 8 && (raw[0] & 0xff) == 0x89 && raw[1] == 'P') png = raw;
-        else if (raw != null && raw.length > 5 && raw[0] == 'f' && raw[1] == 'b' && (raw[2] == ' ' || (raw[2] == '3' && raw[3] == '2'))) {
-            boolean c32 = raw[2] == '3';
-            int nl = 0;
-            while (nl < raw.length && nl < 64 && raw[nl] != '\n') nl++;
-            String[] h = new String(raw, 0, nl, "US-ASCII").split(" ");
-            int w = Integer.parseInt(h[1]), hh = Integer.parseInt(h[2]), stride = Integer.parseInt(h[3]);
-            int off = nl + 1;
-            if (w > 0 && hh > 0 && w * (c32 ? 4 : 1) <= stride && w <= 4096 && hh <= 4096) {
-                hh = Math.min(hh, (raw.length - off) / stride);
-                int[] px = new int[w * hh];
-                for (int y = 0; y < hh; y++) {
-                    int row = off + y * stride;
-                    if (c32) for (int x = 0; x < w; x++) { int q = row + x * 4; px[y * w + x] = 0xff000000 | ((raw[q + 2] & 0xff) << 16) | ((raw[q + 1] & 0xff) << 8) | (raw[q] & 0xff); }
-                    else for (int x = 0; x < w; x++) { int g = raw[row + x] & 0xff; px[y * w + x] = 0xff000000 | (g << 16) | (g << 8) | g; }
+    private static final java.util.concurrent.atomic.AtomicBoolean SHOTTING = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** Capture current screen via host wa_shot (/dev/fb0 8-bit gray or 32-bit BGRA, or PNG) and encode to PNG bytes. */
+    static byte[] capturePng(Context ctx) {
+        byte[] raw = HostReq.run(ctx, "shot", null, null, 20000);
+        if (raw == null) return null;
+        if (raw.length > 8 && (raw[0] & 0xff) == 0x89 && raw[1] == 'P') return raw;
+        if (raw.length > 5 && raw[0] == 'f' && raw[1] == 'b' && (raw[2] == ' ' || (raw[2] == '3' && raw[3] == '2'))) {
+            try {
+                boolean c32 = raw[2] == '3';
+                int nl = 0;
+                while (nl < raw.length && nl < 64 && raw[nl] != '\n') nl++;
+                if (nl >= raw.length || raw[nl] != '\n') return null;
+                String[] h = new String(raw, 0, nl, "US-ASCII").split(" ");
+                if (h.length < 4) return null;
+                int w = Integer.parseInt(h[1]), hh = Integer.parseInt(h[2]), stride = Integer.parseInt(h[3]);
+                int off = nl + 1;
+                if (w > 0 && hh > 0 && w * (c32 ? 4 : 1) <= stride && w <= 4096 && hh <= 4096 && off < raw.length) {
+                    hh = Math.min(hh, (raw.length - off) / stride);
+                    if (hh <= 0) return null;
+                    int[] px = new int[w * hh];
+                    for (int y = 0; y < hh; y++) {
+                        int row = off + y * stride;
+                        if (c32) for (int x = 0; x < w; x++) { int q = row + x * 4; px[y * w + x] = 0xff000000 | ((raw[q + 2] & 0xff) << 16) | ((raw[q + 1] & 0xff) << 8) | (raw[q] & 0xff); }
+                        else for (int x = 0; x < w; x++) { int g = raw[row + x] & 0xff; px[y * w + x] = 0xff000000 | (g << 16) | (g << 8) | g; }
+                    }
+                    Bitmap bm = Bitmap.createBitmap(px, w, hh, Bitmap.Config.ARGB_8888);
+                    ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                    try { bm.compress(Bitmap.CompressFormat.PNG, 100, bo); } finally { bm.recycle(); }
+                    return bo.toByteArray();
                 }
-                Bitmap bm = Bitmap.createBitmap(px, w, hh, Bitmap.Config.ARGB_8888);
-                ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                bm.compress(Bitmap.CompressFormat.PNG, 100, bo);
-                bm.recycle();
-                png = bo.toByteArray();
-            }
+            } catch (Throwable ignored) { }
         }
+        return null;
+    }
+
+    /** Save screenshot PNG to /data/media/0/Screenshots on a worker thread (fixes 0-byte screencap under KFB_HWC=1). */
+    static void saveScreenshot(final Context ctx, final boolean allowHostFallback) {
+        final Context app = ctx.getApplicationContext();
+        if (!SHOTTING.compareAndSet(false, true)) return;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    byte[] png = capturePng(app);
+                    if (png == null || png.length < 32) {
+                        if (allowHostFallback) HostLink.cmd("screenshot");
+                        else VeraToast.show(app, "截图失败，请稍后重试");
+                        return;
+                    }
+                    File dir = new File("/data/media/0/Screenshots");
+                    dir.mkdirs();
+                    String name = "screen-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".png";
+                    File tmp = new File(dir, "." + name + ".tmp");
+                    File out = new File(dir, name);
+                    FileOutputStream fo = new FileOutputStream(tmp);
+                    try {
+                        fo.write(png);
+                        fo.flush();
+                    } finally {
+                        fo.close();
+                    }
+                    tmp.setReadable(true, false);
+                    if (!tmp.renameTo(out)) { tmp.delete(); throw new IOException("rename failed"); }
+                    out.setReadable(true, false);
+                    android.util.Log.i("VeraHome", "screenshot saved: " + out.getAbsolutePath() + " (" + png.length + " bytes)");
+                    VeraToast.show(app, "已截图：" + name + "（Screenshots）");
+                } catch (Throwable t) {
+                    android.util.Log.w("VeraHome", "saveScreenshot: " + t);
+                    VeraToast.show(app, "截图失败，请稍后重试");
+                } finally {
+                    SHOTTING.set(false);
+                }
+            }
+        }, "vera-shot").start();
+    }
+
+    private void screenshot(OutputStream out) throws Exception {
+        byte[] png = capturePng(ctx);
         if (png == null) { Transfer.send(out, 500, "text/plain; charset=utf-8", "截屏失败".getBytes("UTF-8"), null); return; }
         String name = "kindle-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new java.util.Date()) + ".png";
         Transfer.send(out, 200, "image/png", png, "Content-Disposition: inline; filename=\"" + name + "\"\r\n");
@@ -1023,9 +1104,14 @@ final class WebAdmin {
 
     private static final Map<String, String[]> DISPLAY = new HashMap<String, String[]>();
     static {
-        DISPLAY.put("KFB_MODE", new String[] { "0", "1", "2" });
+        DISPLAY.put("KFB_SMOOTH", new String[] { "0", "1", "2", "3", "4" });
+        DISPLAY.put("KFB_MODE", new String[] { "0", "1", "2", "3" });
+        DISPLAY.put("KFB_SCROLLDU", new String[] { "0", "300" });
+        DISPLAY.put("KFB_SCROLLWFM", new String[] { "0", "1" });
+        DISPLAY.put("KFB_IMG", new String[] { "0", "25" });
+        DISPLAY.put("KFB_REAGL_MIN", new String[] { "30", "35", "50", "70", "85" });
         DISPLAY.put("KFB_CONTRAST", new String[] { "1.0", "1.3", "1.5", "1.6", "1.9", "2.0", "2.2", "2.5" });
-        DISPLAY.put("KFB_FLASH", new String[] { "0", "1", "3", "6", "8", "10" });
+        DISPLAY.put("KFB_FLASH", new String[] { "0", "1", "3", "6", "8", "10", "20" });
         DISPLAY.put("KFB_ANIM_MODE", new String[] { "0", "1", "2", "3", "4", "5" });
         DISPLAY.put("KFB_INVERT", new String[] { "0", "1" });
         DISPLAY.put("KFB_DITHER", new String[] { "0", "1", "2", "3" });
@@ -1036,7 +1122,8 @@ final class WebAdmin {
     private JSONObject setDisplay(String key, String value) {
         String[] ok = DISPLAY.get(key);
         if (ok == null || !Arrays.asList(ok).contains(value)) return Transfer.obj("ok", false, "msg", "不支持的设置");
-        return Transfer.obj("ok", HostLink.settings(key + "=" + value + "\n"));
+        String body = "KFB_MODE".equals(key) ? "KFB_SMOOTH=0\n" + key + "=" + value + "\n" : key + "=" + value + "\n";
+        return Transfer.obj("ok", HostLink.settings(body));
     }
 
     private JSONObject setLight(String what, int v) {
@@ -1079,18 +1166,15 @@ final class WebAdmin {
     private JSONObject updateInfo() throws Exception {
         JSONObject o = Transfer.obj("ok", true);
         String base = "https://veradroid.wenjin.jp";
-        String kernel = System.getProperty("os.version", "");
-        String meta = kernel.startsWith("4.") || kernel.startsWith("3.") ? base + "/static/bootstrap-k49.json" : base + "/api/bootstrap";
-        try {
-            JSONObject j = new JSONObject(httpGet(meta));
-            o.put("latest", j.optString("version"));
-        } catch (Throwable e) { o.put("latestError", "连不上更新服务器"); }
+        String latest = SysUpdate.latestVersion(ctx);
+        if (latest != null && latest.length() > 0) o.put("latest", latest);
+        else o.put("latestError", "连不上更新服务器");
         try {
             PackageInfo pi = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0);
             o.put("home", pi.versionName);
-            JSONObject j = new JSONObject(httpGet(base + "/api/ota/check?package=com.veradroid.home&version_code=" + pi.versionCode
-                + "&version_name=" + URLEncoder.encode(pi.versionName, "UTF-8") + "&model=" + URLEncoder.encode(Update.model(ctx), "UTF-8")));
-            o.put("homeUpdate", j.optBoolean("update", false));
+            JSONObject j = new JSONObject(httpGet(base + "/api/latest?package=com.veradroid.home"));
+            int latestCode = j.optInt("version_code", 0);
+            o.put("homeUpdate", latestCode > pi.versionCode);
             if (j.has("version_name")) o.put("homeLatest", j.optString("version_name"));
         } catch (Throwable e) { o.put("homeError", "连不上更新服务器"); }
         Map<String, String> h = HostReq.kv(sysinfoOrLast());
@@ -1102,13 +1186,16 @@ final class WebAdmin {
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
         h.setConnectTimeout(8000); h.setReadTimeout(10000);
         h.setRequestProperty("User-Agent", "VeraDroid/WebAdmin");
+        InputStream in = null;
         try {
-            InputStream in = h.getInputStream();
+            in = h.getInputStream();
             ByteArrayOutputStream bo = new ByteArrayOutputStream();
             byte[] b = new byte[8192]; int n;
             while ((n = in.read(b)) > 0 && bo.size() < 262144) bo.write(b, 0, n);
-            in.close();
             return bo.toString("UTF-8");
-        } finally { h.disconnect(); }
+        } finally {
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            h.disconnect();
+        }
     }
 }

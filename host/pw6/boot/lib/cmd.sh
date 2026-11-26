@@ -6,15 +6,28 @@ numeric() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
 # 调亮度（桌面面板的亮度条、管理网页、优化建议都走这里）。自动亮度开着（powerd flAuto=1）时 powerd 按光线传感器隔一会儿
 # 就把亮度改回去，看起来就是“调了没反应”（PW5 签名版等带传感器的机型；桌面的“自动”开关只在宿主认出传感器时才显示，
 # 认不出时用户关不掉它）。手动调了就是要手动：先把自动关掉。设完读回来，对不上就记一行（诊断里看得到是哪一步没生效）。
+status_patch() {
+    [ -n "${X:-}" ] && [ -f "$X/ctl/status" ] || return 0
+    _sp=$$; [ -r /proc/self/stat ] && read -r _sp _ < /proc/self/stat 2>/dev/null || true
+    sed "s/^$1=.*/$1=$2/" "$X/ctl/status" > "$X/ctl/status.tmp.$_sp" 2>/dev/null && mv -f "$X/ctl/status.tmp.$_sp" "$X/ctl/status"
+}
 light_set() {
     ls_p=com.lab126.powerd; ls_a=
-    if [ "$(lipc-get-prop $ls_p flAuto 2>/dev/null)" = 1 ]; then
+    if [ -z "${W:-}" -o ! -f "$W/fl.auto_off" ] && [ "$(lipc-get-prop $ls_p flAuto 2>/dev/null)" = 1 ]; then
         lipc-set-prop -i $ls_p flAuto 0 2>/dev/null && ls_a=1 && t "light: auto brightness was on (powerd flAuto=1), turned it off for the manual level $1"
     fi
-    lipc-set-prop -i $ls_p flIntensity "$1" >/dev/null 2>&1 || t "light $1: lipc-set-prop flIntensity failed"
-    ls_g=$(lipc-get-prop $ls_p flIntensity 2>/dev/null)
-    [ "$ls_g" = "$1" ] || t "light $1: powerd reads back '$ls_g' (raw $(lipc-get-prop $ls_p flRawIntensity 2>/dev/null))"
-    [ -z "$ls_a" ] || status_write      # 面板上的“自动”勾掉
+    [ -n "${W:-}" ] && touch "$W/fl.auto_off" 2>/dev/null || true
+    if ! lipc-set-prop -i $ls_p flIntensity "$1" >/dev/null 2>&1; then
+        usleep 80000
+        lipc-set-prop -i $ls_p flIntensity "$1" >/dev/null 2>&1 || t "light $1: lipc-set-prop flIntensity failed"
+    fi
+    ls_got=$(lipc-get-prop $ls_p flIntensity 2>/dev/null)
+    if [ -n "$ls_got" ] && [ "$ls_got" != "$1" ]; then
+        ls_raw=$(lipc-get-prop $ls_p flRawIntensity 2>/dev/null)
+        t "light $1: powerd reads back '$ls_got' (raw ${ls_raw:-?})"
+    fi
+    type status_patch >/dev/null 2>&1 && status_patch light "${ls_got:-$1}"
+    [ -z "$ls_a" ] || status_write
     return 0
 }
 # 管理网页的请求（SSH、截屏、日志、占用、自动更新）：先校验来源再做，见 webadmin.sh
@@ -26,6 +39,7 @@ light_set() {
 fwd_off() {
     # slirp 模式下另外放行过的 Kindle 防火墙端口（fwd_on）
     if [ -f $W/fwd.ipt ]; then iptables -D INPUT -i "$(cut -d: -f2 $W/fwd.ipt)" -p tcp --dport "$(cut -d: -f1 $W/fwd.ipt)" -j ACCEPT 2>/dev/null; rm -f $W/fwd.ipt; fi
+    rm -f $W/fwd.port
     [ -f $W/fwd.id ] || return 0
     case "$(cat $W/fwd.id)" in ipt:*)
         iptables -D INPUT -i "$(cut -d: -f3 $W/fwd.id)" -p tcp --dport "$(cut -d: -f2 $W/fwd.id)" -j ACCEPT 2>/dev/null
@@ -43,14 +57,14 @@ fwd_on() {
     if [ "$(cat $W/mode 2>/dev/null)" = chroot ] || hostns; then
         fdev=$(sed -n 's/^iface=\([A-Za-z0-9_.-]*\)$/\1/p' $X/hostnet 2>/dev/null | head -1); [ -n "$fdev" ] || fdev=wlan0
         iptables -C INPUT -i $fdev -p tcp --dport $1 -j ACCEPT 2>/dev/null || iptables -I INPUT -i $fdev -p tcp --dport $1 -j ACCEPT 2>/dev/null
-        if iptables -C INPUT -i $fdev -p tcp --dport $1 -j ACCEPT 2>/dev/null; then echo "ipt:$1:$fdev" > $W/fwd.id; t "fwd: port $1 open on the Kindle firewall ($fdev, host network)"
+        if iptables -C INPUT -i $fdev -p tcp --dport $1 -j ACCEPT 2>/dev/null; then echo "ipt:$1:$fdev" > $W/fwd.id; echo "$1" > $W/fwd.port; t "fwd: port $1 open on the Kindle firewall ($fdev, host network)"
         else t "fwd: could not open port $1 on the Kindle firewall"; fi
         return 0
     fi
     [ -x $VD/bin/slirpctl ] && [ -S $W/slirp.sock ] || { t "fwd: no slirp control"; return 1; }
     r=$($VD/bin/slirpctl $W/slirp.sock "{\"execute\":\"add_hostfwd\",\"arguments\":{\"proto\":\"tcp\",\"host_addr\":\"0.0.0.0\",\"host_port\":$1,\"guest_addr\":\"$NET.15\",\"guest_port\":$1}}" 2>&1)
     id=$(echo "$r" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-    if [ -n "$id" ]; then echo $id > $W/fwd.id; t "fwd: port $1 open (id $id)"; else t "fwd failed: $r"; return 1; fi
+    if [ -n "$id" ]; then echo $id > $W/fwd.id; echo "$1" > $W/fwd.port; t "fwd: port $1 open (id $id)"; else t "fwd failed: $r"; return 1; fi
     # slirp4netns 在 Kindle 这边监听 0.0.0.0:<端口>，但 Kindle 的防火墙（INPUT 默认 DROP，wlan0 只放行已建立的连接）
     # 把手机 / 电脑从局域网发来的新连接全丢掉：网页打不开（PW5 真机；pw5-5192 模拟器：只有 slirp 转发时连接超时，
     # 加上这条 ACCEPT 后 200）。和共用网络模式一样临时放行这一个端口，关传书 / 停 Android 时撤掉。
@@ -136,11 +150,13 @@ wifi_netid() { # 网络名 -> 已保存配置的 netid（没有就空）
         /^[[:space:]]*essid = "/ { v = $0; sub(/^[[:space:]]*essid = "/, "", v); sub(/"[[:space:]]*$/, "", v); if (v == want) { print id; exit } }'
 }
 wifi_list() {
+    _wp=$$; read -r _wp _ < /proc/self/stat 2>/dev/null || true
     cur=$(wifi_current)
     wifi_saved | while IFS= read -r n; do
         if [ -n "$cur" ] && [ "$n" = "$cur" ]; then printf '*%s\n' "$n"; else printf ' %s\n' "$n"; fi
-    done > $X/ctl/wifi.list.tmp
-    mv -f $X/ctl/wifi.list.tmp $X/ctl/wifi.list
+    done > "$X/ctl/wifi.list.tmp.$_wp"
+    chmod 644 "$X/ctl/wifi.list.tmp.$_wp" 2>/dev/null
+    mv -f "$X/ctl/wifi.list.tmp.$_wp" $X/ctl/wifi.list
 }
 # 附近的网络（wifiscan）：先让 wifid 扫一遍（最多等 8 秒），再写 $X/ctl/wifi.scan，一行一个：
 #   已保存 y|n <TAB> 要密码 y|n <TAB> 信号 0-5 <TAB> 加密方式 <TAB> 网络名
@@ -157,23 +173,26 @@ wifi_scanlist() {
         END { out() }' | sort -t "$(printf '\t')" -k3,3nr | awk -F '\t' '!($5 in s) { s[$5] = 1; print }' | head -40
 }
 wifi_scan() {
-    command -v lipc-hash-prop >/dev/null 2>&1 || { : > $X/ctl/wifi.scan; return 0; }
-    [ "$(wifi_state)" = 1 ] || { wifi_scanlist > $X/ctl/wifi.scan.tmp; mv -f $X/ctl/wifi.scan.tmp $X/ctl/wifi.scan; return 0; }
+    rm -f $X/ctl/wifi.scan
+    command -v lipc-hash-prop >/dev/null 2>&1 || { : > $X/ctl/wifi.scan; chmod 644 $X/ctl/wifi.scan 2>/dev/null; return 0; }
+    _ws=$$; read -r _ws _ < /proc/self/stat 2>/dev/null || true
+    [ "$(wifi_state)" = 1 ] || { wifi_scanlist > "$X/ctl/wifi.scan.tmp.$_ws"; chmod 644 "$X/ctl/wifi.scan.tmp.$_ws" 2>/dev/null; mv -f "$X/ctl/wifi.scan.tmp.$_ws" $X/ctl/wifi.scan; return 0; }
     lipc-set-prop com.lab126.wifid scan "" 2>/dev/null
     i=0
     while [ $i -lt 8 ]; do
         sleep 1; i=$((i + 1))
         [ "$(lipc-get-prop -s com.lab126.wifid scanState 2>/dev/null)" = idle ] && [ $i -ge 2 ] && break
     done
-    wifi_scanlist > $X/ctl/wifi.scan.tmp
-    mv -f $X/ctl/wifi.scan.tmp $X/ctl/wifi.scan
+    wifi_scanlist > "$X/ctl/wifi.scan.tmp.$_ws"
+    chmod 644 "$X/ctl/wifi.scan.tmp.$_ws" 2>/dev/null
+    mv -f "$X/ctl/wifi.scan.tmp.$_ws" $X/ctl/wifi.scan
 }
 # 网络名的 UTF-8 十六进制 -> 文字；不合格（不是十六进制、超过 32 字节、有控制字符）返回 1
 wifi_unhex() {
     case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ $((${#1} % 2)) -eq 0 ] && [ ${#1} -le "${2:-64}" ] || return 1
     printf '%s' "$1" | sed 's/../&\n/g' | grep -qE '^(0[0-9a-f]|1[0-9a-f]|7f)$' && return 1
-    printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"
+    printf '%b' "$(printf '%s' "$1" | sed 's/../\\x&/g')"
 }
 # 新网络的密码不走命令 FIFO（所有应用都能写、命令会进日志）：VeraHome 用管理请求 wifipsk（webadmin.sh，只认 VeraHome 自己
 # 私有目录里的请求文件）交过来，存在 $W/wifi.psk（root 0600，第一行网络名十六进制、第二行密码十六进制），随后的 wificonnect 取走就删。
@@ -189,8 +208,9 @@ wifi_psk_put() { # 网络名十六进制 密码十六进制
 #   新网络：先 createProfile（不把密码上传给亚马逊：store_nw_user_pref = 0），再 cmConnect；连不上就把刚建的配置删掉。
 #   连不上时回到原来连着的网络（不让 Kindle 断网）。
 # 结果写 $X/ctl/wifi.result：ok=1|0、essid（十六进制）、error=timeout|auth|notfound|needpsk|badpsk|create|wifioff|bad name、restored|kept=原来网络的十六进制。
-wifi_result() { printf '%s\n' "$@" > $X/ctl/wifi.result.tmp && mv -f $X/ctl/wifi.result.tmp $X/ctl/wifi.result; }
+wifi_result() { _wr=$$; read -r _wr _ < /proc/self/stat 2>/dev/null || true; printf '%s\n' "$@" > "$X/ctl/wifi.result.tmp.$_wr" && chmod 644 "$X/ctl/wifi.result.tmp.$_wr" 2>/dev/null && mv -f "$X/ctl/wifi.result.tmp.$_wr" $X/ctl/wifi.result; }
 wifi_connect() {
+    rm -f $X/ctl/wifi.result
     hex=$1
     want=$(wifi_unhex "$hex") || { t "wificonnect: rejected (bad name)"; rm -f $W/wifi.psk; wifi_result ok=0 "error=bad name"; return 1; }
     psk=
@@ -274,30 +294,42 @@ wifi_connect() {
     wifi_list; status_write
 }
 
-# 下拉面板的“优化机器状态”（桌面发 optimize）：只做无害的事——丢掉干净的页缓存、整理内存碎片、报 zram 的用量和预编译队列；
-# 有应用等着预编译又在充电就开始编；Wi-Fi 省电按自动规则恢复（WIFI_PS=off 是用户自己选的，不动；传书开着时也不动）。
+# 下拉面板的“优化机器状态”（桌面发 optimize）：只做无害的事——整理内存碎片（不丢页缓存，避免驱逐预读热页）、报 zram 的用量和预编译队列；
+# 有应用等着预编译又在充电时尝试触发；Wi-Fi 省电按自动规则恢复（WIFI_PS=off 是用户自己选的，不动；传书或下载中也不动）。
 # 不杀 Kindle 的进程，不改任何用户设置。结果写 ctl/optimize.result（KEY=value），桌面据此写结果卡片。
 opt_run() {
     r=$X/ctl/optimize.result
-    b=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+    _op=$$; read -r _op _ < /proc/self/stat 2>/dev/null || true
+    b=$(awk '/^MemAvailable:/{a=$2} /^MemFree:/{f=$2} /^Buffers:/{u=$2} /^Cached:/{c=$2} END{print int((a ? a : f + u + c) / 1024)}' /proc/meminfo)
     sync
-    echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
     [ -w /proc/sys/vm/compact_memory ] && echo 1 > /proc/sys/vm/compact_memory 2>/dev/null
-    a=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+    a=$(awk '/^MemAvailable:/{a=$2} /^MemFree:/{f=$2} /^Buffers:/{u=$2} /^Cached:/{c=$2} END{print int((a ? a : f + u + c) / 1024)}' /proc/meminfo)
     zo=; zc=
     if [ -r /sys/block/zram0/mm_stat ]; then set -- $(cat /sys/block/zram0/mm_stat); zo=$(( ${1:-0} / 1048576 )); zc=$(( ${2:-0} / 1048576 )); fi
     cp=0; [ -s $W/compile.queue ] && cp=$(wc -l < $W/compile.queue | tr -d ' ')
     ck=0
-    if [ "$cp" -gt 0 ] && [ "$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)" = 1 ] && type compile_kick >/dev/null 2>&1; then compile_kick; ck=1; fi
+    if [ "$cp" -gt 0 ] && [ "$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)" = 1 ] && type compile_kick >/dev/null 2>&1; then
+        _ca=0; alive $W/compile.pid && _ca=1
+        compile_kick
+        usleep 200000 2>/dev/null || sleep 1
+        if grep -q '^state=running$' $X/ctl/compile.status 2>/dev/null || { [ "$_ca" = 0 ] && alive $W/compile.pid && ! grep -q '^state=\(waiting\|paused\)$' $X/ctl/compile.status 2>/dev/null; }; then
+            ck=1
+        fi
+    fi
     ps=
     if type wifi_ps_state >/dev/null 2>&1; then
         case "${WIFI_PS:-auto}" in
             off) ps=user-off ;;
-            *) [ -f $W/fwd.id ] || { type wifi_ps_restore >/dev/null 2>&1 && wifi_ps_restore; }; ps=$(wifi_ps_state) ;;
+            *) if [ -f $W/fwd.id ] || [ -f $W/wifi.busy ]; then
+                   ps=busy
+               else
+                   type wifi_ps_restore >/dev/null 2>&1 && wifi_ps_restore
+                   ps=$(wifi_ps_state)
+               fi ;;
         esac
     fi
     { echo "before=$b"; echo "after=$a"; echo "zram_orig_mb=$zo"; echo "zram_compr_mb=$zc"
-      echo "compile_pending=$cp"; echo "compile_kicked=$ck"; echo "wifips=$ps"; } > $r.tmp && mv -f $r.tmp $r
+      echo "compile_pending=$cp"; echo "compile_kicked=$ck"; echo "wifips=$ps"; } > "$r.tmp.$_op" && chmod 644 "$r.tmp.$_op" 2>/dev/null && mv -f "$r.tmp.$_op" $r
     t "optimize: MemAvailable $b -> $a MB, zram ${zo:-?}/${zc:-?} MB, compile pending $cp (started $ck), wifi ps ${ps:-?}"
 }
 cmd_listen() {
@@ -329,8 +361,16 @@ cmd_listen() {
         clear)   epd_send FULL ;;
         jankdump) type jankrec_dump >/dev/null 2>&1 && ( jankrec_dump ) </dev/null 3>&- >>$LOG 2>&1 & ;;   # 卡顿记录导出（lib/jankrec.sh）
         screenshot)
-            mkdir -p $SYS/data/media/0/Screenshots
-            vd_timeout 30 $(vd_in) /system/bin/screencap -p /data/media/0/Screenshots/screen-$(date +%Y%m%d-%H%M%S).png >/dev/null 2>&1 && t "screenshot saved" ;;
+            mkdir -p $SYS/data/media/0/Screenshots && chmod 777 $SYS/data/media/0/Screenshots 2>/dev/null
+            ( : > $X/ctl/.act.screenshot.$$ && mv -f $X/ctl/.act.screenshot.$$ $X/ctl/act.screenshot
+              si=0; while [ $si -lt 15 ] && [ -e $X/ctl/act.screenshot ]; do usleep 100000; si=$((si + 1)); done
+              if [ -e $X/ctl/act.screenshot ]; then
+                  rm -f $X/ctl/act.screenshot
+                  sc_f=/data/media/0/Screenshots/screen-$(date +%Y%m%d-%H%M%S).png
+                  vd_timeout 30 $(vd_in) /system/bin/screencap -p "$sc_f" >/dev/null 2>&1
+                  if [ -s "$SYS$sc_f" ]; then t "screenshot saved (screencap)"
+                  else rm -f "$SYS$sc_f"; t "screenshot failed (0 bytes)"; fi
+              fi ) </dev/null 3>&- & ;;
         fg)      type appprof_fg >/dev/null 2>&1 && appprof_fg "$a" ;;       # 前台应用变了（VeraHome 的任务栈监听），见 appprof.sh
         appset)  type appprof_set >/dev/null 2>&1 && appprof_set "$a" ;;     # 存某个应用的显示设置：appset <pkg>|<spec>
         appdisp)
@@ -347,13 +387,14 @@ cmd_listen() {
             # 却把全局的翻页动画和刷新合并关掉了（滑动时闪）。不认这组写死的值，按全局设置来。
             [ "$aspec" = "KFB_ANIM_MODE=0;KFB_SETTLE=25;KFB_MODE=0;KFB_CONTRAST=1.3" ] && aspec=
             if [ "$apkg" != home ] && [ -n "$aspec" ] && [ "$aspec" != "$a" ]; then
-                printf '%s\n' "$aspec" | tr ';' '\n' | grep -E '^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$' > $SYS/settings.app.tmp
+                printf '%s\n' "$aspec" | tr ';' '\n' | grep -E '^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|COLOR|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|SCROLLWFM|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$' > $SYS/settings.app.tmp
                 [ -s $SYS/settings.app.tmp ] && mv -f $SYS/settings.app.tmp $SYS/settings.app || rm -f $SYS/settings.app.tmp
             fi
             settings_load 2>/dev/null || true
             settings_publish
             epd_send ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN
             epd_send SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}
+            epd_send COLOR ${KFB_COLOR:-1}
             epd_send HOLD ${KFB_HOLD:-70}
             epd_send_smooth
             echo "$apkg" > $W/appprof.pkg
@@ -361,6 +402,13 @@ cmd_listen() {
         status)  status_write ;;
         wa)      type wa_request >/dev/null 2>&1 && wa_request "$a" ;;   # 管理网页：参数只是一个编号，真正的请求在 VeraHome 的私有目录里
         apply)   settings_apply ;;
+        ctlack)
+            case "$a" in
+                app|storage.notice|usb.ask|usb.gone|lock.reset|saver.listed|storage.result|optimize.result)
+                    rm -f "$X/ctl/$a" ;;
+                notice.*|act.*)
+                    case "$a" in */*|*..*) ;; *) rm -f "$X/ctl/$a" ;; esac ;;
+            esac ;;
         rotate)  # rotate 0|90|180|270
             case "$a" in 0|90|180|270)
                 touch $SYS/settings.conf
@@ -372,13 +420,13 @@ cmd_listen() {
             cur=$(sed -n 's/^KFB_INVERT=//p' $X/settings 2>/dev/null); [ "$cur" = 1 ] && n=0 || n=1
             echo "KFB_INVERT=$n" > $X/ctl/settings.new; settings_apply ;;
         light)   numeric "$a" && light_set "$a" ;;
-        lightauto) case "$a" in 0|1) lipc-set-prop -i com.lab126.powerd flAuto "$a" 2>/dev/null; status_write ;; esac ;;   # 自动调整亮度（有光线传感器的机型）
-        warmth)  numeric "$a" && lipc-set-prop -i com.lab126.powerd currentAmberLevel "$a" ;;
+        lightauto) case "$a" in 0|1) [ "$a" = 1 ] && rm -f $W/fl.auto_off; lipc-set-prop -i com.lab126.powerd flAuto "$a" 2>/dev/null; status_write ;; esac ;;   # 自动调整亮度（有光线传感器的机型）
+        warmth)  numeric "$a" && { lipc-set-prop -i com.lab126.powerd currentAmberLevel "$a" >/dev/null 2>&1 || { usleep 80000; lipc-set-prop -i com.lab126.powerd currentAmberLevel "$a" >/dev/null 2>&1; }; status_patch warmth "$a"; } ;;
         sleeptime) numeric "$a" && [ "$a" -ge 60 ] && lipc-set-prop -i com.lab126.powerd screenSaverTimeout "$a" ;;
         fwd)     numeric "$a" && fwd_on "$a" ;;
         fwdoff)  fwd_off ;;
-        fullupdate) # 整包更新：后台脱离 cmd 进程，stop.sh 杀掉 cmd 也能继续下载/替换；安装器和它的输出放在 /tmp（以前在系统盘里：sh 一直开着它，安装器自己调的 stop.sh 就卸不掉系统盘）；实验机型沿用安装时的 model
-            ( setsid sh -c 'm=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null); case "$m" in ""|pw6|cs) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac; B=/tmp/vd-fullupdate-bootstrap.sh; cd /; U=/dev/shm/veradroid/kfb/ctl/update.status; printf "state=checking\nstep=net\nlabel=正在连接更新服务器\nmode=manual\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; if curl -fsSL --retry 3 --connect-timeout 20 https://veradroid.wenjin.jp/bootstrap.sh -o "$B"; then sh "$B"; else printf "state=error\ncode=13\nlabel=连不上 VeraDroid 服务器（下载安装器失败）\nline2=可能被墙或服务器在维护，不是机器的问题。可以在 存储与连接 → 网络诊断 里看看是哪一步不通。\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; fi; rm -f "$B"; i=0; while [ $i -lt 3 ]; do sleep 2; P=$(cat /dev/shm/veradroid/pid 2>/dev/null); if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then break; fi; sh /mnt/base-us/veradroid/boot/veradroid.sh home; i=$((i+1)); done' > /tmp/veradroid-fullupdate.log 2>&1; echo $? > /tmp/veradroid-fullupdate.rc ) </dev/null >/dev/null 2>&1 3>&- & ;;
+        fullupdate) # 整包更新：后台脱离 cmd 进程，stop.sh 杀掉 cmd 也能继续下载/替换；安装器和它的输出放在 /tmp（以前在系统盘里：sh 一直开着它，安装器自己调的 stop.sh 就卸不掉系统盘）；实验机型沿用安装时的 model；支持 network.conf 代理/直链与 sh -n 语法校验
+            ( setsid sh -c 'm=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null || cat /mnt/base-us/veradroid/model 2>/dev/null); case "$m" in ""|pw6|cs) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac; export VD_FROM_HOME=1; B=/tmp/vd-fullupdate-bootstrap.sh; cd /; U=/dev/shm/veradroid/kfb/ctl/update.status; [ -f /mnt/base-us/veradroid/network.conf ] && . /mnt/base-us/veradroid/network.conf; CO=; [ -n "${VD_PROXY:-}" ] && CO="$CO -x $VD_PROXY"; [ -n "${VD_IP:-}" ] && CO="$CO --resolve veradroid.wenjin.jp:443:$VD_IP --resolve veradroid.wenjin.jp:80:$VD_IP"; [ -n "${VD_DNS:-}" ] && CO="$CO --dns-servers $VD_DNS"; D=${VD_DIRECT-https://dl.wenjin.jp}; printf "state=checking\nstep=net\nlabel=正在连接更新服务器\nmode=manual\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; brc=1; if { [ -n "$D" ] && curl $CO -fsSL --connect-timeout 8 --max-time 90 "${D%/}/bootstrap.sh" -o "$B" && [ -s "$B" ] && sh -n "$B"; } || { curl $CO -fsSL --retry 3 --connect-timeout 20 --max-time 180 https://veradroid.wenjin.jp/bootstrap.sh -o "$B" && [ -s "$B" ] && sh -n "$B"; }; then sh "$B"; brc=$?; [ "$brc" = 0 ] || { grep -q "^state=error" $U 2>/dev/null || { printf "state=error\ncode=14\nlabel=更新没有装上\nline2=日志在 Kindle 的 veradroid/logs/install-detail.log\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; }; }; else printf "state=error\ncode=13\nlabel=连不上 VeraDroid 服务器（下载安装器失败）\nline2=可能被墙或服务器在维护，不是机器的问题。可以在 存储与连接 → 网络诊断 里看看是哪一步不通。\ntime=%s\n" "$(date +%s)" > $U.tmp && chmod 644 $U.tmp && mv -f $U.tmp $U; fi; rm -f "$B"; if [ "$brc" = 0 ] && [ ! -f /mnt/base-us/veradroid/state/install.incomplete ]; then i=0; while [ $i -lt 3 ]; do sleep 2; P=$(cat /dev/shm/veradroid/pid 2>/dev/null); if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then break; fi; sh /mnt/base-us/veradroid/boot/veradroid.sh home; i=$((i+1)); done; fi; exit "$brc"' > /tmp/veradroid-fullupdate.log 2>&1; echo $? > /tmp/veradroid-fullupdate.rc ) </dev/null >/dev/null 2>&1 3>&- & ;;
         uninstall) # 卸载 VeraDroid：交给 uninstall.sh（先拷到 tmpfs 再跑，因为它会删掉 $VD）。
             # 这里以前内联着旧流程：先 stop.sh（卸载 loop 系统盘）再 mv data/media，PW5 / KT5 / KT6 上 Android 里的书会被一起删掉。
             if [ -f "$VD/boot/uninstall.sh" ]; then
@@ -396,10 +444,11 @@ cmd_listen() {
             esac ;;
         uninstallapp) # 卸载普通应用：宿主 root 跑 pm uninstall，避免 deletePackage 需要 observer
             case "$a" in ''|*[!A-Za-z0-9._]*) ;; *)
+                rm -f $X/ctl/uninst.$a
                 ( type compile_hold >/dev/null 2>&1 && compile_hold
                   r=$(adb_sh "cmd package uninstall --user 0 $a" 2>&1 | tr '\n' ' ')
                   type compile_release >/dev/null 2>&1 && compile_release
-                  echo "$r" > $X/ctl/uninst.$a.tmp; mv -f $X/ctl/uninst.$a.tmp $X/ctl/uninst.$a ) 3>&- & ;;
+                  echo "$r" > $X/ctl/uninst.$a.tmp && chmod 644 $X/ctl/uninst.$a.tmp && mv -f $X/ctl/uninst.$a.tmp $X/ctl/uninst.$a ) 3>&- & ;;
             esac ;;
         install) # 传书网页 / 商店 / OTA 的 apk：root 身份 pm install；接受 .upload 或 /data/local/tmp 绝对路径
             case "$a" in
@@ -411,12 +460,13 @@ cmd_listen() {
             case "$ipath" in *[!A-Za-z0-9._/-]*|*..*) ipath= ;; esac     # 路径会进 root 的命令行：只允许普通文件名字符
             if [ -n "$ipath" ]; then
                 iname=${ipath##*/}
+                rm -f $X/ctl/inst.$iname
                 ( upload_dir_fix 2>/dev/null; chmod 777 $SYS/data/local/tmp 2>/dev/null
                   # 桌面的进度卡片（我的 页）：正在装哪个、从什么时候开始（大应用要装几分钟）
                   type vp_kvw >/dev/null 2>&1 && vp_kvw $X/ctl/apkinst.status state=installing "name=$iname" "start=$(date +%s)"
                   # 不是 APK、32 位库不全（apk_precheck / apk_abi_check，afterboot.sh）：不装，直接把原因给传书网页 / 商店
                   if type apk_precheck >/dev/null 2>&1 && bad=$(apk_precheck "$SYS$ipath"); then
-                      echo "$bad" > $X/ctl/inst.$iname.tmp; mv -f $X/ctl/inst.$iname.tmp $X/ctl/inst.$iname
+                      echo "$bad" > $X/ctl/inst.$iname.tmp && chmod 644 $X/ctl/inst.$iname.tmp && mv -f $X/ctl/inst.$iname.tmp $X/ctl/inst.$iname
                       type vp_kvw >/dev/null 2>&1 && vp_kvw $X/ctl/apkinst.status state=error "name=$iname" "result=$bad"
                       t "install: $iname refused before pm: $bad"
                       exit 0
@@ -435,7 +485,7 @@ cmd_listen() {
                   case "$r" in *Success*) ;; *) type apk_fail_reason >/dev/null 2>&1 && r="$(apk_fail_reason "$r" "$SYS$ipath")（$r）" ;; esac
                   # 有的阅读应用把自己也注册成桌面（稻壳阅读器）：装上以后按主页键会弹“选择主屏幕应用”。每次装完都把桌面固定回 VeraHome。
                   adb_sh 'cmd package set-home-activity com.veradroid.home/.HomeActivity' >/dev/null 2>&1
-                  echo "$r" > $X/ctl/inst.$iname.tmp; mv -f $X/ctl/inst.$iname.tmp $X/ctl/inst.$iname
+                  echo "$r" > $X/ctl/inst.$iname.tmp && chmod 644 $X/ctl/inst.$iname.tmp && mv -f $X/ctl/inst.$iname.tmp $X/ctl/inst.$iname
                   case "$r" in *Success*) ist=done ;; *) ist=error ;; esac
                   type vp_kvw >/dev/null 2>&1 && vp_kvw $X/ctl/apkinst.status "state=$ist" "name=$iname" "result=$r"
                   # 装好了：后台低优先级预编译（compile.sh；packages.list 变了，扫描会找到新装的包）
@@ -464,12 +514,13 @@ cmd_listen() {
             esac ;;
         bt)      type bt_cmd >/dev/null 2>&1 && bt_cmd "$a" ;;   # bt map/swap/bridge、scan/list/bond/connect/disconnect/unbond/enable/disable（bt.sh，参数在那里校验）
         optimize) ( opt_run ) 3>&- & ;;   # 面板的“优化机器状态”（opt_run）
-        poke)    lipc-set-prop -i com.lab126.powerd touchScreenSaverTimeout 1 2>/dev/null ;;
+        poke|dl.active) touch $W/dl.active 2>/dev/null; lipc-set-prop -i com.lab126.powerd touchScreenSaverTimeout 1 2>/dev/null ;;
         wifi)    case "$a" in 0|1) wifi_set "$a"; status_write ;; esac ;;   # 只开关 Wi-Fi，不动飞行模式和蓝牙（common.sh wifi_set）
         wifilist)    ( wifi_list ) 3>&- & ;;
         wificonnect) ( wifi_connect "$a" ) 3>&- & ;;   # 参数在 wifi_connect 里校验（十六进制、没有控制字符）；新网络的密码另走管理请求 wifipsk
         wifiscan)    ( wifi_scan ) 3>&- & ;;
-        dns)     case "$a" in
+        dns)     case "$a" in ali) a=aliyun ;; dnspod) a=tencent ;; esac
+                 case "$a" in
                      auto|aliyun|tencent|google)
                          grep -v "^DNS_MODE=" $SYS/settings.conf > $SYS/settings.conf.tmp 2>/dev/null
                          echo "DNS_MODE=$a" >> $SYS/settings.conf.tmp; mv -f $SYS/settings.conf.tmp $SYS/settings.conf

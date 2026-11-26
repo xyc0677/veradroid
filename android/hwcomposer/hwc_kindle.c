@@ -604,7 +604,7 @@ static int hwc_open(const struct hw_module_t *module, const char *name, struct h
     c->onepage = access(KFB_ONEPAGE, F_OK) == 0;
     c->dim_cap = DIM_DEFAULT;
     c->rowbuf = malloc((size_t)c->w * 4);
-    if (!c->rowbuf) { free(c); return -ENOMEM; }
+    if (!c->rowbuf) { munmap(c->fb, c->page_bytes * 2); free(c); return -ENOMEM; }
     pthread_mutex_init(&c->lock, NULL);
     pthread_cond_init(&c->cond, NULL);
     c->dev.common.tag = HARDWARE_DEVICE_TAG;

@@ -60,7 +60,14 @@ public final class OecConfig {
 
     private static String sPackage;
     private static long sMtime = -1;
+    private static long sLen = -1;
     private static final Object sLock = new Object();
+    private static final Object sSwipeToken = new Object();
+    private static Handler sSwipeHandler;
+    private static View sSwipeDecor;
+    private static long sSwipeDown;
+    private static float sSwipeX, sSwipeY;
+    private static boolean sSwipeActive;
 
     /** density wanted for this process: 0 none, 1 auto, else dpi; fixed at the first read (a running app keeps it). */
     private static int sDpiRule = -1;
@@ -90,8 +97,10 @@ public final class OecConfig {
         if (sPackage == null) return;
         android.os.StrictMode.ThreadPolicy p = android.os.StrictMode.allowThreadDiskReads();
         try {
-            long m = new File(FILE).lastModified();
-            if (m == sMtime) return;
+            File f = new File(FILE);
+            long m = f.lastModified();
+            long l = f.length();
+            if (m == sMtime && l == sLen) return;
             synchronized (sLock) { reloadLocked(false); }
         } finally {
             android.os.StrictMode.setThreadPolicy(p);
@@ -103,7 +112,9 @@ public final class OecConfig {
     private static void reloadLocked(boolean first) {
         File f = new File(FILE);
         long m = f.lastModified();
+        long l = f.length();
         sMtime = m;
+        sLen = l;
         Map<String, Integer> v = new HashMap<String, Integer>();
         if (m != 0) {
             try {
@@ -137,7 +148,7 @@ public final class OecConfig {
         return i == null ? def : i;
     }
 
-    /** "*" line, then the longest matching prefix rule, then the exact line, key by key. */
+    /** "*" line, then (unless exact is "-") the longest matching prefix rule, then the exact line, key by key. */
     private static void lookup(File f, String pkg, Map<String, Integer> out) throws java.io.IOException {
         String global = null, prefix = null, exact = null;
         int best = -1;
@@ -160,7 +171,9 @@ public final class OecConfig {
         } finally {
             r.close();
         }
-        parse(global, out); parse(prefix, out); parse(exact, out);
+        parse(global, out);
+        if ("-".equals(exact)) return;
+        parse(prefix, out); parse(exact, out);
     }
 
     private static void parse(String spec, Map<String, Integer> out) {
@@ -339,22 +352,42 @@ public final class OecConfig {
     private static void swipe(final View decor, boolean next) {
         final int w = decor.getWidth(), h = decor.getHeight();
         if (w <= 0 || h <= 0) return;
+        if (sSwipeHandler == null) sSwipeHandler = new Handler(Looper.getMainLooper());
+        if (sSwipeActive) {
+            sSwipeHandler.removeCallbacksAndMessages(sSwipeToken);
+            if (sSwipeDecor != null) {
+                long now = SystemClock.uptimeMillis();
+                send(sSwipeDecor, sSwipeDown, Math.max(now, sSwipeDown + 1), MotionEvent.ACTION_UP, sSwipeX, sSwipeY);
+            }
+            sSwipeActive = false;
+            sSwipeDecor = null;
+        }
         final float x = w * 0.5f, y0 = h * (next ? 0.8f : 0.2f), y1 = h * (next ? 0.2f : 0.8f);
         final long down = SystemClock.uptimeMillis();
-        final int steps = 12;
-        final long total = 600;
-        final Handler hd = new Handler(Looper.getMainLooper());
+        final int steps = 6;
+        final long total = 200;
+        sSwipeActive = true;
+        sSwipeDecor = decor;
+        sSwipeDown = down;
+        sSwipeX = x;
+        sSwipeY = y0;
         send(decor, down, down, MotionEvent.ACTION_DOWN, x, y0);
         for (int i = 1; i <= steps; i++) {
             final int k = i;
-            hd.postAtTime(new Runnable() {
+            sSwipeHandler.postAtTime(new Runnable() {
                 @Override public void run() {
+                    if (!sSwipeActive || sSwipeDown != down) return;
                     float y = y0 + (y1 - y0) * k / steps;
                     long t = down + total * k / steps;
+                    sSwipeY = y;
                     send(decor, down, t, MotionEvent.ACTION_MOVE, x, y);
-                    if (k == steps) send(decor, down, t, MotionEvent.ACTION_UP, x, y);
+                    if (k == steps) {
+                        send(decor, down, t + 8, MotionEvent.ACTION_UP, x, y);
+                        sSwipeActive = false;
+                        sSwipeDecor = null;
+                    }
                 }
-            }, down + total * k / steps);
+            }, sSwipeToken, down + total * k / steps);
         }
     }
 

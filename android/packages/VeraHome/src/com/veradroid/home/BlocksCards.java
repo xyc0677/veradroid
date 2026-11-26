@@ -72,7 +72,11 @@ final class BlocksCards {
         if (d < 3600000) return (d / 60000) + " 分钟前";
         Calendar now = Calendar.getInstance(), then = Calendar.getInstance();
         then.setTimeInMillis(t);
-        int days = now.get(Calendar.DAY_OF_YEAR) - then.get(Calendar.DAY_OF_YEAR) + 365 * (now.get(Calendar.YEAR) - then.get(Calendar.YEAR));
+        now.set(Calendar.HOUR_OF_DAY, 0); now.set(Calendar.MINUTE, 0); now.set(Calendar.SECOND, 0); now.set(Calendar.MILLISECOND, 0);
+        then.set(Calendar.HOUR_OF_DAY, 0); then.set(Calendar.MINUTE, 0); then.set(Calendar.SECOND, 0); then.set(Calendar.MILLISECOND, 0);
+        long diffMs = now.getTimeInMillis() - then.getTimeInMillis();
+        if (diffMs <= 0) return "今天";
+        int days = (int) ((diffMs + 43200000L) / 86400000L);
         if (days <= 0) return "今天";
         if (days == 1) return "昨天";
         return days + " 天前";
@@ -88,61 +92,78 @@ final class BlocksCards {
      * 只读像素、不碰别的应用的数据。
      */
     private static final java.util.concurrent.ExecutorService fbExec = Ui.lowExecutor("fb-sample");
-    private static byte[][] homeSample;
+    private static byte[][] homeSample, capSample;
+    private static byte[] lineReuse;
+    private static int[] pxReuse;
+    private static java.nio.MappedByteBuffer sFbMap;
+    private static long sFbLen = -1;
     private static int sampleW, sampleH;
 
-    private static byte[][] sampleFb(Context c) {
+    private static byte[][] ensureSampleBuf(byte[][] reuse, int len) {
+        if (reuse != null && reuse.length == 2 && reuse[0] != null && reuse[0].length == len) {
+            java.util.Arrays.fill(reuse[1], (byte) 0);
+            return reuse;
+        }
+        return new byte[2][len];
+    }
+
+    private static java.nio.MappedByteBuffer cachedMap(File f, long need) throws Exception {
+        long flen = f.length();
+        if (sFbMap != null && sFbLen == flen && sFbMap.capacity() >= need) return sFbMap;
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
+        try {
+            java.nio.MappedByteBuffer m = raf.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, need);
+            sFbMap = m; sFbLen = flen;
+            return m;
+        } finally { raf.close(); }
+    }
+
+    private static byte[][] sampleFb(Context c, boolean forHome) {
         try {
             android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
             ((android.view.WindowManager) c.getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(dm);
             int w = dm.widthPixels, h = dm.heightPixels;
             File f = new File(HostLink.KFB + "fb");
             long page = (long) w * h * 4;
-            if (f.length() < page * 2) return null;
-            // framework project (KFB_ONEPAGE, docs/framework-project.md): SurfaceFlinger only ever uses page 0. Page 1 is a hole in
-            // the tmpfs file; reading it through a mapping would allocate it (about half a page of RAM with this sampling), so
-            // leave it alone: its sample stays all zero, the same on leaving and on coming back, and page 0 is picked.
             int pages = new File(HostLink.KFB + "onepage").exists() ? 1 : 2;
-            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
-            try {
-                java.nio.MappedByteBuffer mb = raf.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, page * pages);
-                int step = Math.max(2, w / 260);
-                sampleW = w / step; sampleH = h / step;
-                byte[][] out = new byte[2][sampleW * sampleH];
-                // 一行一次整块拷出来再取点：以前每个点三次 get()（两页共五十多万次），单核的 PW4 上离开 / 回到主页各卡一两秒
-                byte[] line = new byte[(sampleW - 1) * step * 4 + 3];
-                for (int pg = 0; pg < pages; pg++) {
-                    for (int y = 0; y < sampleH; y++) {
-                        mb.position((int) (pg * page + (long) (y * step) * w * 4));
-                        mb.get(line, 0, line.length);
-                        int base = y * sampleW;
-                        for (int x = 0, o = 0; x < sampleW; x++, o += step * 4) {
-                            int r = line[o] & 255, g = line[o + 1] & 255, b = line[o + 2] & 255;
-                            out[pg][base + x] = (byte) ((r * 77 + g * 150 + b * 29) >> 8);
-                        }
+            if (f.length() < page * pages) return null;
+            java.nio.MappedByteBuffer mb = cachedMap(f, page * pages);
+            int step = Math.max(2, w / 260);
+            sampleW = w / step; sampleH = h / step;
+            byte[][] out = ensureSampleBuf(forHome ? homeSample : capSample, sampleW * sampleH);
+            if (forHome) homeSample = out; else capSample = out;
+            int needLine = (sampleW - 1) * step * 4 + 3;
+            if (lineReuse == null || lineReuse.length < needLine) lineReuse = new byte[needLine];
+            byte[] line = lineReuse;
+            for (int pg = 0; pg < pages; pg++) {
+                for (int y = 0; y < sampleH; y++) {
+                    mb.position((int) (pg * page + (long) (y * step) * w * 4));
+                    mb.get(line, 0, needLine);
+                    int base = y * sampleW;
+                    for (int x = 0, o = 0; x < sampleW; x++, o += step * 4) {
+                        int r = line[o] & 255, g = line[o + 1] & 255, b = line[o + 2] & 255;
+                        out[pg][base + x] = (byte) ((r * 77 + g * 150 + b * 29) >> 8);
                     }
                 }
-                return out;
-            } finally { raf.close(); }
+            }
+            return out;
         } catch (Throwable t) { return null; }
     }
 
-    /** 离开主页去开应用时：记下主页自己的画面（两页），回来时用来认出哪一页是应用画的。 */
+    /** 离开主页去开应用时：在启动外部应用前同步抽稀记下主页画面，避免单页缓冲下异步采到新应用首帧。 */
     static void onLeaveHome(Context c) {
         if (!wantsLastApp(c)) return;
-        final Context app = c.getApplicationContext();
-        fbExec.execute(new Runnable() { @Override public void run() {
-            homeSample = sampleFb(app);
-        } });
+        homeSample = sampleFb(c.getApplicationContext(), true);
     }
 
     private static boolean wantsLastApp(Context c) { return Blocks.on(c) && order(c).contains("continue"); }
 
     /** 回到主页的那一刻（onResume，主页还没画）：前一个应用是第三方应用就存它的缩略图和时间。 */
     /** 算作“阅读应用”的包（继续阅读卡片只记这些）：默认一份常见的阅读器，用户可以在“首页卡片”里增减（键 blk_readers）。 */
-    static final String READERS_DEFAULT = "com.tencent.weread.eink,com.tencent.weread,org.koreader.launcher,com.flyersoft.moonreader,com.flyersoft.moonreaderp,"
-        + "com.duokan.reader,com.duokan.einkreader,com.chaozh.iReaderFree,com.chaozh.iReader,com.amazon.kindle,com.dragon.read,com.jjwxc.reader,"
-        + "com.qidian.QDReader,com.zhangyue.iReader.Eink,com.ss.android.lark.read,com.tadu.android,org.geometerplus.zlibrary.ui.android,com.ireadercity,"
+    static final String READERS_DEFAULT = "com.tencent.weread.eink,com.tencent.weread,org.koreader.launcher,org.koreader.launcher.fdroid,com.flyersoft.moonreader,com.flyersoft.moonreaderp,"
+        + "com.duokan.reader,com.duokan.einkreader,com.chaozh.iReaderFree,com.chaozh.iReader,com.zhangyue.read.iReader.eink,com.zhangyue.iReader.Eink,com.amazon.kindle,"
+        + "com.dragon.read,com.jjwxc.reader,com.qidian.QDReader,com.kmxs.reader,com.jd.app.reader,com.jingdong.app.reader.campus,net.cpwxw.cpfiction,"
+        + "com.douban.book.reader,com.shuqi.controller,com.qq.reader,com.ss.android.lark.read,com.tadu.android,org.geometerplus.zlibrary.ui.android,com.ireadercity,"
         + "io.legado.app.release,io.legado.ink,com.gedoor.monkeybook";
     static List<String> readers(Context c) {
         List<String> l = new ArrayList<String>();
@@ -159,34 +180,40 @@ final class BlocksCards {
     static void captureLastApp(HomeActivity a, final String pkg) {
         if (pkg == null || !wantsLastApp(a) || a.findApp(pkg) == null || !readers(a).contains(pkg)) return;
         final Context app = a.getApplicationContext();
+        // 先立即记录最近阅读应用与时间，避免单页缓冲下帧采样跳过导致漏记
+        Store.prefs(app, "home").edit().putString("la_pkg", pkg).putLong("la_time", System.currentTimeMillis()).apply();
+        // 在桌面首帧绘入 /dev/kfb/fb 前同步做轻量抽稀采样，PNG 编码与落盘留给后台线程
+        byte[][] now = sampleFb(app, false);
+        if (now == null) return;
+        int pick = 0;
+        if (homeSample != null && homeSample[0].length == now[0].length) {
+            long d0 = diff(now[0], homeSample[0]), d1 = diff(now[1], homeSample[1]);
+            pick = d1 > d0 ? 1 : 0;
+            if (Math.max(d0, d1) == 0) return;   // 画面与离开主页时一致：应用没画过新帧
+        }
+        final int w = sampleW, h = sampleH;
+        final byte[] snap = java.util.Arrays.copyOf(now[pick], now[pick].length);
         fbExec.execute(new Runnable() { @Override public void run() {
-            byte[][] now = sampleFb(app);
-            if (now == null) return;
-            int pick = 0;
-            if (homeSample != null && homeSample[0].length == now[0].length) {
-                long d0 = diff(now[0], homeSample[0]), d1 = diff(now[1], homeSample[1]);
-                pick = d1 > d0 ? 1 : 0;
-                if (Math.max(d0, d1) == 0) return;   // 两页都还是主页的画面：应用没画过东西
-            }
-            final int w = sampleW, h = sampleH;
-            int[] px = new int[w * h];
-            byte[] src = now[pick];
-            for (int i = 0; i < px.length; i++) { int v = src[i] & 255; px[i] = 0xff000000 | (v << 16) | (v << 8) | v; }
-            final Bitmap bm = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
-            final long ts = System.currentTimeMillis();
+            int n = w * h;
+            if (pxReuse == null || pxReuse.length != n) pxReuse = new int[n];
+            int[] px = pxReuse;
+            for (int i = 0; i < n; i++) { int v = snap[i] & 255; px[i] = 0xff000000 | (v << 16) | (v << 8) | v; }
+            final Bitmap bm = Bitmap.createBitmap(px, w, h, Bitmap.Config.RGB_565);
             ui.post(new Runnable() { @Override public void run() {
                 thumb = bm; thumbPkg = pkg;
-                Store.prefs(app, "home").edit().putString("la_pkg", pkg).putLong("la_time", ts).apply();
             } });
             File out = new File(Store.cache("lastapp"), "thumb.png");
+            File tmp = new File(Store.cache("lastapp"), "thumb.png.tmp");
             FileOutputStream o = null;
+            boolean ok = false;
             try {
-                o = new FileOutputStream(out);
-                bm.compress(Bitmap.CompressFormat.PNG, 100, o);
+                o = new FileOutputStream(tmp);
+                ok = bm.compress(Bitmap.CompressFormat.PNG, 100, o);
             } catch (Throwable ignored) {
             } finally {
                 try { if (o != null) o.close(); } catch (Throwable ignored) { }
             }
+            if (ok) tmp.renameTo(out); else tmp.delete();
         } });
     }
 
@@ -380,24 +407,27 @@ final class BlocksCards {
 
     static String httpGet(String u) {
         java.net.HttpURLConnection con = null;
+        java.io.InputStream in = null;
         try {
             con = (java.net.HttpURLConnection) new java.net.URL(u).openConnection();
             con.setConnectTimeout(6000); con.setReadTimeout(8000);
             con.setRequestProperty("User-Agent", "VeraHome");
             if (con.getResponseCode() != 200) return null;
-            java.io.InputStream in = con.getInputStream();
+            in = con.getInputStream();
             java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
             byte[] b = new byte[8192]; int n;
             while ((n = in.read(b)) > 0 && bo.size() < 200000) bo.write(b, 0, n);
-            in.close();
             return bo.toString("UTF-8");
         } catch (Throwable t) { return null; }
-        finally { if (con != null) con.disconnect(); }
+        finally {
+            if (in != null) try { in.close(); } catch (Throwable ignored) { }
+            if (con != null) con.disconnect();
+        }
     }
 
     /** 设置城市：输入名字 → open-meteo 地名搜索（只发这个名字）→ 选一个。 */
     static void cityDialog(final HomeActivity a, final Runnable done) {
-        final EditText in = new EditText(a);
+        final EditText in = Ui.editText(a);
         in.setSingleLine(true);
         in.setTextSize(20);
         in.setTypeface(Fonts.typeface(a));
@@ -423,6 +453,7 @@ final class BlocksCards {
                         }
                     } catch (Throwable ignored) { }
                     ui.post(new Runnable() { @Override public void run() {
+                        if (a.isFinishing()) return;
                         if (res.isEmpty()) { VeraToast.show(a, "没找到（没有网络，或者换个写法）"); return; }
                         String[] names = new String[res.size()];
                         for (int i = 0; i < names.length; i++) names[i] = res.get(i)[0];
@@ -476,12 +507,15 @@ final class BlocksCards {
     static String[] poemOfDay(Context c) {
         if (poems == null) {
             poems = new ArrayList<String[]>();
+            java.io.BufferedReader r = null;
             try {
-                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(c.getAssets().open("poems.txt"), "UTF-8"));
+                r = new java.io.BufferedReader(new java.io.InputStreamReader(c.getAssets().open("poems.txt"), "UTF-8"));
                 String line;
                 while ((line = r.readLine()) != null) { String[] f = line.split("\\|"); if (f.length >= 4) poems.add(f); }
-                r.close();
-            } catch (Throwable ignored) { }
+            } catch (Throwable ignored) {
+            } finally {
+                if (r != null) try { r.close(); } catch (Throwable ignored) { }
+            }
         }
         if (poems.isEmpty()) return null;
         int day = (int) ((System.currentTimeMillis() + TimeZoneOffset()) / 86400000L);

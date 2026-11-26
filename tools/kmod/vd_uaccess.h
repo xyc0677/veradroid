@@ -20,7 +20,7 @@
 #define get_user(x, p) ({ \
 	__typeof__(*(p)) __vdv; \
 	int __vdr = copy_from_user(&__vdv, (p), sizeof(__vdv)) ? -EFAULT : 0; \
-	(x) = __vdv; __vdr; })
+	(x) = __vdr ? (__typeof__(*(p)))0 : __vdv; __vdr; })
 #define __put_user(x, p) put_user(x, p)
 #define __get_user(x, p) get_user(x, p)
 #endif

@@ -132,7 +132,7 @@ boot_watch() {
             else
                 touch $W/boot.retry
                 t "boot stalled at ${last}% after ${n}s: retry"
-                ( exec >>/tmp/veradroid-stop.log 2>&1; sh $VD/boot/stop.sh >/dev/null 2>&1; setsid sh $VD/boot/veradroid.sh home </dev/null >/tmp/vdretry.out 2>&1 & ) &
+                ( exec >>/tmp/veradroid-stop.log 2>&1; VD_KEEP_RETRY=1 sh $VD/boot/stop.sh >/dev/null 2>&1; setsid sh $VD/boot/veradroid.sh home </dev/null >/tmp/vdretry.out 2>&1 & ) &
             fi
             kill $bw_w 2>/dev/null
             return

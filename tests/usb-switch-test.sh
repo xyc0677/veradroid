@@ -44,14 +44,17 @@ EOF
     rm -f "$T/x/ctl/usb.ask"; echo USB_ASK=0 > "$T/sys/settings.conf"; o ask; [ -f "$T/x/ctl/usb.ask" ] && bad "$H: asked with USB_ASK=0"
     rm -f "$T/sys/settings.conf" "$T/x/ctl/usb.ask"; : > "$T/w/frozen"; o ask; [ -f "$T/x/ctl/usb.ask" ] && bad "$H: asked while back in Kindle"
     rm -f "$T/w/frozen"
-    # 屏保冻结着插线：醒了再问
-    : > "$T/w/saver_frozen"; ( sleep 3; rm -f "$T/w/saver_frozen" ) & o ask
-    [ -f "$T/x/ctl/usb.ask" ] || bad "$H: not asked after the screensaver ended"
+    # 屏保冻结着插线：直接返回不轮询等待（避免插充电器后每 2 秒唤醒一次）
+    : > "$T/w/saver_frozen"; o ask; [ -f "$T/x/ctl/usb.ask" ] && bad "$H: asked while screensaver frozen"
+    rm -f "$T/w/saver_frozen"
+    # 空闲冻结着插线：醒了再问
+    : > "$T/w/idlefz"; ( sleep 3; rm -f "$T/w/idlefz" ) & o ask
+    [ -f "$T/x/ctl/usb.ask" ] || bad "$H: not asked after idlefz ended"
     rm -f "$T/x/ctl/usb.ask"
-    # 屏保时插上、醒来前又拔了：不问。Android 在前台时不看 online（刚插上那一刻充电芯片可能还没报）
+    # 空闲冻结时插上、醒来前又拔了：不问。Android 在前台时不看 online（刚插上那一刻充电芯片可能还没报）
     mkdir -p "$T/psy/ac"; echo USB > "$T/psy/ac/type"; echo 0 > "$T/psy/ac/online"
-    : > "$T/w/saver_frozen"; ( sleep 3; rm -f "$T/w/saver_frozen" ) & o ask
-    [ -f "$T/x/ctl/usb.ask" ] && bad "$H: asked although the cable was gone when the screensaver ended"
+    : > "$T/w/idlefz"; ( sleep 3; rm -f "$T/w/idlefz" ) & o ask
+    [ -f "$T/x/ctl/usb.ask" ] && bad "$H: asked although the cable was gone when idlefz ended"
     o ask; [ -f "$T/x/ctl/usb.ask" ] || bad "$H: in front, fresh plug-in event: should ask even before the charger reports online"
     rm -f "$T/x/ctl/usb.ask"; rm -rf "$T/psy"; mkdir -p "$T/psy"
 

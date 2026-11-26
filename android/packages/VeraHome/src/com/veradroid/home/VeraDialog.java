@@ -27,6 +27,7 @@ final class VeraDialog {
         private View extra;
         private OnPick pick;
         private Runnable negativeAction, positiveAction;
+        private boolean positiveKeepOpen;
 
         Builder(Activity a) { this.a = a; }
 
@@ -36,7 +37,8 @@ final class VeraDialog {
         Builder items(String[] s, OnPick p) { items = s; pick = p; return this; }
         Builder selected(int i) { selected = i; return this; }
         Builder negative(String label, Runnable action) { negative = label; negativeAction = action; return this; }
-        Builder positive(String label, Runnable action) { positive = label; positiveAction = action; return this; }
+        Builder positive(String label, Runnable action) { positive = label; positiveKeepOpen = false; positiveAction = action; return this; }
+        Builder positive(String label, boolean keepOpen, Runnable action) { positive = label; positiveKeepOpen = keepOpen; positiveAction = action; return this; }
 
         Dialog show() {
             final Dialog d = new Dialog(a);
@@ -63,18 +65,21 @@ final class VeraDialog {
                 t.setPadding(0, 0, 0, dp(6));
                 box.addView(t);
             }
+
+            LinearLayout body = new LinearLayout(a);
+            body.setOrientation(LinearLayout.VERTICAL);
             if (message != null && message.length() > 0) {
                 TextView m = Ui.text(a, message, 16, false);
-                m.setTextColor(Blocks.on(a) ? Color.BLACK : Color.DKGRAY);   // 方块风格只用纯黑白
+                m.setTextColor(blk ? Color.BLACK : Color.DKGRAY);   // 方块风格只用纯黑白
                 m.setPadding(0, dp(4), 0, dp(12));
-                box.addView(m);
+                body.addView(m);
             }
             if (extra != null) {
-                // 闪烁的光标会让墨水屏每 0.5 秒刷一小块：对话框里的输入框一律不显示光标
+                // 闪烁的光标会让墨水屏每 0.5 秒刷一小块：普通 EditText 关掉系统闪烁光标，EinkEditText 自带静态不闪烁光标
                 if (extra instanceof EditText) ((EditText) extra).setCursorVisible(false);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.bottomMargin = dp(12);
-                box.addView(extra, lp);
+                body.addView(extra, lp);
             }
             if (items != null) {
                 for (int i = 0; i < items.length; i++) {
@@ -92,9 +97,68 @@ final class VeraDialog {
                     });
                     LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                     lp.topMargin = dp(5);
-                    box.addView(b, lp);
+                    body.addView(b, lp);
                 }
             }
+
+            final int maxBodyH = Math.max(dp(160), (int) (a.getResources().getDisplayMetrics().heightPixels * 0.65f));
+            final PageScrollView sv = new PageScrollView(a) {
+                @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                    int mode = MeasureSpec.getMode(heightMeasureSpec);
+                    int size = MeasureSpec.getSize(heightMeasureSpec);
+                    int cap = (mode == MeasureSpec.UNSPECIFIED) ? maxBodyH : Math.min(size, maxBodyH);
+                    super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
+                }
+            };
+            sv.setBackgroundColor(Color.TRANSPARENT);
+            sv.addView(body, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            box.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            final LinearLayout pager = new LinearLayout(a);
+            pager.setOrientation(LinearLayout.HORIZONTAL);
+            pager.setGravity(Gravity.CENTER_VERTICAL);
+            pager.setPadding(0, dp(8), 0, 0);
+            pager.setVisibility(View.GONE);
+            final TextView pageInfo = Ui.text(a, "", 14, false);
+            pageInfo.setGravity(Gravity.CENTER);
+            final View prevBtn = Ui.button(a, "▲", 14, false, new View.OnClickListener() {
+                @Override public void onClick(View v) { if (sv.page(-1)) sv.firePage(); }
+            });
+            final View nextBtn = Ui.button(a, "▼", 14, false, new View.OnClickListener() {
+                @Override public void onClick(View v) { if (sv.page(1)) sv.firePage(); }
+            });
+            if (blk) {
+                prevBtn.setBackground(Blocks.plain(a));
+                nextBtn.setBackground(Blocks.plain(a));
+            }
+            ((LinearLayout.LayoutParams) prevBtn.getLayoutParams()).leftMargin = 0;
+            ((LinearLayout.LayoutParams) nextBtn.getLayoutParams()).leftMargin = 0;
+            pager.addView(prevBtn);
+            pager.addView(pageInfo, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            pager.addView(nextBtn);
+            box.addView(pager, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            final Runnable syncPager = new Runnable() {
+                @Override public void run() {
+                    int pages = sv.pages();
+                    boolean multi = pages > 1;
+                    int vis = multi ? View.VISIBLE : View.GONE;
+                    if (pager.getVisibility() != vis) pager.setVisibility(vis);
+                    if (multi) {
+                        int cur = sv.currentPage();
+                        String label = cur + " / " + pages;
+                        if (!label.contentEquals(pageInfo.getText())) pageInfo.setText(label);
+                        prevBtn.setEnabled(cur > 1);
+                        nextBtn.setEnabled(cur < pages);
+                    }
+                }
+            };
+            sv.setOnPage(syncPager);
+            sv.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    sv.post(syncPager);
+                }
+            });
 
             if (negative != null || positive != null) {
                 LinearLayout row = new LinearLayout(a);
@@ -109,7 +173,7 @@ final class VeraDialog {
                 }
                 if (positive != null) {
                     View b = Ui.button(a, positive, 16, true, new View.OnClickListener() {
-                        @Override public void onClick(View v) { d.dismiss(); if (positiveAction != null) positiveAction.run(); }
+                        @Override public void onClick(View v) { if (!positiveKeepOpen) d.dismiss(); if (positiveAction != null) positiveAction.run(); }
                     });
                     if (blk) b.setBackground(Blocks.plainFilled(a));
                     row.addView(b);
@@ -117,13 +181,12 @@ final class VeraDialog {
                 box.addView(row);
             }
 
-            PageScrollView sv = new PageScrollView(a);
-            sv.setBackgroundColor(Color.TRANSPARENT);
-            sv.addView(box, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            d.setContentView(sv);
+            d.setContentView(box);
             d.show();
             Window w = d.getWindow();
             if (w != null) {
+                View dc = d.findViewById(android.R.id.content);
+                if (dc instanceof android.widget.FrameLayout) ((android.widget.FrameLayout) dc).setForeground(null);
                 w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
                 w.setWindowAnimations(0);
                 w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);   // 墨水屏不压暗背景，黑框已经够清楚

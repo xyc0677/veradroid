@@ -15,8 +15,8 @@ T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT
 mk() {   # mk <file> <table hex> <movt hex>: a 166540-byte file with the two runs at their offsets
     mkdir -p "${1%/*}"; dd if=/dev/zero of="$1" bs=166540 count=1 2>/dev/null
-    printf "$(printf '%s' "$2" | sed 's/../\\x&/g')" | dd of="$1" bs=1 seek=154856 conv=notrunc 2>/dev/null
-    printf "$(printf '%s' "$3" | sed 's/../\\x&/g')" | dd of="$1" bs=1 seek=52736 conv=notrunc 2>/dev/null
+    printf "$(awk -v s="$2" 'BEGIN{h="0123456789abcdef";s=tolower(s);for(i=1;i<=length(s);i+=2){v=(index(h,substr(s,i,1))-1)*16+index(h,substr(s,i+1,1))-1;printf "\\%03o",v}}')" | dd of="$1" bs=1 seek=154856 conv=notrunc 2>/dev/null
+    printf "$(awk -v s="$3" 'BEGIN{h="0123456789abcdef";s=tolower(s);for(i=1;i<=length(s);i+=2){v=(index(h,substr(s,i,1))-1)*16+index(h,substr(s,i+1,1))-1;printf "\\%03o",v}}')" | dd of="$1" bs=1 seek=52736 conv=notrunc 2>/dev/null
 }
 run() { R=$T/r W=$T/w sh -c 't() { echo "LOG $*"; }; eval "$(sed -n "/^ALARMFIX_LIB=/,/^alarmfix_mount()/p" host/pw6/boot/lib/container.sh | sed "\$d")"; '"$1"; }
 mkdir -p $T/w

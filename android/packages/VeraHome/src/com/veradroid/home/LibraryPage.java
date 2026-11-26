@@ -71,7 +71,7 @@ final class LibraryPage {
         searchRow.setOrientation(LinearLayout.HORIZONTAL);
         searchRow.setGravity(Gravity.CENTER_VERTICAL);
         searchRow.setPadding(dp(16), dp(10), dp(8), dp(8));
-        search = new EditText(a);
+        search = Ui.editText(a);
         search.setHint("搜索书名、作者、应用");
         search.setHintTextColor(Color.BLACK);
         search.setTextColor(Color.BLACK);
@@ -232,8 +232,10 @@ final class LibraryPage {
         shownCovers.clear();
         int from = page * per, to = Math.min(total, from + per);
         if (total == 0) {
+            boolean klibSkip = "1".equals(HostLink.kv(HostLink.KFB + "ctl/status").get("klibskip"));
             String msg = searching ? (query.length() == 0 ? "" : "没有找到。")
-                : Lib.isEmpty() ? "还没有书。\n\n点右上角菜单里的“传书”，用手机或电脑把书传进来；\n也可以把书放进 Kindle 的 documents 文件夹。"
+                : Lib.isEmpty() ? ("还没有书。\n\n点右上角菜单里的“传书”，用手机或电脑把书传进来；\n也可以把书放进 Kindle 的 documents 文件夹。"
+                    + (klibSkip ? "\n\n（实验机型默认未挂载 Kindle 原机书库以保护原机书籍；如需查看，可在「设置 → 系统与性能 → 挂载 Kindle 原机书库」选择「只读挂载」并重启 Android）" : ""))
                 : "没有符合筛选条件的书。";
             TextView empty = Ui.text(a, msg, 18, false);
             empty.setGravity(Gravity.CENTER);
@@ -340,15 +342,9 @@ final class LibraryPage {
     private final Runnable refreshHidden = new Runnable() { @Override public void run() { if (root.getVisibility() != View.VISIBLE) refresh(); } };
     void refreshSoon() { root.removeCallbacks(refreshHidden); root.postDelayed(refreshHidden, 500); }
 
-    /** 书库数据变了（后台扫描有新书、封面生成好了）。书库正显示着就立刻重画，否则闲下来时在后台重排。 */
+    /** 书库数据变了（后台扫描有新书、状态变更、封面生成好了）。书库正显示着就立刻重画，否则闲下来时在后台重排。 */
     void onLibraryChanged(boolean listChanged, boolean visible) {
         if (!visible) { refreshSoon(); return; }
-        if (!listChanged) {
-            // 只是封面生成好了：给这一页上还空着的格子换上图，一次重画
-            for (CoverView cv : shownCovers) if (!cv.hasBitmap()) cv.setBitmap(Lib.cover(a, cv.book()));
-            renderedSig = sig();
-            return;
-        }
         render();
     }
 

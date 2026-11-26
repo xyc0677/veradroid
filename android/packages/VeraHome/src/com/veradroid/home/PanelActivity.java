@@ -10,7 +10,7 @@ import android.os.Bundle;
 public class PanelActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        Panel.open(this);
+        if (!LockScreen.showing()) Panel.open(this);
         finish();
         overridePendingTransition(0, 0);
     }

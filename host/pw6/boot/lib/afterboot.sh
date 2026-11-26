@@ -15,7 +15,7 @@ ensure_installd_dirs() {
 # ClipboardService 于是对所有应用返回空剪贴板。替锁屏报告一次（ITrustManager 第 5 个方法 reportKeyguardShowingChanged），
 # 它按“没有密码、没显示锁屏”重算成未锁定。开机后、system_server 软重启后、屏保解冻后各调一次（重复调用无副作用）。
 trust_unlock() {
-    adb_sh 'service call trust 5' >/dev/null 2>&1
+    if type adb_sh_t >/dev/null 2>&1; then adb_sh_t 15 'service call trust 5'; else adb_sh 'service call trust 5'; fi >/dev/null 2>&1
 }
 # 桌面（VeraHome）和输入法（VeraIME）是镜像里的系统应用，开机 dexopt 只给它们 verify-profile（解释执行 + JIT）：
 # 方块主页第一次画 1.5–2.2 s（Voyage 模拟器）。编成 speed 以后同一台 0.9–1.05 s，之后两次重搭 1.3–1.8 s -> 0.8–0.9 s、0.6–0.7 -> 0.35 s。
@@ -294,15 +294,15 @@ after_boot() {
         adb_sh 'settings put secure install_non_market_apps 1' >/dev/null 2>&1
         # 用不到的后台服务：通知排序助手常驻约 37 MB；并关闭云备份与后台扫描省电（参考文石 Go 6 Gen 2）
         adb_sh 'pm disable-user --user 0 android.ext.services; settings put secure backup_enabled 0; settings put global wifi_scan_always_enabled 0' >/dev/null 2>&1
-        slim_after_boot
         if lowmem; then
             adb_sh 'for p in com.android.printspooler com.android.managedprovisioning com.android.companiondevicesupport com.android.bookmarkprovider com.android.providers.calendar com.android.calendar com.android.sharedstoragebackup com.android.camera2 com.android.gallery3d; do pm disable-user --user 0 $p >/dev/null 2>&1; done; settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0; settings put global wifi_scan_always_enabled 0; setprop dalvik.vm.heapgrowthlimit 128m; setprop dalvik.vm.heapsize 192m' >/dev/null 2>&1 || true
             t "low-ram: disabled extra pkgs + zero anim"
         fi
     fi
+    slim_after_boot
     lmk_tune          # 运行时参数，不持久：每次开机都要做
-    type boot_block_apply >/dev/null 2>&1 && ! ab_stopping && ( boot_block_apply ) &      # 第三方应用的开机自启（memkeep.sh，BOOT_BLOCK）
-    type appslim_all >/dev/null 2>&1 && ! ab_stopping && ( appslim_all boot ) &          # 应用瘦身：清单里应用的后台组件（appslim.sh）
+    type boot_block_apply >/dev/null 2>&1 && ! ab_stopping && ( boot_block_apply ) </dev/null >>$LOG 2>&1 &      # 第三方应用的开机自启（memkeep.sh，BOOT_BLOCK）
+    type appslim_all >/dev/null 2>&1 && ! ab_stopping && ( appslim_all boot ) </dev/null >>$LOG 2>&1 &          # 应用瘦身：清单里应用的后台组件（appslim.sh）
     trust_unlock      # 剪贴板可读（见 trust_unlock）
     # 默认桌面固定为 VeraHome（装了自带“桌面”入口的应用后，系统会让用户重新选）。cmd 走 binder，不起 JVM，约 0.1 秒。
     adb_sh 'cmd package set-home-activity com.veradroid.home/.HomeActivity' >/dev/null 2>&1
@@ -335,6 +335,7 @@ RDME
     # /sdcard/VeraDroid（壁纸图库、自定义图标）也是 VeraHome 建的 0700 目录，同样要跟着换属主：rc089 矩阵 kt6-5192 上重装后
     # VeraHome 从 10006 变成 10001，这个目录还属于 10006，网页传壁纸报“空间不够：剩余 0 MB”、VeraDroid/icons 里的图标不生效。
     case "$hu" in ''|*[!0-9]*) ;; *) for hd in .vdhome VeraDroid; do [ -d $SYS/data/media/0/$hd ] && chown -R "$hu" $SYS/data/media/0/$hd 2>/dev/null; done ;; esac
+    type kfb_home_chown >/dev/null 2>&1 && kfb_home_chown
     # WeRead and other readers keep downloads under /sdcard/Android/data and
     # /sdcard/WeRead.  The parents are often 0770 root:root after a clean
     # install, so the app's DownloadService never finishes.
@@ -467,11 +468,23 @@ RDME
         fi
         rm -f $SYS/data/local/tmp/vdinst.apk
     done
-    # 输入法：VeraIME 装好后设为默认（它是数据应用，重装/升级后 secure setting 不会被自动改回来）
+    # 输入法：VeraIME 装好后确保在已启用列表中；仅当默认输入法为空或所属包已卸载时才设为默认，保留用户第三方输入法
     if [ -n "$AB_ONCE" ] && pkg_installed com.veradroid.ime; then
-        adb_sh 'settings put secure enabled_input_methods com.veradroid.ime/.VeraImeService' >/dev/null 2>&1
-        adb_sh 'settings put secure default_input_method com.veradroid.ime/.VeraImeService' >/dev/null 2>&1
-        t "after_boot: VeraIME enabled"
+        ime='com.veradroid.ime/.VeraImeService'
+        cur_en=$(adb_sh 'settings get secure enabled_input_methods' 2>/dev/null | tr -d "\r\n'\"\\\`\$")
+        case "$cur_en" in
+            ''|null) adb_sh "settings put secure enabled_input_methods '$ime'" >/dev/null 2>&1 ;;
+            *"$ime"*) ;;
+            *) adb_sh "settings put secure enabled_input_methods '${cur_en}:${ime}'" >/dev/null 2>&1 ;;
+        esac
+        cur_def=$(adb_sh 'settings get secure default_input_method' 2>/dev/null | tr -d '\r\n')
+        def_pkg=${cur_def%%/*}
+        if [ -z "$cur_def" ] || [ "$cur_def" = null ] || [ -z "$def_pkg" ] || ! pkg_installed "$def_pkg"; then
+            adb_sh "settings put secure default_input_method '$ime'" >/dev/null 2>&1
+            t "after_boot: VeraIME enabled (default)"
+        else
+            t "after_boot: VeraIME enabled (kept default $cur_def)"
+        fi
     fi
     [ -n "$AB_ONCE" ] && [ -n "$ABV" ] && echo "$ABV" > $ABM
     # sleep 自己不拿 $LOG：stop.sh 杀掉这个子 shell 以后，孤儿 sleep 还开着系统盘上的日志，系统盘卸不掉

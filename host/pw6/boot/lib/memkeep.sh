@@ -109,29 +109,90 @@ mem_keep_tick() {
 # 停止时：先解冻所有被冻结的后台应用，再删掉 cgroup（Android 的进程都已经退出，空的才删得掉）
 mem_keep_off() { bg_thaw_all; [ -d $MEMKEEP_CG ] && rmdir $MEMKEEP_CG 2>/dev/null; return 0; }
 
-# ---- 切换应用立即冻结后台（BG_FREEZE，默认开）----
-# 打开/切换前台应用时，立刻给上一个后台第三方应用发 SIGSTOP 冻结（0% CPU、停止内存增长，zram 可安心回收其闲置页）；
-# 切回该应用时第一时间发 SIGCONT 秒速恢复，保留原阅读进度。系统应用、桌面、输入法、以及用户设了 KEEPALIVE=1 的应用不冻结。
+# ---- 切换应用冻结后台（BG_FREEZE，默认关；实验开关）----
+# 2026-11-25 用户诊断（PW6 微信读书）实证：Android 7.1 没有内核/AMS 级应用冻结协同，切走 1 秒直接 SIGSTOP
+# 会打断 onStop/SQLite 提交（Activity stop timeout），60 秒内 TIME_TICK 广播必然触发 BroadcastQueue ANR 被 system_server
+# SIGKILL，导致微信读书下载卡住与缓存书籍丢失（WRBook-wal 恢复 917 帧）。因此默认关闭；手动开启时也至少等待 BG_FREEZE_DELAY（15s）。
 bg_pkg_pids() {
     awk -v p="$1" 'FNR == 1 { sub(/\0.*/, ""); if ($0 == p || index($0, p ":") == 1) { f = FILENAME; sub(/^\/proc\//, "", f); sub(/\/cmdline$/, "", f); print f } }' /proc/[0-9]*/cmdline 2>/dev/null
+}
+# 进程保护检查：任一子进程 oom_score_adj <= 200（前台 / 可见 / 可感知如前台服务 TTS、下载）即跳过冻结/停止
+bg_pids_protected() {
+    for bp_id in $1; do
+        [ -r "/proc/$bp_id/oom_score_adj" ] || continue
+        bp_adj=$(cat "/proc/$bp_id/oom_score_adj" 2>/dev/null)
+        case "$bp_adj" in ''|*[!0-9-]*) continue ;; esac
+        [ "$bp_adj" -le 200 ] 2>/dev/null && return 0
+    done
+    return 1
+}
+# 音频 / 下载活跃检查（与 idle.sh / wifi_idle_tick 保持一致：VD_AUDIO=1 或音频标志，或 dl.active 35 秒内活跃）
+bg_audio_active() {
+    [ "${VD_AUDIO:-0}" != 0 ] || [ -f "$W/audio.active" ]
+}
+bg_dl_active() {
+    [ -f "$W/dl.active" ] || return 1
+    bd_mt=$(stat -c %Y "$W/dl.active" 2>/dev/null || stat -f %m "$W/dl.active" 2>/dev/null || echo 0)
+    bd_now=$(date +%s)
+    [ $((bd_now - bd_mt)) -lt 35 ] 2>/dev/null
 }
 bg_freeze_skip() {
     case "$1" in ""|home|com.veradroid.*|android|com.android.*) return 0 ;; esac
     appprof_valid_pkg "$1" 2>/dev/null || return 0
     [ "$(mem_knob "$1" KEEPALIVE)" = 1 ] && return 0
+    case ",${IDLE_FREEZE_EXCLUDE:-}," in *",$1,"*) return 0 ;; esac
     return 1
 }
-bg_thaw() {
+memfg_lock() {
+    ml_self=$$; [ -r /proc/self/stat ] && read -r ml_self _ < /proc/self/stat 2>/dev/null || true
+    ml_i=0
+    while ! mkdir "$W/memfg.lock" 2>/dev/null; do
+        ml_lp=$(cat "$W/memfg.lock/pid" 2>/dev/null)
+        ml_stale=0
+        if [ -n "$ml_lp" ] && ! kill -0 "$ml_lp" 2>/dev/null; then
+            ml_stale=1
+        else
+            ml_mt=$(stat -c %Y "$W/memfg.lock" 2>/dev/null || stat -f %m "$W/memfg.lock" 2>/dev/null || echo 0)
+            ml_now=$(date +%s)
+            [ "$ml_mt" -gt 0 ] 2>/dev/null && [ $((ml_now - ml_mt)) -ge 15 ] 2>/dev/null && ml_stale=1
+        fi
+        if [ "$ml_stale" = 1 ]; then
+            rm -rf "$W/memfg.lock" 2>/dev/null
+            continue
+        fi
+        ml_i=$((ml_i + 1))
+        [ "$ml_i" -ge 40 ] && return 1
+        usleep 50000 2>/dev/null || sleep 1
+    done
+    echo "$ml_self" > "$W/memfg.lock/pid" 2>/dev/null
+    return 0
+}
+memfg_unlock() {
+    rm -rf "$W/memfg.lock" 2>/dev/null || true
+}
+bg_thaw_locked() {
     bt_p=$1
     [ -n "$bt_p" ] || return 0
     [ -s "$W/memfg.frozen" ] && grep -qxF "$bt_p" "$W/memfg.frozen" 2>/dev/null || return 0
     bt_pids=$(bg_pkg_pids "$bt_p")
     [ -n "$bt_pids" ] && kill -CONT $bt_pids 2>/dev/null
-    awk -v p="$bt_p" '$0 != p' "$W/memfg.frozen" > "$W/memfg.frozen.tmp" 2>/dev/null && mv -f "$W/memfg.frozen.tmp" "$W/memfg.frozen"
+    _bp=$$; [ -r /proc/self/stat ] && read -r _bp _ < /proc/self/stat 2>/dev/null || true
+    awk -v p="$bt_p" '$0 != p' "$W/memfg.frozen" > "$W/memfg.frozen.tmp.$_bp" 2>/dev/null && mv -f "$W/memfg.frozen.tmp.$_bp" "$W/memfg.frozen"
     [ -n "$bt_pids" ] && t "bgfreeze: thawed $bt_p"
     return 0
 }
-bg_thaw_all() {
+bg_thaw() {
+    [ -n "$1" ] || return 0
+    [ -s "$W/memfg.frozen" ] || return 0
+    if memfg_lock; then
+        bg_thaw_locked "$1"
+        memfg_unlock
+    else
+        bg_thaw_locked "$1"
+    fi
+    return 0
+}
+bg_thaw_all_locked() {
     [ -s "$W/memfg.frozen" ] || { rm -f "$W/memfg.frozen"; return 0; }
     while read -r bta_p; do
         [ -n "$bta_p" ] || continue
@@ -142,37 +203,76 @@ bg_thaw_all() {
     t "bgfreeze: thawed all background apps"
     return 0
 }
+bg_thaw_all() {
+    [ -s "$W/memfg.frozen" ] || { rm -f "$W/memfg.frozen"; return 0; }
+    if memfg_lock; then
+        bg_thaw_all_locked
+        memfg_unlock
+    else
+        bg_thaw_all_locked
+    fi
+    return 0
+}
 bg_freeze_sweep() {
-    if [ "${BG_FREEZE:-1}" != 1 ]; then bg_thaw_all; return 0; fi
+    if [ "${BG_FREEZE:-0}" != 1 ]; then bg_thaw_all; return 0; fi
+    bg_audio_active && return 0
+    bg_dl_active && return 0
     [ -s "$W/memfg.bg" ] || return 0
-    bf_cur=$(cat "$W/memfg.cur" 2>/dev/null)
-    while read -r bf_p bf_t; do
-        [ "$bf_p" = "$bf_cur" ] && continue
-        bg_freeze_skip "$bf_p" && continue
-        [ -s "$W/memfg.frozen" ] && grep -qxF "$bf_p" "$W/memfg.frozen" 2>/dev/null && continue
-        bf_pids=$(bg_pkg_pids "$bf_p")
-        [ -n "$bf_pids" ] || continue
-        kill -STOP $bf_pids 2>/dev/null || continue
-        echo "$bf_p" >> "$W/memfg.frozen"
-        t "bgfreeze: froze $bf_p ($(echo "$bf_pids" | wc -w | tr -d ' ') procs)"
-    done < "$W/memfg.bg"
+    memfg_lock || return 0
+    _bfp=$$; [ -r /proc/self/stat ] && read -r _bfp _ < /proc/self/stat 2>/dev/null || true
+    bf_now=$(date +%s); bf_delay=${BG_FREEZE_DELAY:-15}
+    if [ -s "$W/memfg.bg" ]; then
+        while read -r bf_p bf_t; do
+            bf_cur=$(cat "$W/memfg.cur" 2>/dev/null)
+            [ "$bf_p" = "$bf_cur" ] && continue
+            bg_freeze_skip "$bf_p" && continue
+            [ -n "$bf_t" ] && [ $((bf_now - bf_t)) -lt "$bf_delay" ] 2>/dev/null && continue
+            [ -s "$W/memfg.frozen" ] && grep -qxF "$bf_p" "$W/memfg.frozen" 2>/dev/null && continue
+            bf_pids=$(bg_pkg_pids "$bf_p")
+            [ -n "$bf_pids" ] || continue
+            bg_pids_protected "$bf_pids" && continue
+            [ "$bf_p" = "$(cat "$W/memfg.cur" 2>/dev/null)" ] && continue
+            # 先更新记录再 SIGSTOP，防止刚 STOP 未落盘时应用切回前台导致 bg_thaw 漏解冻
+            echo "$bf_p" >> "$W/memfg.frozen"
+            if ! kill -STOP $bf_pids 2>/dev/null; then
+                awk -v p="$bf_p" '$0 != p' "$W/memfg.frozen" > "$W/memfg.frozen.tmp.$_bfp" 2>/dev/null && mv -f "$W/memfg.frozen.tmp.$_bfp" "$W/memfg.frozen"
+                continue
+            fi
+            # 二次复核：若在落盘与 SIGSTOP 间隙已切回前台，立刻解冻
+            if [ "$bf_p" = "$(cat "$W/memfg.cur" 2>/dev/null)" ]; then
+                kill -CONT $bf_pids 2>/dev/null
+                bg_thaw_locked "$bf_p"
+                continue
+            fi
+            t "bgfreeze: froze $bf_p ($(echo "$bf_pids" | wc -w | tr -d ' ') procs)"
+        done < "$W/memfg.bg"
+    fi
+    memfg_unlock
     return 0
 }
 
-# 前台变了：立刻解冻新前台应用；记下上一个应用离开的时间（BG_STOP / BG_FREEZE 用），1 秒后冻结后台应用；回桌面时顺便核对 vdkeep
+# 前台变了：立刻解冻新前台应用；记下上一个应用离开的时间（BG_STOP / BG_FREEZE 用），回桌面时顺便核对 vdkeep
 mem_fg() {
-    mf_new=$1; mf_old=$(cat $W/memfg.cur 2>/dev/null)
-    bg_thaw "$mf_new"
-    [ "$mf_new" = "$mf_old" ] && return 0
-    echo "$mf_new" > $W/memfg.cur
-    wifi_idle_wake
-    if [ -n "$mf_old" ] && [ "$mf_old" != home ]; then
-        { awk -v p="$mf_old" '$1 != p' $W/memfg.bg 2>/dev/null; echo "$mf_old $(date +%s)"; } > $W/memfg.bg.tmp && mv -f $W/memfg.bg.tmp $W/memfg.bg
+    mf_new=$1; mf_locked=0; mf_changed=0; mf_sched=0
+    memfg_lock && mf_locked=1
+    mf_old=$(cat $W/memfg.cur 2>/dev/null)
+    bg_thaw_locked "$mf_new"
+    if [ "$mf_new" != "$mf_old" ]; then
+        mf_changed=1
+        echo "$mf_new" > $W/memfg.cur
+        _bp=$$; [ -r /proc/self/stat ] && read -r _bp _ < /proc/self/stat 2>/dev/null || true
+        if [ -n "$mf_old" ] && [ "$mf_old" != home ]; then
+            { awk -v p="$mf_old" '$1 != p' $W/memfg.bg 2>/dev/null; echo "$mf_old $(date +%s)"; } > "$W/memfg.bg.tmp.$_bp" && mv -f "$W/memfg.bg.tmp.$_bp" $W/memfg.bg
+        fi
+        [ -f $W/memfg.bg ] && awk -v p="$mf_new" '$1 != p' $W/memfg.bg > "$W/memfg.bg.tmp.$_bp" 2>/dev/null && mv -f "$W/memfg.bg.tmp.$_bp" $W/memfg.bg
+        [ "${BG_FREEZE:-0}" = 1 ] && [ -s "$W/pid" ] && [ -s "$W/memfg.bg" ] && mf_sched=1
     fi
-    [ -f $W/memfg.bg ] && awk -v p="$mf_new" '$1 != p' $W/memfg.bg > $W/memfg.bg.tmp 2>/dev/null && mv -f $W/memfg.bg.tmp $W/memfg.bg
+    [ "$mf_locked" = 1 ] && memfg_unlock
+    [ "$mf_changed" = 1 ] || return 0
+    wifi_idle_wake
     [ "$mf_new" = home ] && mem_keep_tick
-    if [ "${BG_FREEZE:-1}" = 1 ] && [ -s "$W/pid" ] && [ -s "$W/memfg.bg" ]; then
-        ( sleep 1; bg_freeze_sweep ) >/dev/null 2>&1 &
+    if [ "$mf_sched" = 1 ]; then
+        ( sleep "${BG_FREEZE_DELAY:-15}"; bg_freeze_sweep ) </dev/null >/dev/null 2>&1 &
     fi
     return 0
 }
@@ -196,6 +296,8 @@ mem_knobs() {
 # 没设的看全局 BG_STOP_MIN + BG_STOP_APPS。KEEPALIVE=1 的永远不停。
 bg_stop_tick() {
     [ -s $W/memfg.bg ] || return 0
+    bg_audio_active && return 0
+    bg_dl_active && return 0
     bs_now=$(date +%s); bs_cur=$(cat $W/memfg.cur 2>/dev/null)
     while read -r bs_p bs_t; do
         case "$bs_p" in home|com.veradroid.home|com.veradroid.ime|"$bs_cur") continue ;; esac
@@ -207,12 +309,15 @@ bg_stop_tick() {
         fi
         [ "$bs_m" -gt 0 ] 2>/dev/null || continue
         [ $((bs_now - bs_t)) -ge $((bs_m * 60)) ] 2>/dev/null || continue
+        bs_pids=$(bg_pkg_pids "$bs_p")
+        [ -n "$bs_pids" ] && bg_pids_protected "$bs_pids" && continue
         bg_thaw "$bs_p"
-        adb_sh "am force-stop $bs_p" >/dev/null 2>&1 && t "bgstop: $bs_p stopped ($(( (bs_now - bs_t) / 60 )) min in background)"
+        if type adb_sh_t >/dev/null 2>&1; then adb_sh_t 15 "am force-stop $bs_p"; else adb_sh "am force-stop $bs_p"; fi >/dev/null 2>&1 && t "bgstop: $bs_p stopped ($(( (bs_now - bs_t) / 60 )) min in background)"
         echo "$bs_p" >> $W/memfg.stopped
     done < $W/memfg.bg
     if [ -s $W/memfg.stopped ]; then
-        awk 'NR == FNR { s[$1] = 1; next } !($1 in s)' $W/memfg.stopped $W/memfg.bg > $W/memfg.bg.tmp 2>/dev/null; mv -f $W/memfg.bg.tmp $W/memfg.bg
+        _bp=$$; [ -r /proc/self/stat ] && read -r _bp _ < /proc/self/stat 2>/dev/null || true
+        awk 'NR == FNR { s[$1] = 1; next } !($1 in s)' $W/memfg.stopped $W/memfg.bg > "$W/memfg.bg.tmp.$_bp" 2>/dev/null && mv -f "$W/memfg.bg.tmp.$_bp" $W/memfg.bg
         rm -f $W/memfg.stopped
     fi
     return 0
@@ -275,13 +380,18 @@ wifi_idle_tick() {
     type wifi_dev >/dev/null 2>&1 && type wifi_set >/dev/null 2>&1 || return 0
     [ -f $W/wifi.idleoff ] && return 0
     [ -f $W/fwd.id ] && { rm -f $W/wifi.idle; return 0; }       # 传书网页开着
+    [ -f $W/dl.active ] && [ $(( $(date +%s) - $(stat -c %Y $W/dl.active 2>/dev/null || echo 0) )) -lt 35 ] && { rm -f $W/wifi.idle; return 0; }   # 下载进行中不关 Wi-Fi
     wi_d=$(wifi_dev); wi_now=$(cut -d. -f1 /proc/uptime)
     [ -d /sys/class/net/$wi_d ] || return 0
     wi_b=$(( $(cat /sys/class/net/$wi_d/statistics/rx_bytes 2>/dev/null || echo 0) + $(cat /sys/class/net/$wi_d/statistics/tx_bytes 2>/dev/null || echo 0) ))
     set -- $(cat $W/wifi.idle 2>/dev/null)        # 上次采样时间 字节数 开始空闲的时间
     if [ -z "$1" ]; then echo "$wi_now $wi_b $wi_now" > $W/wifi.idle; return 0; fi
     wi_dt=$((wi_now - $1)); wi_since=$3
-    [ $wi_dt -gt 0 ] && [ $(( (wi_b - $2) / wi_dt )) -ge ${WIFI_IDLE_BPS:-512} ] && wi_since=$wi_now
+    if [ "$wi_b" -lt "$2" ] 2>/dev/null; then
+        wi_since=$wi_now
+    elif [ $wi_dt -gt 0 ] && [ $(( (wi_b - $2) / wi_dt )) -ge ${WIFI_IDLE_BPS:-512} ]; then
+        wi_since=$wi_now
+    fi
     echo "$wi_now $wi_b $wi_since" > $W/wifi.idle
     if [ $((wi_now - wi_since)) -ge $((WIFI_IDLE_OFF_MIN * 60)) ]; then
         wifi_set 0 && { touch $W/wifi.idleoff; rm -f $W/wifi.idle; t "wifi: idle ${WIFI_IDLE_OFF_MIN} min, turned off (on again at the next app switch)"; }

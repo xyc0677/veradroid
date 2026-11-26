@@ -92,19 +92,32 @@ SAVER_MAXALL=100663296
 saver_cmd() {
     case "$1" in
     list)
-        rm -rf $X/saver $X/saver.tmp; mkdir -p $X/saver.tmp || return 0
-        n=0; tot=0; : > $X/saver.tmp/.skipped
+        rm -rf $X/saver $X/saver.tmp $X/ctl/saver.listed; mkdir -p $X/saver.tmp || return 0
+        mem_kb=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null | head -1)
+        maxall=$SAVER_MAXALL
+        [ -n "$mem_kb" ] && [ "$mem_kb" -le 600000 ] && maxall=25165824
+        n=0; tot=0; : > $X/saver.tmp/.skipped; : > $X/saver.tmp/.cached
         for f in "$VD"/screensaver/*; do
             [ -f "$f" ] && [ ! -L "$f" ] || continue
             saver_is_img "$f" || continue
             case "${f##*/}" in default.png|default.PNG) continue ;; esac
             sz=$(wc -c < "$f" | tr -d ' ')
-            if [ "$sz" -gt $SAVER_MAX1 ] || [ $((tot + sz)) -gt $SAVER_MAXALL ] || [ $n -ge 60 ]; then
-                printf '%s\t%s\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
+            if [ $n -ge 60 ]; then
+                printf '%s\t%s\tcount\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
+            fi
+            if [ "$sz" -gt $SAVER_MAX1 ]; then
+                printf '%s\t%s\tsize\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
+            fi
+            if saver_cached "$f"; then
+                printf '%s\n' "${f##*/}" >> $X/saver.tmp/.cached
+                n=$((n + 1)); continue
+            fi
+            if [ $((tot + sz)) -gt $maxall ]; then
+                printf '%s\t%s\ttotal\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
             fi
             cp -p "$f" $X/saver.tmp/ 2>/dev/null && { n=$((n + 1)); tot=$((tot + sz)); }
         done
-        for f in /usr/share/blanket/screensaver/bg_ss*.png; do [ -f "$f" ] && { cp "$f" $X/saver.tmp/.kindle-preview.png; break; }; done
+        for f in /usr/share/blanket/screensaver/bg_ss*.png; do [ -f "$f" ] && { cp "$f" $X/saver.tmp/.kindle-preview.png 2>/dev/null; break; }; done
         pw=; ph=
         if [ -x "$FBINK" ]; then
             fe=$("$FBINK" -e 2>/dev/null | tr ';' '\n')
@@ -120,8 +133,30 @@ saver_cmd() {
             [ $c -gt 0 ] && printf '%s\t%s\n' "${d#/mnt/us/}" "$c" >> $X/saver.tmp/.elsewhere
         done
         chmod 755 $X/saver.tmp; chmod 644 $X/saver.tmp/* $X/saver.tmp/.[a-z]* 2>/dev/null
-        mv $X/saver.tmp $X/saver; : > $X/ctl/saver.listed
+        mv $X/saver.tmp $X/saver; : > $X/ctl/saver.listed && chmod 644 $X/ctl/saver.listed 2>/dev/null
         t "screensaver: exported $n image(s) from veradroid/screensaver for the picker$([ -s $X/saver/.skipped ] && echo ", $(wc -l < $X/saver/.skipped | tr -d ' ') too big")" ;;
     done) rm -rf $X/saver $X/saver.tmp $X/ctl/saver.listed ;;
     esac
+}
+
+# Android 的 内部存储/Screensaver（/sdcard/Screensaver）：用户放屏保图片的另一个地方。开机就建好，里面放一份说明
+SAVER_NOTE_SD="把屏保图片（jpg / png / webp / bmp / gif，大小写都行）放在这个文件夹里。
+Kindle 休眠时，VeraDroid 显示这里的图片。在 设置 → 屏保 里可以选“轮换全部图片”或只用其中一张。
+竖图、和屏幕差不多大最好。webp 图要先打开一次 设置 → 屏保（桌面会把它转好）；手机拍的 HEIC 照片请先转成 JPG。
+
+也可以用 USB 连电脑，放进 Kindle 盘的 veradroid/screensaver/ 文件夹；传书网页的“文件”里也能上传到这里。"
+saver_dir_fix() {
+    sdd=$SYS/data/media/0
+    [ -d "$sdd" ] || return 0
+    [ -L "$sdd/Screensaver" ] && return 0
+    { [ -e "$sdd/Screensaver" ] && [ ! -d "$sdd/Screensaver" ]; } && return 0
+    mkdir -p "$sdd/Screensaver" 2>/dev/null || return 0
+    chown 1023:1023 "$sdd/Screensaver" 2>/dev/null || true; chmod 777 "$sdd/Screensaver" 2>/dev/null || true
+    sdn="$sdd/Screensaver/把屏保图片放这里.txt"
+    [ -L "$sdn" ] && rm -f "$sdn" 2>/dev/null
+    [ -L "$sdn" ] && return 0
+    if [ "$(cat "$sdn" 2>/dev/null)" != "$SAVER_NOTE_SD" ]; then
+        { printf '%s\n' "$SAVER_NOTE_SD" > "$sdn" && chmod 644 "$sdn" && chown 1023:1023 "$sdn"; } 2>/dev/null || true
+    fi
+    return 0
 }

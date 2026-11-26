@@ -13,13 +13,34 @@ LOG=/mnt/us/veradroid/logs/install.log; mkdir -p /mnt/us/veradroid/logs 2>/dev/n
 echo "==== $(date) update entry tapped" >> "$LOG" 2>/dev/null
 eips 1 2 "VeraDroid: checking for updates...                " >/dev/null 2>&1
 B=/tmp/vd-bootstrap.sh
-if curl -fsSL --retry 3 --connect-timeout 20 "$BASE/bootstrap.sh?t=$(date +%s)" -o "$B"; then
+BS_URL="$BASE/bootstrap.sh"
+BS_ALT="https://dl.wenjin.jp/bootstrap.sh"
+case "$(uname -r)" in
+    3.*|4.1.*)
+        BS_URL="$BASE/static/bootstrap-legacy.sh"
+        BS_ALT="https://dl.wenjin.jp/static/bootstrap-legacy.sh"
+        export VD_EXPERIMENTAL=1
+        ;;
+    4.*)
+        export VD_EXPERIMENTAL=1
+        ;;
+esac
+ok=0; rc=1
+for u in "$BS_URL?t=$(date +%s)" "$BS_ALT?t=$(date +%s)"; do
+    curl -fsSL --retry 2 --connect-timeout 20 --max-time 120 "$u" -o "$B" && [ -s "$B" ] && sh -n "$B" 2>/dev/null
+    rc=$?
+    if [ "$rc" = 0 ]; then
+        ok=1; break
+    fi
+    rm -f "$B"
+done
+if [ "$ok" = 1 ]; then
     sh "$B"; rc=$?; rm -f "$B"; echo "update: bootstrap rc=$rc" >> "$LOG" 2>/dev/null
     [ "$rc" = 0 ] && eips 1 2 "VeraDroid: update finished                        " >/dev/null 2>&1 \
         || { eips 1 2 "VeraDroid: update failed (code $rc)               " >/dev/null 2>&1; eips 1 4 "log: veradroid/logs/install.log" >/dev/null 2>&1; sleep 10; }
 else
-    rc=$?; rm -f "$B"; echo "update: download of bootstrap.sh failed (curl $rc)" >> "$LOG" 2>/dev/null
-    eips 1 2 "VeraDroid: cannot reach the server (curl $rc)     " >/dev/null 2>&1
+    rm -f "$B"; echo "update: download of bootstrap.sh failed or truncated (rc $rc)" >> "$LOG" 2>/dev/null
+    eips 1 2 "VeraDroid: cannot reach the server (rc $rc)       " >/dev/null 2>&1
     eips 1 4 "Check Wi-Fi, or tap VeraDroid.sh for details." >/dev/null 2>&1; sleep 10
 fi
 exit 0

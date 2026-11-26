@@ -6,7 +6,12 @@ set -e
 VDD=${1:?veradroid dir}; P=${2:?patches dir}; L=$VDD/boot/lib
 ts=$(date +%Y%m%d-%H%M%S)
 for f in input.sh container.sh cmd.sh; do cp -p $L/$f $L/$f.bak-bt-$ts; done
-cp $P/bt.sh $L/bt.sh; cp $P/bin/vdbtkeys $VDD/bin/vdbtkeys; chmod 755 $VDD/bin/vdbtkeys
+if [ -f "$L/bt.sh" ] && grep -q 'bt_status_lines' "$L/bt.sh"; then
+    echo "keeping existing native $L/bt.sh"
+else
+    cp $P/bt.sh $L/bt.sh
+fi
+cp $P/bin/vdbtkeys $VDD/bin/vdbtkeys; chmod 755 $VDD/bin/vdbtkeys
 grep -q 'lib/bt.sh' $L/input.sh || sed -i 's|^input_sysname() {|# 蓝牙输入桥（可选，见 bt.sh）\n[ -f "$VD/boot/lib/bt.sh" ] \&\& . "$VD/boot/lib/bt.sh"\ninput_sysname() {|' $L/input.sh
 grep -q 'bt_start' $L/input.sh || {
     sed -i 's|^\(    t "input: touch $REAL -> $KFB_TOUCH, keys $KFB_KEYS_VIRT"\)$|\1\n    type bt_start >/dev/null 2>\&1 \&\& bt_start|' $L/input.sh

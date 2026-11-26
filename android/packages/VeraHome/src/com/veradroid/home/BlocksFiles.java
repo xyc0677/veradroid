@@ -38,7 +38,7 @@ final class BlocksFiles {
 
     private final BlocksHome h;
     private final HomeActivity a;
-    private int seg, page, perPage;
+    private int seg, page, perPage, totalPages = 1;
     /** 排序：0 名称，1 时间（新的在前），2 大小（大的在前）。搜索：只留名字里有这段字的。多选：选中的文件路径。 */
     private int sortBy;
     private String query = "";
@@ -54,15 +54,18 @@ final class BlocksFiles {
     private final Map<String, File[]> dirCache = new HashMap<String, File[]>();
     private static List<File> images;
     private static boolean findingImages;
+    private int rev;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     BlocksFiles(BlocksHome home) { h = home; a = home.a; }
 
     private int dp(int v) { return Ui.dp(a, v); }
 
-    String sig() { return String.valueOf(BlocksHome.storageUsed()); }
+    String sig() {
+        return BlocksHome.storageUsed() + "|" + Lib.version() + "|" + Stats.bookmarkCount(a) + "|" + a.libOn() + "|" + rev;
+    }
 
-    void showSeg(int s) { seg = s; page = 0; if (segBar != null) segBar.select(s); render(); }
+    void showSeg(int s) { if (s != seg) endSelectQuiet(); seg = s; page = 0; if (segBar != null) segBar.select(s); render(); }
 
     /** 点“文件”标签时已经在文件页：回到书籍的最上层。 */
     boolean toRoot() {
@@ -97,7 +100,7 @@ final class BlocksFiles {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(16), 0, dp(16), dp(6));
         segBar = new Blocks.SegBar(a, SEGS, seg, new Blocks.SegBar.Listener() {
-            @Override public void onPick(int i) { seg = i; page = 0; render(); a.changed(); }
+            @Override public void onPick(int i) { if (i != seg) endSelectQuiet(); seg = i; page = 0; render(); a.changed(); }
         });
         box.addView(segBar, Blocks.match());
         // 路径条：左边路径，右边条数
@@ -153,11 +156,12 @@ final class BlocksFiles {
     private int rowH() { return dp(58); }
 
     private void turn(int dir) {
-        int before = page;
-        if (page + dir >= 0) Blocks.swipe(a, dir > 0 ? Blocks.DIR_UP : Blocks.DIR_DOWN, Blocks.KIND_LIST);
-        page = Math.max(0, page + dir);
+        int np = Math.max(0, Math.min(totalPages - 1, page + dir));
+        if (np == page) return;
+        Blocks.swipe(a, dir > 0 ? Blocks.DIR_UP : Blocks.DIR_DOWN, Blocks.KIND_LIST);
+        page = np;
         render();
-        if (page != before) a.changed();
+        a.changed();
     }
 
     /** 一行：左边类型（文件夹图标 / 格式角标），中间名字，右边说明；整行可点。 */
@@ -173,6 +177,7 @@ final class BlocksFiles {
             if (actionBar.getVisibility() != av) actionBar.setVisibility(av);
         }
         int pages = Math.max(1, (items.size() + perPage - 1) / perPage);
+        totalPages = pages;
         if (page >= pages) page = pages - 1;
         list.removeAllViews();
         int from = page * perPage, to = Math.min(items.size(), from + perPage);
@@ -191,8 +196,14 @@ final class BlocksFiles {
 
     private boolean loading() { return (seg == 2 && findingImages) || (seg == 1 && !ROOT.equals(path) && path.startsWith(Transfer.KINDLE) && !dirCache.containsKey(path)); }
 
+    private boolean klibSkippedHere() {
+        return seg == 1 && path != null && path.startsWith(Transfer.KINDLE)
+            && "1".equals(HostLink.kv(HostLink.KFB + "ctl/status").get("klibskip"));
+    }
+
     private String empty() {
         if (loading()) return seg == 2 ? "正在查找图片" : "正在读取文件夹";
+        if (klibSkippedHere()) return "实验机型默认未挂载 Kindle 原机书库";
         switch (seg) {
         case 0: return a.libOn() ? "书库里还没有书" : "书库已关闭";
         case 2: return "没有找到图片";
@@ -203,8 +214,11 @@ final class BlocksFiles {
 
     private String emptyHint() {
         if (loading()) return "Kindle 书库在另一个文件系统上，第一次要读一会儿";
+        if (klibSkippedHere()) return "可在 设置／系统与性能 中选择「只读挂载 Kindle 书库」并重启 Android";
         switch (seg) {
-        case 0: return a.libOn() ? "用传书网页传进来，或者放进 Books 文件夹" : "设置／应用与桌面／书库";
+        case 0: return a.libOn() ? ("1".equals(HostLink.kv(HostLink.KFB + "ctl/status").get("klibskip"))
+            ? "实验机型默认未挂载 Kindle 书库，可用传书导入或在「设置／系统与性能」开启只读挂载"
+            : "用传书网页传进来，或者放进 Books 文件夹") : "设置／应用与桌面／书库";
         case 2: return "放进 Pictures、Download 或 VeraDroid/wallpaper";
         case 3: return "阅读时点工具栏“系统／加书签”";
         default: return "";
@@ -275,7 +289,7 @@ final class BlocksFiles {
 
     private void menu() {
         final String[] items = { "搜索…", query.length() > 0 ? "清除搜索" : null, "排序：" + new String[] { "名称", "时间", "大小" }[sortBy] + "（点一下换）",
-            selecting ? "结束多选" : "多选（批量移动 / 删除）", "更多…" };
+            seg == 3 ? null : (selecting ? "结束多选" : "多选（批量移动 / 删除）"), "更多…" };
         final List<String> shown = new ArrayList<String>();
         for (String x : items) if (x != null) shown.add(x);
         new VeraDialog.Builder(a).items(shown.toArray(new String[0]), new VeraDialog.OnPick() { @Override public void onPick(int w) {
@@ -292,7 +306,7 @@ final class BlocksFiles {
     private void endSelect() { selecting = false; picked.clear(); render(); a.changed(); }
 
     private void searchDialog() {
-        final android.widget.EditText in = new android.widget.EditText(a);
+        final android.widget.EditText in = Ui.editText(a);
         in.setSingleLine(true);
         in.setTextSize(20);
         in.setTypeface(Fonts.typeface(a));
@@ -319,8 +333,34 @@ final class BlocksFiles {
         }).negative("取消", null).show();
     }
 
+    private static boolean inKindle(File f) {
+        if (f == null) return false;
+        String p = f.getAbsolutePath();
+        return p.equals(Transfer.KINDLE) || p.startsWith(Transfer.KINDLE + "/");
+    }
+
+    /** 统一拦截受保护路径、符号链接与只读目录（宿主脚本/SSH/KindleFonts 等）。 */
+    private static String blockedWhy(File f) {
+        if (f == null) return "文件不存在";
+        if (WebAdmin.isLink(f)) return "不能操作符号链接";
+        if (WebAdmin.isProtected(f.getName())) return "受保护的系统文件，不能修改或删除";
+        File parent = f.getParentFile();
+        if (parent != null) {
+            if (inKindle(f)) {
+                String ro = WebAdmin.readOnlyWhy("kindle", parent);
+                if (ro != null) return ro;
+            } else if (parent.getPath().equals("/data/media/0") || parent.getPath().startsWith("/data/media/0/")) {
+                String ro = WebAdmin.readOnlyWhy("sdcard", parent);
+                if (ro != null) return ro;
+            }
+        }
+        return null;
+    }
+
     private void renameDialog(final File f) {
-        final android.widget.EditText in = new android.widget.EditText(a);
+        String why = blockedWhy(f);
+        if (why != null) { VeraToast.show(a, why); return; }
+        final android.widget.EditText in = Ui.editText(a);
         in.setSingleLine(true);
         in.setTextSize(18);
         in.setTypeface(Fonts.typeface(a));
@@ -328,12 +368,17 @@ final class BlocksFiles {
         in.setPadding(dp(12), dp(10), dp(12), dp(10));
         in.setText(f.getName());
         new VeraDialog.Builder(a).title("重命名").view(in).negative("取消", null).positive("改名", new Runnable() { @Override public void run() {
-            String n = in.getText().toString().trim();
-            if (n.length() == 0 || n.contains("/") || n.equals(f.getName())) return;
-            File to = new File(f.getParentFile(), n);
+            String raw = in.getText().toString().trim();
+            File parent = f.getParentFile();
+            if (parent == null || raw.length() == 0 || raw.equals(f.getName())) return;
+            String n = WebAdmin.checkName(raw);
+            if (n == null) { VeraToast.show(a, "新名字不能用（不能以点开头、含非法字符或为脚本/受保护文件名）"); return; }
+            File to = new File(parent, n);
             if (to.exists()) { VeraToast.show(a, "已经有同名的文件"); return; }
+            String oldPath = f.getAbsolutePath();
             if (!f.renameTo(to)) { VeraToast.show(a, "改不了名（权限或只读）"); return; }
-            changedOnDisk(f.getParentFile());
+            if (Lib.isBook(f.getName()) || Lib.isBook(n)) migrateReaderPrefs(a, oldPath, to.getAbsolutePath());
+            changedOnDisk(parent);
         } }).show();
     }
 
@@ -344,24 +389,54 @@ final class BlocksFiles {
         String[] names = new String[r.length];
         for (int i = 0; i < r.length; i++) names[i] = r[i][0];
         new VeraDialog.Builder(a).title("把 " + paths.size() + " 个文件移动到").items(names, new VeraDialog.OnPick() { @Override public void onPick(final int w) {
+            final File dir = new File(r[w][1]);
+            if (Transfer.KINDLE.equals(r[w][1]) && ("1".equals(HostLink.kv(HostLink.CTL + "status").get("klibskip")) || WebAdmin.readOnlyWhy("kindle", dir) != null)) {
+                VeraToast.show(a, "Kindle 书库为只读保护（或未挂载），不能直接移入，请用 USB 或 Kindle 同步");
+                return;
+            }
             new VeraDialog.Builder(a).title("确认移动").message(paths.size() + " 个文件移动到“" + r[w][0] + "”。").negative("取消", null)
                 .positive("移动", new Runnable() { @Override public void run() {
                     final List<String> copyPaths = new ArrayList<String>(paths);
-                    final File dir = new File(r[w][1]);
                     VeraToast.show(a, "正在移动 " + copyPaths.size() + " 个文件…");
                     endSelectQuiet();
                     new Thread(new Runnable() { @Override public void run() {
-                        int ok = 0;
+                        int ok = 0, skipped = 0, blocked = 0;
                         dir.mkdirs();
+                        boolean toKindle = inKindle(dir);
                         for (String p : copyPaths) {
-                            File f = new File(p), to = new File(dir, f.getName());
-                            if (to.exists()) continue;
-                            if (f.renameTo(to) || (copy(f, to) && f.delete())) ok++;
+                            File f = new File(p);
+                            if (!f.isFile() || blockedWhy(f) != null || (toKindle && (WebAdmin.checkName(f.getName()) == null || Transfer.isScript(f.getName())))) {
+                                blocked++;
+                                continue;
+                            }
+                            File to = new File(dir, f.getName());
+                            if (to.exists()) { skipped++; continue; }
+                            boolean movedOk = false;
+                            File finalTo = to;
+                            if (f.renameTo(to)) {
+                                movedOk = true;
+                            } else if (copy(f, to)) {
+                                if (f.delete()) movedOk = true;
+                                else to.delete();
+                            } else if (Transfer.isKindleRoot(dir)) {
+                                String putName = Transfer.libputFile(a, f, f.getName());
+                                if (putName != null) {
+                                    finalTo = new File(dir, putName);
+                                    if (f.delete()) movedOk = true;
+                                }
+                            }
+                            if (movedOk) {
+                                if (Lib.isBook(f.getName())) migrateReaderPrefs(a, f.getAbsolutePath(), finalTo.getAbsolutePath());
+                                ok++;
+                            }
                         }
-                        final int moved = ok;
+                        final int moved = ok, skipCnt = skipped, blkCnt = blocked;
                         a.runOnUiThread(new Runnable() { @Override public void run() {
                             if (a.isFinishing()) return;
-                            VeraToast.show(a, "移动了 " + moved + " / " + copyPaths.size() + " 个");
+                            String msg = "移动了 " + moved + " / " + copyPaths.size() + " 个";
+                            if (skipCnt > 0) msg += "（" + skipCnt + " 个已存在跳过）";
+                            if (blkCnt > 0) msg += "（" + blkCnt + " 个受保护跳过）";
+                            VeraToast.show(a, msg);
                             changedOnDisk(dir);
                         } });
                     } }, "vd-file-move").start();
@@ -371,18 +446,39 @@ final class BlocksFiles {
 
     private void deleteDialog(final List<String> paths) {
         if (paths.isEmpty()) { VeraToast.show(a, "还没选文件"); return; }
+        if (paths.size() == 1) {
+            String why = blockedWhy(new File(paths.get(0)));
+            if (why != null) { VeraToast.show(a, why); return; }
+        }
         String first = new File(paths.get(0)).getName();
         new VeraDialog.Builder(a).title("删除 " + paths.size() + " 个文件？")
             .message((paths.size() == 1 ? "《" + first + "》" : "包括《" + first + "》") + "会从设备上删掉，不能恢复。").negative("取消", null)
             .positive("删除", new Runnable() { @Override public void run() {
-                int ok = 0;
-                for (String p : paths) {
-                    Lib.Book b = known(p);
-                    if (b != null ? Lib.delete(a, b) : new File(p).delete()) ok++;
-                }
-                VeraToast.show(a, "删除了 " + ok + " / " + paths.size() + " 个");
+                final List<String> delPaths = new ArrayList<String>(paths);
                 endSelectQuiet();
-                changedOnDisk(null);
+                if (delPaths.size() > 1) VeraToast.show(a, "正在删除 " + delPaths.size() + " 个文件…");
+                new Thread(new Runnable() { @Override public void run() {
+                    int ok = 0, blocked = 0;
+                    final List<String> deletedPaths = new ArrayList<String>();
+                    for (String p : delPaths) {
+                        File f = new File(p);
+                        if (blockedWhy(f) != null) { blocked++; continue; }
+                        if (f.delete()) {
+                            ok++;
+                            deletedPaths.add(p);
+                            Lib.purgeReaderState(a, p);
+                        }
+                    }
+                    final int deleted = ok, blkCnt = blocked;
+                    a.runOnUiThread(new Runnable() { @Override public void run() {
+                        for (String p : deletedPaths) Lib.removeFromIndex(a, p);
+                        if (a.isFinishing()) return;
+                        String msg = "删除了 " + deleted + " / " + delPaths.size() + " 个";
+                        if (blkCnt > 0) msg += "（" + blkCnt + " 个受保护跳过）";
+                        VeraToast.show(a, msg);
+                        changedOnDisk(null);
+                    } });
+                } }, "vd-file-delete").start();
             } }).show();
     }
 
@@ -392,9 +488,35 @@ final class BlocksFiles {
     private void changedOnDisk(File dir) {
         dirCache.clear();
         images = null;
+        rev++;
         Lib.scan(a, 0);
         render();
         a.changed();
+    }
+
+    /** 书籍改名或移动后，把 reader 偏好里以旧路径为后缀的进度与书签迁到新路径。 */
+    static void migrateReaderPrefs(android.content.Context c, String oldPath, String newPath) {
+        if (oldPath == null || newPath == null || oldPath.equals(newPath)) return;
+        try {
+            android.content.SharedPreferences p = Store.prefs(c, "reader");
+            Map<String, ?> all = p.getAll();
+            android.content.SharedPreferences.Editor e = null;
+            for (Map.Entry<String, ?> entry : all.entrySet()) {
+                String k = entry.getKey();
+                int colon = k.indexOf(':');
+                if (colon <= 0 || !k.substring(colon + 1).equals(oldPath)) continue;
+                String nk = k.substring(0, colon + 1) + newPath;
+                Object v = entry.getValue();
+                if (e == null) e = p.edit();
+                if (v instanceof String) e.putString(nk, (String) v);
+                else if (v instanceof Integer) e.putInt(nk, (Integer) v);
+                else if (v instanceof Long) e.putLong(nk, (Long) v);
+                else if (v instanceof Boolean) e.putBoolean(nk, (Boolean) v);
+                else if (v instanceof Float) e.putFloat(nk, (Float) v);
+                e.remove(k);
+            }
+            if (e != null) e.apply();
+        } catch (Throwable ignored) { }
     }
 
     private static boolean copy(File from, File to) {
@@ -406,7 +528,10 @@ final class BlocksFiles {
             byte[] b = new byte[65536]; int n;
             while ((n = in.read(b)) > 0) out.write(b, 0, n);
             out.flush();
-            return to.length() == from.length();
+            out.close(); out = null;
+            if (to.length() == from.length()) return true;
+            to.delete();
+            return false;
         } catch (Throwable t) { to.delete(); return false; }
         finally {
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
@@ -449,6 +574,7 @@ final class BlocksFiles {
                 if (!e.getKey().startsWith("bm:") || !(e.getValue() instanceof String)) continue;
                 final String bp = e.getKey().substring(3);
                 final Lib.Book b = book(bp);
+                if (!b.file.isFile()) continue;
                 int k = 0;
                 for (final String mark : ((String) e.getValue()).split(";")) {
                     if (mark.length() == 0) continue;
@@ -546,7 +672,10 @@ final class BlocksFiles {
         new Thread(new Runnable() { @Override public void run() {
             Ui.lowPriority();
             final File[] fs = sorted(new File(p).listFiles());
-            ui.post(new Runnable() { @Override public void run() { dirCache.put(p, fs); if (p.equals(path) && seg == 1) { render(); a.changed(); } } });
+            ui.post(new Runnable() { @Override public void run() {
+                dirCache.put(p, fs);
+                if (!a.isFinishing() && p.equals(path) && seg == 1) { render(); a.changed(); }
+            } });
         } }, "files-list").start();
         return null;
     }
@@ -564,14 +693,19 @@ final class BlocksFiles {
         new Thread(new Runnable() { @Override public void run() {
             Ui.lowPriority();
             final List<File> l = Theme.findImages();
-            ui.post(new Runnable() { @Override public void run() { images = l; findingImages = false; if (seg == 2) { render(); a.changed(); } } });
+            ui.post(new Runnable() { @Override public void run() {
+                images = l; findingImages = false;
+                if (!a.isFinishing() && seg == 2) { render(); a.changed(); }
+            } });
         } }, "files-images").start();
     }
 
     /** 新的书 / 图片进来以后，下次进文件页重新列。 */
-    void forget() { dirCache.clear(); images = null; }
+    void forget() { dirCache.clear(); images = null; rev++; }
 
     private void viewImage(final File f) {
+        final Bitmap bm = Theme.decodeAtLeast(f, a.getResources().getDisplayMetrics().widthPixels);
+        if (bm == null) { VeraToast.show(a, "无法打开这张图片"); return; }
         final Dialog d = new Dialog(a, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
         LinearLayout box = new LinearLayout(a);
@@ -579,7 +713,6 @@ final class BlocksFiles {
         box.setBackgroundColor(Color.WHITE);
         ImageView iv = new ImageView(a);
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        final Bitmap bm = Theme.decodeAtLeast(f, a.getResources().getDisplayMetrics().widthPixels);
         iv.setImageBitmap(bm);
         box.addView(iv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         LinearLayout bar = new LinearLayout(a);
@@ -588,7 +721,10 @@ final class BlocksFiles {
         bar.addView(name, Blocks.weight(1));
         bar.addView(Blocks.button(a, "设为壁纸", false, new View.OnClickListener() { @Override public void onClick(View v) {
             d.dismiss();
-            Theme.setWallpaper(a, f, new Theme.Done() { @Override public void done(String err) { VeraToast.show(a, err == null ? "已设为壁纸（主页 / 首页标签显示）" : err); } });
+            Theme.setWallpaper(a, f, new Theme.Done() { @Override public void done(String err) {
+                if (err == null) a.onWallpaperChanged(h.current());
+                VeraToast.show(a, err == null ? "已设为壁纸（主页 / 首页标签显示）" : err);
+            } });
         } }));
         View sp = new View(a);
         bar.addView(sp, Blocks.lp(dp(8), 1));

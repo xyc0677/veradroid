@@ -11,7 +11,7 @@ import os, re, subprocess, sys, tempfile, time
 W, H = 1272, 1696
 PAGE = W * H * 4
 REF = re.compile(r'^\[(\d+)\] epd: (\d+)x(\d+)\+(\d+)\+(\d+) mode=(\d+) wfm=(\d+) full=(\d+) flash=(\d+)')
-WFM_DU, WFM_GC16, WFM_A2, WFM_REAGL = 1, 2, 4, 6
+WFM_DU, WFM_GC16, WFM_A2, WFM_GL16, WFM_REAGL = 1, 2, 4, 5, 6
 fails = 0
 
 
@@ -231,13 +231,50 @@ def main():
         for y in range(400, 720):
             f.seek(y * W * 4 + 400 * 4); f.write(bytes([128, 128, 128, 255]) * 320)
     m = b.mark(); b.send('P 0 400 720'); time.sleep(1.0)
-    _, txt = b.refreshes(m); s = stub(txt)
+    r, txt = b.refreshes(m); s = stub(txt)
     check(s and all(d != 0 for _, d, _ in s), f'a picture keeps the hardware dithering ({s})')
+    check(r and all(x['wfm'] == WFM_GL16 and x['flash'] == 0 for x in r), f'ui_mode=1 non-page-turn uses non-flashing GL16, never GC16 ({[(x["wfm"], x["flash"]) for x in r]})')
+    m = b.mark(); b.page(small=True); time.sleep(0.8)
+    r, _ = b.refreshes(m)
+    check(r and all(x['wfm'] == WFM_GL16 and x['flash'] == 0 for x in r), f'ui_mode=1 small update (menu/book-open) uses GL16 without black flash ({[(x["wfm"], x["flash"]) for x in r]})')
     b.send('SET 1.0 0 0 0 0 40', 'CLEAN 300'); time.sleep(0.8)   # 均衡: small changes DU, CLEAN pass after them
     m = b.mark(); b.page(small=True); time.sleep(1.2)
     r, txt = b.refreshes(m); s = stub(txt)
     cl = [x for x in s if x[0] == 5]
     check(r and r[0]['wfm'] == 1 and cl and all(f == 1 for _, _, f in cl), f'CLEAN after a DU change is GL16 FULL ({s})')
+    b.close()
+
+    print('== night/tinted-paper no-flash & ui_mode=2 single-box page-turn merge')
+    b = Bridge(binary)
+    # Night mode (#303030 bg + light text) and tinted eye-care beige (#CDC3AE bg + dark text):
+    # must NOT be flagged as giant photos (no QPASS double-flash, no hardware dithering on text)
+    b.send('SET 1.0 3 0 0 2 40', 'QPASS 300'); time.sleep(0.6)    # ui_mode=2 (fastest), dither on, QPASS on
+    for label, bg, fg in [('night mode #303030', 48, 210), ('tinted beige #CDC3AE', 200, 20)]:
+        with open(b.shm, 'r+b') as f:
+            for y in range(H):
+                v = fg if (y % 40) < 6 else bg
+                f.seek(y * W * 4); f.write(bytes([v, v, v, 255]) * W)
+        m = b.mark(); b.send('P 0'); time.sleep(0.9)
+        r, txt = b.refreshes(m); s = stub(txt)
+        check(len(r) == 1 and r[0]['wfm'] == WFM_DU and r[0]['flash'] == 0,
+              f'{label} in ui_mode=2: single DU refresh, no QPASS double-flash ({[(x["wfm"], x["full"]) for x in r]})')
+        check('epd: picture' not in txt and all(d == 0 for _, d, _ in s),
+              f'{label}: flat text background not misclassified as photo ({s})')
+    # ui_mode=2 (fastest/extreme) multi-strip page turn: 5 separate horizontal text bands (>48px gaps)
+    # must merge into ONE atomic DU bounding box instead of 5 staggered strip refreshes
+    with open(b.shm, 'r+b') as f:
+        f.write(b'\xff' * PAGE)
+    b.send('P 0'); time.sleep(0.6)
+    with open(b.shm, 'r+b') as f:
+        for band in range(5):
+            y0 = 100 + band * 300
+            for y in range(y0, y0 + 180):
+                v = 0 if (y % 20) < 6 else 255
+                f.seek(y * W * 4); f.write(bytes([v, v, v, 255]) * W)
+    m = b.mark(); b.send('P 0'); time.sleep(0.6)
+    r, txt = b.refreshes(m)
+    check(len(r) == 1 and r[0]['wfm'] == WFM_DU and r[0]['h'] >= 1300,
+          f'ui_mode=2 multi-strip page turn merges into 1 atomic DU box ({[(x["w"], x["h"], x["wfm"]) for x in r]})')
     b.close()
     print('== hardware swipe guard (KFB_SWIPE / SWIPEOK, automatic switch-off)')
     b = Bridge(binary)
@@ -269,6 +306,48 @@ def main():
     check('stub: swipe refresh' not in txt, 'after that, swipes stay off for the run')
     b.close()
     del os.environ['STUB_SWIPE_HANG']
+
+    print('== Colorsoft 32bpp CFA color pipeline (standard / vivid / chroma diff / B&W toggle)')
+    os.environ['STUB_COLOR'] = '1'
+    b = Bridge(binary, ['--color', '1'])
+    # Paint a colored red block (R=220,G=80,B=80 -> luma ~115) and verify 32bpp RGBA + GLRC16/GCC16 output
+    with open(b.shm, 'r+b') as f:
+        row_red = bytes([220, 80, 80, 255]) * W
+        for y in range(200, 600):
+            f.seek(y * W * 4); f.write(row_red)
+    m = b.mark(); b.send('P 0 F'); time.sleep(0.6)
+    r, txt = b.refreshes(m)
+    check(len(r) == 1 and r[0]['flash'] == 1 and 'bpp=4' in txt,
+          f'Colorsoft FULL sends 32bpp RGBA with GCC16 flash ({[(x["wfm"], x["full"], x["flash"]) for x in r]})')
+    # Pure chroma change with identical luminance: R=220,G=80,B=80 (y=115) -> R=40,G=165,B=165 (y=115)
+    with open(b.shm, 'r+b') as f:
+        row_cyan = bytes([40, 165, 165, 255]) * W
+        for y in range(200, 600):
+            f.seek(y * W * 4); f.write(row_cyan)
+    m = b.mark(); b.send('P 0 R'); time.sleep(0.6)
+    r, txt = b.refreshes(m)
+    check(len(r) == 1 and r[0]['h'] >= 400 and 'bpp=4 px0=40,165,165,255' in txt,
+          f'Colorsoft pure-chroma diff (equal luma) detected and pushed as 32bpp RGBA ({r})')
+    # Vivid mode (COLOR 2) boosts saturation around luma
+    m = b.mark(); b.send('COLOR 2'); time.sleep(0.6)
+    r, txt = b.refreshes(m)
+    check('color mode 1 -> 2' in txt and 'bpp=4' in txt and len(r) == 1 and r[0]['flash'] == 0,
+          f'COLOR 2 vivid triggers non-flashing GLRC16 redraw ({r})')
+    # Check vivid boosted RGB pixel on a fresh colored patch (R=200,G=100,B=100, y=129 -> dr=+71 -> R'=221,G'=91,B'=91)
+    with open(b.shm, 'r+b') as f:
+        row_p = bytes([200, 100, 100, 255]) * W
+        for y in range(700, 900):
+            f.seek(y * W * 4); f.write(row_p)
+    m = b.mark(); b.send('P 0 R'); time.sleep(0.6)
+    r, txt = b.refreshes(m)
+    check('px0=221,91,91,255' in txt, f'COLOR 2 vivid boosts chroma +30% ({[l for l in txt.splitlines() if "px0=" in l]})')
+    # Switch to B&W mode (COLOR 0) -> enables SKIP_CFA
+    m = b.mark(); b.send('COLOR 0'); time.sleep(0.5)
+    _, txt = b.refreshes(m)
+    check('color mode 2 -> 0 (cfa_skip=1)' in txt, 'COLOR 0 switches Colorsoft to B&W SKIP_CFA mode')
+    b.close()
+    del os.environ['STUB_COLOR']
+
     print('FAILED: %d' % fails if fails else 'all passed')
     sys.exit(1 if fails else 0)
 

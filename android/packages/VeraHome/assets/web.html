@@ -566,7 +566,7 @@ $('ovRefresh').onclick=function(){post('/api/sys/refresh').then(function(){toast
 
 /* =================================================================== upload queue */
 var Q=[],QN=0,QACT=0,QMAX=2;
-function qAdd(file,url,label,after){var it={id:++QN,file:file,url:url,label:label||file.name,state:'wait',loaded:0,total:file.size,after:after};Q.push(it);qRender();qPump();return it}
+function qAdd(file,url,label,after,prep){var it={id:++QN,file:file,url:url,label:label||file.name,state:'wait',loaded:0,total:file.size,after:after,prep:prep};Q.push(it);qRender();qPump();return it}
 function qPump(){while(QACT<QMAX){var it=Q.filter(function(x){return x.state==='wait'})[0];if(!it)break;qStart(it)}qRender()}
 function qStart(it){QACT++;it.state='run';it.t0=Date.now();it.lastT=it.t0;it.lastL=0;it.speed=0;
  var go=function(url){var fd=new FormData();fd.append('file',it.file,it.file.name);var x=new XMLHttpRequest();it.xhr=x;x.open('POST',url);x.setRequestHeader('X-VD-Token',TOKEN);
@@ -621,7 +621,7 @@ function pollTasks(){api('/api/tasks').then(function(j){var t=(j.tasks||[]).slic
 var FS={root:'sdcard',path:'',items:[],shown:[],free:0,ro:null,sel:{},cur:-1,anchor:-1,sort:'name',asc:true,view:'list',filter:'',clip:null,tree:{},open:{'sdcard:':1,'kindle:':1}};
 try{FS.view=localStorage.getItem('vd-fview')||'list';FS.sort=localStorage.getItem('vd-fsort')||'name'}catch(e){}
 $('fSort').value=FS.sort;
-var EXT={img:'jpg jpeg png gif webp bmp',book:'epub pdf mobi azw azw3 kfx txt fb2 djvu cbz cbr',zip:'zip rar 7z gz tgz tar',apk:'apk',txt:'md json conf css opf ncx csv ini xml log yml yaml html htm',font:'ttf otf'};
+var EXT={img:'jpg jpeg png gif webp bmp',book:'epub pdf mobi azw azw3 kfx txt fb2 djvu cbz cbr',zip:'zip rar 7z gz tgz tar',apk:'apk',txt:'md json conf css opf ncx csv ini xml log yml yaml html htm',font:'ttf otf ttc'};
 var EDIT='txt md json conf css opf ncx csv ini xml log yml yaml'.split(' ');
 function ext(n){var d=n.lastIndexOf('.');return d<0?'':n.slice(d+1).toLowerCase()}
 function kind(f){if(f.link)return'lnk';if(f.dir)return'dir';var e=ext(f.name);for(var k in EXT)if((' '+EXT[k]+' ').indexOf(' '+e+' ')>=0)return k;return'file'}
@@ -748,11 +748,10 @@ function collectDrop(dt){var items=dt.items,out=[],jobs=[];
 function upFiles(list,dest){dest=dest||{root:FS.root,path:FS.path};var mk={},bad=0;
  var tot=list.reduce(function(a,x){return a+x.file.size},0);if(dest.root===FS.root&&tot>FS.free-64*1048576){toast('空间不够：要 '+fmt(tot)+'，只剩 '+fmt(FS.free),'err');return}
  list.forEach(function(x){var n=x.file.name;if(/\.sh[.\s]*$/i.test(n)||n.charAt(0)==='.'||/(^|\/)\./.test(x.rel)){bad++;return}
-  var rel=x.rel,it=qAdd(x.file,null,(rel?rel+'/':'')+n,function(r){if(r.state==='done'&&cur==='files'&&FS.root===dest.root)refreshSoon()});
-  it.prep=function(){var base=dest.path;if(!rel)return Promise.resolve('/api/upload?'+q({to:'dir',root:dest.root,path:base}));
+  var rel=x.rel;qAdd(x.file,null,(rel?rel+'/':'')+n,function(r){if(r.state==='done'&&cur==='files'&&FS.root===dest.root)refreshSoon()},function(){var base=dest.path;if(!rel)return Promise.resolve('/api/upload?'+q({to:'dir',root:dest.root,path:base}));
    if(!mk[rel])mk[rel]=post('/api/fs/mkdirp',{root:dest.root,path:base,rel:rel}).then(function(j){if(!j.ok)throw new Error(j.msg||'建不了文件夹');return j.path});
-   return mk[rel].then(function(p){return '/api/upload?'+q({to:'dir',root:dest.root,path:p})})}});
- qPump();if(bad)toast(bad+' 个脚本或隐藏文件没有上传（网页不收这类文件）','err')}
+   return mk[rel].then(function(p){return '/api/upload?'+q({to:'dir',root:dest.root,path:p})})})});
+ if(bad)toast(bad+' 个脚本或隐藏文件没有上传（网页不收这类文件）','err')}
 var rsT;function refreshSoon(){clearTimeout(rsT);rsT=setTimeout(function(){fsOpen(FS.root,FS.path)},600)}
 /* context menu */
 function ctxMenu(x,y,items){closeCtx();var m=document.createElement('div');m.id='ctx';m.setAttribute('role','menu');var h='';
@@ -842,7 +841,7 @@ function openEditor(f){var dirty=false,root=FS.root,dir=FS.path,ro=f.create?fals
    ta.addEventListener('input',function(){if(!dirty){dirty=true;bg.querySelector('#edSt').textContent='有修改';bg.querySelector('#edSt').className='badge warn'}info()});
    ta.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();if(!ro)save(bg)}
     if(e.key==='Tab'&&!ro){e.preventDefault();var s=ta.selectionStart;ta.setRangeText('\t',s,ta.selectionEnd,'end');ta.dispatchEvent(new Event('input'))}});
-   bg.querySelector('[data-x]').onclick=function(e){e.stopPropagation();if(dirty&&!window.confirm('有没保存的修改，确定关闭？'))return;bg.remove();modalStack.pop()};setTimeout(function(){ta.focus()},50)}});
+   setTimeout(function(){ta.focus()},50)}});
  function save(bg,force){var ta=bg.querySelector('#edT'),st=bg.querySelector('#edSt');st.innerHTML='<span class="spin"></span> 正在保存';st.className='badge';
   post('/api/fs/text',{root:root,path:(dir?dir+'/':'')+f.name,text:ta.value,mtime:f.mtime,create:!!f.create,force:!!force}).then(function(j){
    if(j.ok){f.mtime=j.mtime;f.create=false;dirty=false;st.textContent='已保存 '+date(Date.now()).slice(11);st.className='badge ok';toast('已保存','ok');if(cur==='files'&&FS.root===root&&FS.path===dir)refreshSoon()}
@@ -857,7 +856,9 @@ $('apkPick').onclick=function(){$('apkFile').click()};/* no accept=".apk" on the
 $('apkFile').onchange=function(){var ok=[],bad=0;for(var i=0;i<this.files.length;i++){if(/\.apk$/i.test(this.files[i].name))ok.push(this.files[i]);else bad++}
  if(bad)toast(bad+' 个文件不是 .apk，没有上传','err');if(ok.length)sendSimple(ok,'/api/upload?to=books',function(){setTimeout(loadApps,4000)});this.value=''};
 bindDrop($('s-apps'),function(dt){var fs=Array.prototype.filter.call(dt.files,function(f){return /\.apk$/i.test(f.name)});if(!fs.length){toast('这里只收 APK','err');return}sendSimple(fs,'/api/upload?to=books',function(){setTimeout(loadApps,4000)})},$('apkDrop'));
-$('s-apps').addEventListener('dragenter',function(e){if(hasFiles(e))$('apkDrop').hidden=false});$('s-apps').addEventListener('drop',function(){$('apkDrop').hidden=true});
+var apkDragN=0;$('s-apps').addEventListener('dragenter',function(e){if(hasFiles(e)&&++apkDragN===1)$('apkDrop').hidden=false});
+$('s-apps').addEventListener('dragleave',function(e){if(hasFiles(e)&&--apkDragN<=0){apkDragN=0;$('apkDrop').hidden=true}});
+$('s-apps').addEventListener('drop',function(){apkDragN=0;$('apkDrop').hidden=true});
 function loadApps(){if(!APPS.length)$('alist').innerHTML=skel(5);api('/api/apps2?system='+($('appSys').checked?1:0)).then(function(j){APPS=j.apps||[];ASEL={};renderApps()}).catch(function(e){if(e.message!=='login')$('alist').innerHTML=errBox('加载失败','loadApps()')})}
 function renderApps(){var qq=$('appQ').value.trim().toLowerCase(),s=$('appSort').value;
  var l=APPS.filter(function(a){return!qq||a.label.toLowerCase().indexOf(qq)>=0||a.pkg.toLowerCase().indexOf(qq)>=0});
@@ -1013,8 +1014,9 @@ function shot(){var b=$('shotBtn');b.disabled=true;b.innerHTML='<span class="spi
 $('shotBtn').onclick=shot;$('shotAuto').onchange=function(){if(this.checked){shot();every('shot',10000,shot)}else{clearInterval(timers.shot);delete timers.shot}};
 $('clearBtn').onclick=function(){post('/api/sys/refresh').then(function(){toast('已整屏刷新','ok');if($('shotAuto').checked)setTimeout(shot,1500)})};
 $('clipBtn').onclick=function(){var t=$('clip').value;if(!t)return;post('/api/sys/clipboard',{text:t}).then(function(j){toast(j.ok?'已发送到 Kindle 的剪贴板':(j.msg||'失败'),j.ok?'ok':'err');if(j.ok)$('clip').value=''})};
+function verNewer(a,b){var x=String(a||'').split('.'),y=String(b||'').split('.'),n=Math.max(x.length,y.length);for(var i=0;i<n;i++){var p=parseInt(x[i],10)||0,q=parseInt(y[i],10)||0;if(p!==q)return p>q}return false}
 $('updBtn').onclick=function(){$('updInfo').innerHTML='<span class="spin"></span> 正在查询…';api('/api/sys/update').then(function(j){var s=[];
- if(j.latest)s.push('VeraDroid：当前 '+esc(j.current||'?')+'，服务器上 '+esc(j.latest)+' '+(j.current&&j.latest!==j.current?chip('acc','','有新版本'):chip('ok','check','已是最新')));else if(j.latestError)s.push('VeraDroid：'+esc(j.latestError));
+ if(j.latest)s.push('VeraDroid：当前 '+esc(j.current||'?')+'，服务器上 '+esc(j.latest)+' '+(j.current&&verNewer(j.latest,j.current)?chip('acc','','有新版本'):chip('ok','check','已是最新')));else if(j.latestError)s.push('VeraDroid：'+esc(j.latestError));
  s.push(j.homeError?'桌面：'+esc(j.homeError):'桌面应用：当前 '+esc(j.home||'?')+' '+(j.homeUpdate?chip('acc','','有新版本 '+(j.homeLatest||'')):chip('ok','check','已是最新')));$('updInfo').innerHTML=s.join('<br>')})};
 function power(w,msg){confirmBox(w==='restart'?'重启 Android？':'返回 Kindle？',msg,w==='restart'?'重启':'返回 Kindle',true).then(function(ok){if(ok)post('/api/sys/'+w).then(function(){toast(w==='restart'?'正在重启 Android，大约半分钟…':'正在返回 Kindle…')})})}
 $('rebootBtn').onclick=function(){power('restart','大约半分钟后重新开机。这个网页会断开，传输要在 Kindle 上重新打开。')};
@@ -1028,20 +1030,27 @@ function renderTheme(){var j=THEME,h='';
  (j.gallery||[]).forEach(function(g){h+='<div class="thumb" data-g="'+esc(g.name)+'" style="cursor:pointer" tabindex="0"><img loading="lazy" alt="" src="/api/theme/thumb?'+esc(q({kind:'gallery',name:g.name,w:300}))+'"><div class="cap"><span title="'+esc(g.name)+'">'+esc(g.name)+'</span>'+svg('more')+'</div></div>'});
  if(!(j.gallery||[]).length)h+='<div class="drop" style="grid-column:span 2;display:grid;place-items:center">图库还是空的：点“添加到图库”或者把图片拖到这里</div>';
  $('galList').innerHTML=h;
- var ic='';(j.apps||[]).sort(function(a,b){return a.label.localeCompare(b.label,'zh-CN')}).forEach(function(a){ic+='<div class="icn" data-p="'+esc(a.pkg)+'" tabindex="0">'+(a.custom?'<span class="badge acc">自定义</span>':'')+'<img loading="lazy" alt="" src="'+(a.own?'/api/theme/thumb?kind=icon&w=128&name='+encodeURIComponent(a.pkg)+'&t='+Date.now():'/api/icon?pkg='+encodeURIComponent(a.pkg))+'"><div class="n ell">'+esc(a.label)+'</div></div>'});
- $('iconList').innerHTML=ic||empty('grid','没有可以换图标的应用')}
+ var ic='';(j.apps||[]).sort(function(a,b){return a.label.localeCompare(b.label,'zh-CN')}).forEach(function(a){ic+='<div class="icn" data-p="'+esc(a.pkg)+'" tabindex="0">'+(a.custom?'<span class="badge acc">自定义</span>':'')+'<img loading="lazy" alt="" src="'+(a.custom?'/api/theme/thumb?kind=icon&w=128&name='+encodeURIComponent(a.pkg)+'&t='+Date.now():'/api/icon?pkg='+encodeURIComponent(a.pkg))+'"><div class="n ell">'+esc(a.label)+'</div></div>'});
+ $('iconList').innerHTML=ic||empty('grid','没有可以换图标的应用');
+ var sb=j.statusbar||{};
+ $('sb_clock').checked=sb.clock!==false;
+ $('sb_battery').checked=sb.battery!==false;
+ var fmt=sb.clock_format||'HH:mm',sel=$('sb_fmt');
+ if(!Array.prototype.some.call(sel.options,function(o){return o.value===fmt})){var op=document.createElement('option');op.value=fmt;op.textContent=fmt;sel.appendChild(op)}
+ sel.value=fmt;
+ $('sb_text').value=sb.text||''}
 $('galList').onclick=function(e){if(e.target.closest('#wallClear')){confirmBox('去掉壁纸？','主页恢复成白色背景（图库里的图不会删）。','去掉').then(function(ok){if(ok)post('/api/theme/wallpaper/clear').then(function(){toast('已去掉壁纸','ok');loadTheme()})});return}
  var g=e.target.closest('[data-g]');if(!g)return;var n=g.getAttribute('data-g'),r=g.getBoundingClientRect();
  ctxMenu(Math.min(e.clientX,r.right-150),e.clientY,[['image','设成壁纸',function(){var t=toastWait('正在设置壁纸…');post('/api/theme/wallpaper/set',{name:n}).then(function(j){t();toast(j.ok?'壁纸已设置，回到主页就能看到':(j.msg||'失败'),j.ok?'ok':'err');loadTheme()})}],
   ['grid','用作应用图标…',function(){pickApp().then(function(p){if(p)post('/api/theme/icon/set',{pkg:p,name:n}).then(function(j){toast(j.ok?'图标已替换':(j.msg||'失败'),j.ok?'ok':'err');loadTheme()})})}],
   ['download','下载原图',function(){location.href='/api/fs/get?'+q({root:'sdcard',path:'VeraDroid/wallpaper/'+n})}],'-',
   ['trash','从图库删除',function(){confirmBox('删除这张图？',esc(n),'删除',true).then(function(ok){if(ok)post('/api/theme/gallery/delete',{name:n}).then(function(j){toast(j.ok?'已删除':(j.msg||'失败'),j.ok?'ok':'err');loadTheme()})})},1]])};
-$('iconList').onclick=function(e){var c=e.target.closest('[data-p]');if(!c)return;var a=(THEME.apps||[]).filter(function(x){return x.pkg===c.getAttribute('data-p')})[0];iconDialog(a.pkg,a.label)};
-function iconDialog(pkg,label){var gal=(THEME&&THEME.gallery)||[];
- modal({title:'换图标：'+label,body:'<p class="sub" style="margin-top:0">从图库里选一张（会裁成正方形），或者上传一张方形 PNG。</p><div class="thumbs" style="grid-template-columns:repeat(auto-fill,minmax(90px,1fr))">'+gal.map(function(g){return'<div class="thumb" data-n="'+esc(g.name)+'" style="cursor:pointer"><img loading="lazy" alt="" src="/api/theme/thumb?'+esc(q({kind:'gallery',name:g.name,w:180}))+'" style="aspect-ratio:1"></div>'}).join('')+'</div>'+(gal.length?'':empty('image','图库是空的')),
-  foot:'<button class="btn" id="icUp">'+svg('upload')+'上传 PNG</button><button class="btn dan" id="icReset">恢复默认</button>',ok:'关闭',cancel:false,
+$('iconList').onclick=function(e){var c=e.target.closest('[data-p]');if(!c)return;var a=(THEME.apps||[]).filter(function(x){return x.pkg===c.getAttribute('data-p')})[0];if(a)iconDialog(a)};
+function iconDialog(a){var pkg=a.pkg,label=a.label,gal=(THEME&&THEME.gallery)||[],fromFolder=!!(a.custom&&!a.own);
+ modal({title:'换图标：'+label,body:'<p class="sub" style="margin-top:0">从图库里选一张（会裁成正方形），或者上传一张方形 PNG。'+(fromFolder?'<br>当前图标来自 <code>VeraDroid/icons/</code> 文件夹，如需恢复默认请在“文件”里删除对应 PNG。':'')+'</p><div class="thumbs" style="grid-template-columns:repeat(auto-fill,minmax(90px,1fr))">'+gal.map(function(g){return'<div class="thumb" data-n="'+esc(g.name)+'" style="cursor:pointer"><img loading="lazy" alt="" src="/api/theme/thumb?'+esc(q({kind:'gallery',name:g.name,w:180}))+'" style="aspect-ratio:1"></div>'}).join('')+'</div>'+(gal.length?'':empty('image','图库是空的')),
+  foot:'<button class="btn" id="icUp">'+svg('upload')+'上传 PNG</button><button class="btn dan" id="icReset"'+(fromFolder?' disabled title="此图标位于 VeraDroid/icons/ 文件夹，请在文件管理中删除"':'')+'>恢复默认</button>',ok:'关闭',cancel:false,
   init:function(bg){bg.querySelector('.thumbs').onclick=function(e){var t=e.target.closest('[data-n]');if(!t)return;post('/api/theme/icon/set',{pkg:pkg,name:t.getAttribute('data-n')}).then(function(j){toast(j.ok?'图标已替换':(j.msg||'失败'),j.ok?'ok':'err');bg.close(null);loadTheme();if(cur==='apps')loadApps()})};
-   bg.querySelector('#icReset').onclick=function(){post('/api/theme/icon/clear',{pkg:pkg}).then(function(j){toast(j.ok?'已恢复默认图标':(j.msg||'失败'),j.ok?'ok':'err');bg.close(null);loadTheme();if(cur==='apps')loadApps()})};
+   bg.querySelector('#icReset').onclick=function(){if(fromFolder)return;post('/api/theme/icon/clear',{pkg:pkg}).then(function(j){toast(j.ok?'已恢复默认图标':(j.msg||'失败'),j.ok?'ok':'err');bg.close(null);loadTheme();if(cur==='apps')loadApps()})};
    bg.querySelector('#icUp').onclick=function(){var i=document.createElement('input');i.type='file';i.accept='image/png';i.onchange=function(){if(i.files[0])qAdd(new File([i.files[0]],'icon-'+pkg+'.png',{type:'image/png'}),'/api/upload?to=theme','图标：'+label,function(r){toast(r.state==='done'?'图标已替换':r.msg,r.state==='done'?'ok':'err');loadTheme()});bg.close(null)};i.click()}}})}
 function pickApp(){var apps=(THEME&&THEME.apps)||[];return modal({title:'用作哪个应用的图标？',body:'<div class="icons">'+apps.map(function(a){return'<div class="icn" data-p="'+esc(a.pkg)+'"><img loading="lazy" alt="" src="/api/icon?pkg='+encodeURIComponent(a.pkg)+'"><div class="n ell">'+esc(a.label)+'</div></div>'}).join('')+'</div>',buttons:false,
  init:function(bg,done){bg.querySelector('.icons').onclick=function(e){var c=e.target.closest('[data-p]');if(c)done(c.getAttribute('data-p'))}}})}
@@ -1052,7 +1061,7 @@ $('zipPick').onclick=function(){$('zipFile').click()};
 $('zipFile').onchange=function(){if(this.files[0])qAdd(this.files[0],'/api/upload?to=theme','主题包',function(r){toast(r.msg||'完成',r.state==='done'?'ok':'err');loadTheme()});this.value=''};
 $('themeReset').onclick=function(){confirmBox('全部恢复默认？','壁纸、自定义图标和状态栏都恢复成默认（图库里的图不会删）。','恢复',true).then(function(ok){if(ok)post('/api/theme/reset').then(function(){toast('已恢复默认','ok');loadTheme()})})};
 $('sbSave').onclick=function(){var o={clock:$('sb_clock').checked,battery:$('sb_battery').checked,clock_format:$('sb_fmt').value,text:$('sb_text').value};
- qAdd(new File([JSON.stringify(o)],'statusbar.json',{type:'application/json'}),'/api/upload?to=theme','状态栏设置',function(r){toast(r.state==='done'?'状态栏已保存':r.msg,r.state==='done'?'ok':'err')})};
+ qAdd(new File([JSON.stringify(o)],'statusbar.json',{type:'application/json'}),'/api/upload?to=theme','状态栏设置',function(r){toast(r.state==='done'?'状态栏已保存':r.msg,r.state==='done'?'ok':'err');if(r.state==='done')loadTheme()})};
 
 /* =================================================================== 蓝牙（宿主 bt.sh：/api/bt、/api/bt/cmd、/api/bt/set） */
 var BT={},btPend=null,btSeen='',btLoaded=false;

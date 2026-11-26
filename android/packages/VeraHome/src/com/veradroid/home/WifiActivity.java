@@ -147,7 +147,20 @@ public class WifiActivity extends Activity {
         handler.postDelayed(new Runnable() { @Override public void run() { if (lastList == null) render(read("wifi.list")); } }, 5000);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
         if (watch != null) CtlWatch.remove(watch);
         handler.removeCallbacksAndMessages(null);
         super.onDestroy();
@@ -157,7 +170,9 @@ public class WifiActivity extends Activity {
         if (isFinishing()) return;
         if ("wifi.list".equals(file)) { render(read("wifi.list")); return; }
         if ("wifi.scan".equals(file)) { if (scanning) showScan(read("wifi.scan")); return; }
+        if (pending == null) return;
         Map<String, String> m = HostLink.kv(HostLink.CTL + "wifi.result");
+        if (m.isEmpty()) return;
         String name = unhex(m.get("essid"));
         if (name == null) name = pending == null ? "" : pending;
         if ("1".equals(m.get("ok"))) status.setText("已连接：" + name);
@@ -184,9 +199,10 @@ public class WifiActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         try {
             BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(HostLink.CTL + name), "UTF-8"));
-            String l;
-            while ((l = r.readLine()) != null) sb.append(l).append('\n');
-            r.close();
+            try {
+                String l;
+                while ((l = r.readLine()) != null) sb.append(l).append('\n');
+            } finally { r.close(); }
         } catch (Exception ignored) { }
         return sb.toString();
     }
@@ -248,20 +264,24 @@ public class WifiActivity extends Activity {
 
     private boolean scanning;
     private String newNet;   // 刚输入密码的新网络（连不上时提示可能是密码不对）
+    private Runnable scanTimeout;
 
     private void scan() {
         if (pending != null) { status.setText("正在切换到 " + pending + "，请稍等…"); return; }
         scanning = true;
+        if (scanTimeout != null) handler.removeCallbacks(scanTimeout);
         status.setText("正在搜索附近的网络…（几秒钟）");
         new java.io.File(HostLink.CTL + "wifi.scan").delete();
         HostLink.cmd("wifiscan");
-        handler.postDelayed(new Runnable() { @Override public void run() {
+        scanTimeout = new Runnable() { @Override public void run() {
             if (scanning && !isFinishing()) { scanning = false; status.setText("没有搜到附近的网络（Wi-Fi 是不是关着？）"); }
-        } }, 15000);
+        } };
+        handler.postDelayed(scanTimeout, 15000);
     }
 
     private void showScan(String raw) {
         scanning = false;
+        if (scanTimeout != null) { handler.removeCallbacks(scanTimeout); scanTimeout = null; }
         final List<String[]> nets = new ArrayList<String[]>();
         for (String l : raw.split("\n")) {
             String[] f = l.split("\t", 5);
@@ -290,13 +310,14 @@ public class WifiActivity extends Activity {
 
     private void askPassword(final String name, String mgmt) {
         if (mgmt != null && mgmt.toUpperCase(java.util.Locale.US).contains("WEP")) { status.setText(name + " 用的是 WEP 加密，请在 Kindle 设置里连接"); return; }
-        final android.widget.EditText in = new android.widget.EditText(this);
+        final android.widget.EditText in = Ui.editText(this);
         in.setSingleLine(true);
         // 墨水屏上看不见输入的字很容易输错：密码直接显示（Kindle 自己的“显示密码”也是这样）
         in.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
         in.setHint("密码");
         new VeraDialog.Builder(this).title("连接 " + name).message("输入这个网络的密码。连上以后 Kindle 会把它存为已保存的网络（密码不上传）。")
             .view(in).negative("取消", null).positive("连接", new Runnable() { @Override public void run() {
+                if (pending != null) { status.setText("正在切换到 " + pending + "，请稍等…"); return; }
                 final String pw = in.getText().toString();
                 if (pw.length() < 8 || pw.length() > 63) { status.setText("密码要 8–63 个字符"); return; }
                 if (pw.indexOf('"') >= 0 || pw.indexOf('\\') >= 0) { status.setText("密码里有英文引号 \" 或反斜杠 \\：这种密码请在 Kindle 设置里连接"); return; }
@@ -307,7 +328,9 @@ public class WifiActivity extends Activity {
                 new Thread(new Runnable() { @Override public void run() {
                     String hp = hexAny(pw);
                     byte[] r = HostReq.run(WifiActivity.this, "wifipsk", hn, hp, 8000);
-                    final boolean ok = r != null && new String(r).contains("ok=1");
+                    boolean resOk = false;
+                    try { resOk = r != null && new String(r, "UTF-8").contains("ok=1"); } catch (Exception ignored) { }
+                    final boolean ok = resOk;
                     handler.post(new Runnable() { @Override public void run() {
                         if (isFinishing()) return;
                         if (!ok) { pending = null; newNet = null; status.setText("没能把密码交给系统（宿主没有回应），请再试一次"); return; }

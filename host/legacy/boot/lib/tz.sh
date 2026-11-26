@@ -111,7 +111,7 @@ tz_search_android() { # rule
     io=$((0x${hex%????????????????})); rest=${hex#????????}; dofs=$((0x${rest%????????})); n=$(( (dofs - io) / 52 ))
     [ $n -gt 0 ] && [ $n -lt 1000 ] || return 1
     want=$1
-    dd if="$TZDATA" bs=4 skip=$((io / 4)) count=$((n * 13)) 2>/dev/null | od -An -v -tx1 -w52 | while read -r l; do
+    dd if="$TZDATA" bs=4 skip=$((io / 4)) count=$((n * 13)) 2>/dev/null | od -An -v -tx1 | awk '{ for (i = 1; i <= NF; i++) { printf "%s%s", (c ? " " : ""), $i; if (++c == 52) { printf "\n"; c = 0 } } }' | while read -r l; do
         set -- $l
         [ $# -ge 48 ] || continue
         off=$(eval "echo \$((0x\${41}\${42}\${43}\${44}))"); len=$(eval "echo \$((0x\${45}\${46}\${47}\${48}))")

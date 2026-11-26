@@ -39,7 +39,8 @@ final class Store {
     private static synchronized File dir(String sub) {
         File root = new File(DIR);
         if (!ready) {
-            if (!root.isDirectory() && root.mkdirs()) {
+            if (!root.isDirectory()) root.mkdirs();
+            if (root.isDirectory()) {
                 try { android.system.Os.chmod(root.getAbsolutePath(), 0700); } catch (Exception ignored) { }
             }
             ready = root.isDirectory() && root.canWrite();

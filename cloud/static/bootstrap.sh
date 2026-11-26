@@ -819,8 +819,9 @@ vp_netdiag() { # 输出文件 [服务器根地址]
         return 0
     fi
     vp_kvw "$nf" state=running step=speed "line1=正在测下载速度（用真实的安装包下 6 秒）…" "lines=$NC_LINES" "start=$t0"
-    case "$(uname -r)" in 3.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/api/bootstrap" ;; esac
+    case "$(uname -r)" in 3.*|4.1.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/static/bootstrap-pw6.json?t=$t0" ;; esac
     u=$(curl_do -fsSL --max-time 15 "$m" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p')
+    [ -z "$u" ] && case "$m" in */bootstrap-pw6.json*) u=$(curl_do -fsSL --max-time 15 "$nb/api/bootstrap" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p') ;; esac
     sp=0
     [ -n "$u" ] && sp=$(curl_do -s -o /dev/null --connect-timeout 10 --max-time 6 -w '%{speed_download}' "$u" 2>/dev/null | cut -d. -f1)
     case "$sp" in ''|*[!0-9]*) sp=0 ;; esac
@@ -1074,6 +1075,15 @@ vd_download() {
                 if [ $du_spd -ge 51200 ]; then du_l2="$du_l2　■ 速度 $(vp_rate $du_spd)（正常）"; else du_l2="$du_l2　□ 速度 $(vp_rate $du_spd)（很慢）"; fi
             fi
             VP_EN2=
+            if [ $du_stall != 0 ] && [ $((du_now - du_stall)) -ge 60 ]; then
+                vlog "download: stalled at $du_sz bytes for $((du_now - du_stall))s, restarting fetch"
+                for _kp in /proc/[0-9]*; do
+                    _kp=${_kp##*/}; [ "$_kp" = "$$" ] && continue
+                    tr '\0' ' ' < "/proc/$_kp/cmdline" 2>/dev/null | grep -Fq "$du_o" && kill "$_kp" 2>/dev/null || true
+                done
+                kill $du_p 2>/dev/null || true
+                break
+            fi
             if [ $du_stall != 0 ] && [ $((du_now - du_stall)) -ge 15 ]; then
                 VP_EN2="Stalled $((du_now - du_stall))s, will retry. Network problem."
                 du_l2="网络卡住了：$((du_now - du_stall)) 秒没有收到数据，会自动重试（下好的部分不会丢）。
@@ -1760,9 +1770,9 @@ vd_parts_get() {
     done
     return 1
 }
-# 目录下所有普通文件（不跨挂载点）："sha256 路径"
+# 目录下所有普通文件（不跨挂载点）："sha256 路径"（跳过含单引号的路径，与组装阶段保持一致）
 vd_parts_hash() {
-    for ph_d in "$@"; do [ -d "$ph_d" ] && $UNPACK_PRI find "$ph_d" -xdev -type f -exec sha256sum {} + 2>/dev/null; done | awk '{ print substr($0, 1, 64) " " substr($0, 67) }'
+    for ph_d in "$@"; do [ -d "$ph_d" ] && $UNPACK_PRI find "$ph_d" -xdev -type f -exec sha256sum {} + 2>/dev/null; done | awk 'index(substr($0, 67), "\047") == 0 { print substr($0, 1, 64) " " substr($0, 67) }'
     return 0
 }
 # 树的清单（在树里运行，路径 ./…）："hexmode perm uid gid dev ino size mtime 路径"
@@ -1797,8 +1807,8 @@ vd_parts_canon() {
 # 非递归地把 $SYS/rootfs 再绑一次（只看得到镜像本身，看不到上面的挂载），读原文件的 sha256。输出 "sha 路径"（路径是
 # 正常的 $SYS/rootfs/...：第二段在 Android 停了、挂载都卸掉以后才从那里拷，那时就是原文件）。
 # 临时目录在 tmpfs 上，只 rmdir 不 rm -rf：万一卸不掉，也不会顺着它删到镜像里。
-vd_parts_under_list() { # $SYS/rootfs 里被挂载盖住的路径（相对 rootfs；data/ 不管；带转义的怪名字跳过）
-    awk -v r="$SYS/rootfs/" 'index($2, r) == 1 && $2 != r "data" && index($2, r "data/") != 1 && index($2, "\\") == 0 { print substr($2, length(r) + 1) }' "${VD_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null
+vd_parts_under_list() { # $SYS/rootfs 里被挂载盖住的路径（相对 rootfs；data/ 不管；带转义或单引号的怪名字跳过）
+    awk -v r="$SYS/rootfs/" 'index($2, r) == 1 && $2 != r "data" && index($2, r "data/") != 1 && index($2, "\\") == 0 && index($2, "\047") == 0 { print substr($2, length(r) + 1) }' "${VD_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null
 }
 vd_parts_under() {
     [ -d "$SYS/rootfs" ] || return 0
@@ -1857,7 +1867,7 @@ vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没
     for pp_d in "$SYS/rootfs" "$SYS/slim-removed"; do
         [ -d "$pp_d" ] || continue
         vd_parts_canon "$pp_d" "$PD/c.out"
-        awk -v d="$pp_d" 'FILENAME == ARGV[1] { if ($1 == "f" && $2 != "?") { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]* /, "", p); print $2, d "/" substr(p, 3) }; next }' "$PD/c.out" >> "$PD/src.rootfs"
+        awk -v d="$pp_d" 'FILENAME == ARGV[1] { if ($1 == "f" && $2 != "?") { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]* /, "", p); if (index(p, "\047") == 0) print $2, d "/" substr(p, 3) }; next }' "$PD/c.out" >> "$PD/src.rootfs"
     done
     vd_parts_under >> "$PD/src.rootfs"
     vlog "parts: hashed local files in $(( $(vp_now) - pp_t0 ))s ($(wc -l < "$PD/src.host" | tr -d ' ') program files, $(wc -l < "$PD/src.rootfs" | tr -d ' ') image files)"
@@ -1942,7 +1952,15 @@ vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没
     # 整包安装也一样（装好的程序目录同在这块盘上），以前这里每次都失败、增量更新全部退回整包（r093 闸门 KT5 / PW5 实测）
     pp_pm=1; : > "$PD/.permtest" && chmod 640 "$PD/.permtest" 2>/dev/null && [ "$(stat -c %a "$PD/.permtest" 2>/dev/null)" = 640 ] || pp_pm=
     rm -f "$PD/.permtest"
-    [ -n "$pp_pm" ] || vlog "parts: this file system keeps no permission bits (read back $(stat -c %a "$TMP/veradroid-pw6/VERSION" 2>/dev/null)): checking contents only"
+    [ -n "$pp_pm" ] || vlog "parts: this file system keeps no permission bits (read back $(stat -c %a "$TMP/veradroid-pw6/version" 2>/dev/null)): checking contents only"
+    # FAT32 / fuse fsp（KPW4 / KO2 / KO3 / KPW5 / KT5 / KT6 / Scribe 等）不区分文件名大小写：若包内存在仅大小写不同的文件，按小写去重比对
+    pp_ci=; : > "$PD/.CiTest" 2>/dev/null && [ -f "$PD/.citest" ] && pp_ci=1
+    rm -f "$PD/.CiTest" "$PD/.citest"
+    if [ -n "$pp_ci" ]; then
+        awk '{ k = tolower($2); p[k] = $1 } END { for (k in p) print p[k], k }' "$PD/got.files" | LC_ALL=C sort -k2 > "$PD/got.files.ci"
+        awk '{ k = tolower($2); p[k] = $1 } END { for (k in p) print p[k], k }' "$PD/want.files" | LC_ALL=C sort -k2 > "$PD/want.files.ci"
+        mv -f "$PD/got.files.ci" "$PD/got.files"; mv -f "$PD/want.files.ci" "$PD/want.files"
+    fi
     if ! cmp -s "$PD/got.files" "$PD/want.files" || { [ -n "$pp_pm" ] && ! cmp -s "$PD/got.perm" "$PD/want.perm"; }; then
         vlog "parts: program files do not match the index: $(diff "$PD/want.files" "$PD/got.files" 2>/dev/null | head -5 | tr '\n' ' ') $(diff "$PD/want.perm" "$PD/got.perm" 2>/dev/null | grep '^[-+][0-9]' | head -20 | tr '\n' ' ')"
         return 1
@@ -2209,7 +2227,21 @@ family_meta() {
     esac
 }
 fetch_meta() { # curl-options...   （vd_meta：直链先，主站后）
-    if [ -n "$DEV_CLASS" ] && vd_meta "$BASE/static/bootstrap-$DEV_CLASS.json?t=$(date +%s)" "$@" 2>/dev/null; then return 0; fi
+    if [ -n "$DEV_CLASS" ]; then
+        fm_c=$(vd_meta "$BASE/static/bootstrap-$DEV_CLASS.json?t=$(date +%s)" "$@" 2>/dev/null) || fm_c=
+        if [ -n "$fm_c" ]; then
+            fm_f=$(vd_meta "$(family_meta)" "$@" 2>/dev/null) || fm_f=
+            if [ -n "$fm_f" ]; then
+                fm_cv=$(printf '%s' "$fm_c" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
+                fm_fv=$(printf '%s' "$fm_f" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
+                if [ -n "$fm_cv" ] && [ -n "$fm_fv" ] && [ "$(vercmp "$fm_fv" "$fm_cv")" = "1" ]; then
+                    vlog "meta: class $DEV_CLASS ($fm_cv) lags family ($fm_fv), using family meta"
+                    printf '%s' "$fm_f"; return 0
+                fi
+            fi
+            printf '%s' "$fm_c"; return 0
+        fi
+    fi
     vd_meta "$(family_meta)" "$@"
 }
 LATEST_VER=
@@ -2664,6 +2696,7 @@ if [ -f "$TMP/veradroid-pw6/entries/VeraDroid-Uninstall.sh" ]; then
     cp "$TMP/veradroid-pw6/entries/VeraDroid-Uninstall.sh" "$VD/VeraDroid-Uninstall.sh" 2>/dev/null && chmod 755 "$VD/VeraDroid-Uninstall.sh" 2>/dev/null || true
 fi
 [ -d "$TMP/veradroid-pw6/fonts" ] && cp -a "$TMP/veradroid-pw6/fonts" "$VD/fonts"
+[ -d "$TMP/veradroid-pw6/models" ] && { rm -rf "$VD/models"; cp -a "$TMP/veradroid-pw6/models" "$VD/models"; }
 # 老内核用的外挂模块（kmod/<uname -r>/*.ko，boot/lib/kmod.sh 开机时加载）
 [ -d "$TMP/veradroid-pw6/kmod" ] && cp -a "$TMP/veradroid-pw6/kmod" "$VD/kmod"
 [ -d "$TMP/veradroid-pw6/screensaver" ] && cp -a "$TMP/veradroid-pw6/screensaver" "$VD/screensaver"
@@ -2916,31 +2949,36 @@ vd_retire_uninstall_entry
 if [ -f "$TMP/veradroid-pw6/VeraDroid-Launch.sh" ]; then
     # Kindle's home library may use either mount; put the launcher in both so
     # returning to Kindle always finds a "VeraDroid 启动" entry.
-    # 书库里显示的标题就是文字说明里一直写的“VeraDroid 启动”（以前是“VeraDroid”，和说明对不上）
-    for D in "$DOCS" /mnt/us/documents /mnt/base-us/documents; do
-        [ -d "$D" ] || continue
-        sed 's/^# Name: .*/# Name: VeraDroid 启动/' "$TMP/veradroid-pw6/VeraDroid-Launch.sh" > "$D/VeraDroid 启动.sh" 2>/dev/null || true
-        chmod 755 "$D/VeraDroid 启动.sh" 2>/dev/null || true
-        # force a fresh library scan without touching user books
-        touch "$D/VeraDroid 启动.sh" 2>/dev/null || true
-    done
-    sync 2>/dev/null || true
-    # 旧包里的启动入口没有忽略 SIGPIPE：书库启动器的 fbink 管道断开时会一点就退出。在文件头注释后补一行。
-    if ! grep -q "trap '' PIPE" "$DOCS/VeraDroid 启动.sh" 2>/dev/null; then
-        awk 'f==0 && !/^#/ {print "trap '\'''\'' PIPE"; f=1} {print}' "$DOCS/VeraDroid 启动.sh" > "$DOCS/.vd-launch.tmp" 2>/dev/null \
-            && mv "$DOCS/.vd-launch.tmp" "$DOCS/VeraDroid 启动.sh"
+    # 先在临时文件准备好最终带 trap '' PIPE 的启动入口；内容一致时不重复覆写，避免 Kindle sh_integration 重启后丢条目
+    _vl_out="$TMP/vd-launch-ready.sh"
+    sed 's/^# Name: .*/# Name: VeraDroid 启动/' "$TMP/veradroid-pw6/VeraDroid-Launch.sh" > "$_vl_out" 2>/dev/null || true
+    if [ -s "$_vl_out" ] && ! grep -q "trap '' PIPE" "$_vl_out" 2>/dev/null; then
+        awk 'f==0 && !/^#/ {print "trap '\'''\'' PIPE"; f=1} {print}' "$_vl_out" > "$_vl_out.2" 2>/dev/null && mv "$_vl_out.2" "$_vl_out"
     fi
-    chmod 755 "$DOCS/VeraDroid 启动.sh" 2>/dev/null || true
-    # 马上就要启动 Android（会停掉 Kindle 的索引服务 scanner）：趁它还在，点名让它现在就索引这个入口，
-    # 否则入口文件在、书库里却看不到（“安装后书库入口不见”）。
-    lipc-set-prop com.lab126.scanner reScanFile "/mnt/us/documents/VeraDroid 启动.sh" 2>/dev/null || true
-    sleep 2
+    _vl_dst="$DOCS/VeraDroid 启动.sh"
+    [ -d /mnt/us/documents ] && _vl_dst="/mnt/us/documents/VeraDroid 启动.sh"
+    if [ -s "$_vl_out" ] && ! cmp -s "$_vl_out" "$_vl_dst" 2>/dev/null; then
+        cp "$_vl_out" "$_vl_dst" 2>/dev/null || cp "$_vl_out" "$DOCS/VeraDroid 启动.sh" 2>/dev/null || true
+        chmod 755 "$_vl_dst" "$DOCS/VeraDroid 启动.sh" 2>/dev/null || true
+        touch "$_vl_dst" 2>/dev/null || true
+        sync 2>/dev/null || true
+        lipc-set-prop com.lab126.scanner reScanFile "/mnt/us/documents/VeraDroid 启动.sh" 2>/dev/null || true
+        sleep 2
+    fi
+    rm -f "$_vl_out" "$_vl_out.2" 2>/dev/null || true
 fi
-# KUAL is an alternative for jailbreaks that do not index .sh books.
-if [ -d "$TMP/veradroid-pw6/kual" ]; then
-    mkdir -p /mnt/us/extensions/VeraDroid 2>/dev/null || true
-    cp -a "$TMP/veradroid-pw6/kual/." /mnt/us/extensions/VeraDroid/ 2>/dev/null || true
-    chmod 755 /mnt/us/extensions/VeraDroid/start.sh /mnt/us/extensions/VeraDroid/install.sh /mnt/us/extensions/VeraDroid/restore-entry.sh 2>/dev/null || true
+# KUAL is an alternative for jailbreaks that do not index .sh books (e.g. 5.18/5.19.5 without scriptlet hotfix).
+_kual_src=
+if [ -d "$TMP/veradroid-pw6/kual" ]; then _kual_src="$TMP/veradroid-pw6/kual"
+elif [ -d "$VD/kual" ]; then _kual_src="$VD/kual"; fi
+if [ -n "$_kual_src" ]; then
+    for _kd in /mnt/us/extensions/VeraDroid /mnt/base-us/extensions/VeraDroid; do
+        [ -d "${_kd%/VeraDroid}" ] || [ "$_kd" = /mnt/us/extensions/VeraDroid ] || continue
+        mkdir -p "$_kd" 2>/dev/null || continue
+        cp -a "$_kual_src/." "$_kd/" 2>/dev/null || true
+        chmod 755 "$_kd/start.sh" "$_kd/install.sh" "$_kd/restore-entry.sh" 2>/dev/null || true
+        break
+    done
 fi
 # BH081-1：自动更新（VD_NO_START=1）时用户正在用 Kindle（Android 冻结或没开）：装完不要把 Android 弹到前台。
 vlog "progress: $VP_REF screen refreshes during the install (mode $VP_MODE)"
@@ -2980,3 +3018,5 @@ if [ -n "$bak_list" ]; then
 else
     echo "完成。"
 fi
+echo "提示：如果 Kindle 书库不显示“VeraDroid 启动”（常见于 5.18/5.19.5 未启用 scriptlet），"
+echo "可直接打开 KUAL → VeraDroid → 启动 VeraDroid 一键进入，无需再通过 SSH 启动。"

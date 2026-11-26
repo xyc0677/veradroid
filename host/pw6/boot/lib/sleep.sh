@@ -118,8 +118,14 @@ sleep_apply() {
         # 正在装 APK（afterboot.sh 写 $W/installing）时不冻结：冻在 dex2oat 中间、几小时后解冻，PackageManager
         # 线程还卡着，system_server 会被自己的 Watchdog 杀掉（用户诊断）。ctl/sleep 已经挡住显示桥；
         # 机器真睡下去（suspended）时整个系统一起停，uptime 也停，不会触发 Watchdog。
-        if alive $W/installing; then
-            touch $W/saver_nofreeze; t "screensaver: an apk is being installed, android left running"
+        rm -f $W/idlefz
+        dl_busy=0
+        if [ -f $W/dl.active ]; then
+            dl_age=$(( $(date +%s) - $(stat -c %Y $W/dl.active 2>/dev/null || echo 0) ))
+            [ "$dl_age" -lt 35 ] && dl_busy=1
+        fi
+        if pkg_busy || [ -f $W/fwd.id ] || [ "$dl_busy" = 1 ]; then
+            touch $W/saver_nofreeze; t "screensaver: install/compile/transfer/download active, android left running"
         else
             # 冻不住（android_freeze 已经解冻回来）：当作没冻，醒来时不用解冻
             if android_freeze; then touch $W/saver_frozen; else touch $W/saver_nofreeze; fi
@@ -134,7 +140,7 @@ sleep_apply() {
         saver_exit_check
         if [ -f $W/saver_nofreeze ]; then rm -f $W/saver_nofreeze; else android_thaw 2>/dev/null; fi
         type lock_reset_check >/dev/null 2>&1 && { lock_reset_check; lock_request; }
-        ( usleep 500000; trust_unlock ) &
+        ( usleep 500000; trust_unlock ) </dev/null >/dev/null 2>&1 &
         rm -f $W/saver_frozen
         rm -f $X/ctl/sleep
         epd_send REDRAW
@@ -167,7 +173,9 @@ sleep_watch() {
                 outOfScreenSaver) sleep_apply active ;;
                 esac
             done
+            [ -f $W/sleep.pid ] || break
             sleep 2
+            [ -f $W/sleep.pid ] || break
             s=$(sleep_state); [ -n "$s" ] && sleep_apply $s
         done
         return 0
@@ -175,12 +183,17 @@ sleep_watch() {
     while :; do
         s=$(sleep_state); [ -n "$s" ] && sleep_apply $s
         sleep 1
+        [ -f $W/sleep.pid ] || break
     done
 }
 # 停掉休眠监视连同它的 lipc-wait-event（只杀父进程的话，订阅和管道另一头会留下来）
 sleep_watch_stop() {
     sp=$(cat $W/sleep.pid 2>/dev/null); [ -n "$sp" ] || return 0
-    for c in $(pgrep -P "$sp" 2>/dev/null); do kill $c 2>/dev/null; done
+    for c in $(pgrep -P "$sp" 2>/dev/null); do
+        for gc in $(pgrep -P "$c" 2>/dev/null); do kill $gc 2>/dev/null; done
+        kill $c 2>/dev/null
+    done
     kill "$sp" 2>/dev/null
+    rm -f $W/sleep.pid
     return 0
 }

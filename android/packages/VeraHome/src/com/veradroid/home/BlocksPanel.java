@@ -35,6 +35,7 @@ final class BlocksPanel {
     private static BlocksPanel instance;
 
     static void open(Context c) {
+        if (LockScreen.showing()) return;
         Context app = c.getApplicationContext();
         String conf = conf(app);
         if (instance != null && !conf.equals(instance.builtConf)) { instance.destroy(); instance = null; }
@@ -45,11 +46,15 @@ final class BlocksPanel {
     static void close() { if (instance != null) instance.finish(); }
     static boolean isOpen() { return instance != null && instance.showing; }
 
-    /** 影响面板搭法的设置：快捷开关、面板名称、英文小字。变了就丢掉常驻的那份重搭。 */
+    /** 影响面板搭法的设置与显示配置：快捷开关、面板名称、英文小字、字重、蓝牙、密度、字号、屏幕尺寸。变了就丢掉常驻的那份重搭。 */
     private static String conf(Context app) {
         try {
             android.content.SharedPreferences sp = Store.prefs(app, "home");
-            return sp.getString("quick", Panel.QUICK_DEFAULT) + "|" + sp.getString("panelname", "") + "|" + Blocks.caps(app) + "|" + Fonts.weight(app) + "|" + BluetoothActivity.supported();
+            android.content.res.Configuration cfg = app.getResources().getConfiguration();
+            android.util.DisplayMetrics dm = app.getResources().getDisplayMetrics();
+            return sp.getString("quick", Panel.QUICK_DEFAULT) + "|" + sp.getString("panelname", "") + "|"
+                + Blocks.caps(app) + "|" + Fonts.weight(app) + "|" + BluetoothActivity.supported() + "|"
+                + dm.densityDpi + "|" + cfg.fontScale + "|" + dm.widthPixels + "x" + dm.heightPixels;
         } catch (Throwable t) { return ""; }
     }
 
@@ -61,6 +66,7 @@ final class BlocksPanel {
     private final Handler handler = new Handler();
     private final String builtConf;
     private final Root root;
+    private final PageScrollView scroll;
     private boolean attached, showing;
     private TextView clock, info;
     private Blocks.BlockBar light, warm;
@@ -77,7 +83,6 @@ final class BlocksPanel {
     private static final int[] REFRESH_VALS = { 3, 2, 1, 4 };
     private String panelName = "";
     private String seen;
-    private long seenStamp = -1;
 
     /** 最外层：返回键收起；点到面板以外、或者往上划，收起。 */
     private final class Root extends LinearLayout {
@@ -93,7 +98,8 @@ final class BlocksPanel {
             if (a == MotionEvent.ACTION_DOWN) { dx = e.getRawX(); dy = e.getRawY(); Perf.touch(e); }
             if (a == MotionEvent.ACTION_UP) {
                 float my = e.getRawY() - dy, mx = Math.abs(e.getRawX() - dx);
-                if (my < -dp(70) && -my > mx * 2) {
+                boolean canSwipeClose = scroll == null || scroll.pages() <= 1 || scroll.currentPage() >= scroll.pages();
+                if (canSwipeClose && my < -dp(70) && -my > mx * 2) {
                     MotionEvent c = MotionEvent.obtain(e);
                     c.setAction(MotionEvent.ACTION_CANCEL);
                     super.dispatchTouchEvent(c);
@@ -146,12 +152,25 @@ final class BlocksPanel {
         root = new Root();
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
-        // 内容在 body 里（左右留边），最底下一条贯通全宽的粗黑边（框线 + 投影的厚度），和下面的应用分开
+        // 内容在 body 里（左右留边），外包限高翻页滚动容器避免小屏/横屏/多通知裁掉底部并始终保留下方空白点击收起区；
+        // 最底下一条贯通全宽的粗黑边（框线 + 投影的厚度），和下面的应用分开
         final LinearLayout body = new LinearLayout(ctx);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(16), dp(8), dp(16), dp(14));
-        root.addView(body, Blocks.match());
-        root.addView(Ui.rule(ctx, Blocks.stroke(ctx) + Blocks.shade(ctx), Color.BLACK));
+        final int ruleH = Blocks.stroke(ctx) + Blocks.shade(ctx);
+        final int maxBodyH = Math.max(dp(240), (int) (ctx.getResources().getDisplayMetrics().heightPixels * 0.85f) - ruleH);
+        scroll = new PageScrollView(ctx) {
+            @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                int mode = MeasureSpec.getMode(heightMeasureSpec);
+                int size = MeasureSpec.getSize(heightMeasureSpec);
+                int cap = (mode == MeasureSpec.UNSPECIFIED) ? maxBodyH : Math.min(size, maxBodyH);
+                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST));
+            }
+        };
+        scroll.setBackgroundColor(Color.WHITE);
+        scroll.addView(body, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(Ui.rule(ctx, ruleH, Color.BLACK));
 
         // 顶上：大字时间，右边日期 / 电量，再右边一个收起的方块
         LinearLayout top = new LinearLayout(ctx);
@@ -187,6 +206,7 @@ final class BlocksPanel {
                 @Override public void onClick(View v) { action(id); }
             });
             if ("wifi".equals(id)) t.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { finish(); WifiActivity.open(ctx); return true; } });
+            if ("bt".equals(id)) t.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { finish(); BluetoothActivity.open(ctx); return true; } });
             tiles.put(id, t);
             LinearLayout.LayoutParams lp = Blocks.weight(1);
             if (row.getChildCount() > 0) lp.leftMargin = dp(8);
@@ -237,11 +257,13 @@ final class BlocksPanel {
 
         // 屏幕光：一个分组，亮度一行（− 方块条 +），有暖光再一行，有光线传感器再加“自动”
         LinearLayout g = group("屏幕光");
-        light = new Blocks.BlockBar(ctx, 12);
-        light.setListener(new Blocks.BlockBar.Listener() { @Override public void onCommit(int v) { HostLink.cmd("light " + v); } });
+        light = new Blocks.BlockBar(ctx, 24);
+        light.showValue();
+        light.setListener(new Blocks.BlockBar.Listener() { @Override public void onCommit(int v) { lastLightSetAt = android.os.SystemClock.uptimeMillis(); HostLink.cmd("light " + v); } });
         g.addView(levelRow(Icons.Kind.SUN_S, Icons.Kind.SUN_L, light, "light"), Blocks.match());
-        warm = new Blocks.BlockBar(ctx, 12);
-        warm.setListener(new Blocks.BlockBar.Listener() { @Override public void onCommit(int v) { HostLink.cmd("warmth " + v); } });
+        warm = new Blocks.BlockBar(ctx, 24);
+        warm.showValue();
+        warm.setListener(new Blocks.BlockBar.Listener() { @Override public void onCommit(int v) { lastWarmSetAt = android.os.SystemClock.uptimeMillis(); HostLink.cmd("warmth " + v); } });
         warmRow = levelRow(Icons.Kind.WARM, Icons.Kind.WARM, warm, "warmth");
         View h1 = Blocks.hair(ctx);
         g.addView(h1);
@@ -374,9 +396,13 @@ final class BlocksPanel {
                 if (sb.length() > 0) sb.append(';');
                 sb.append(e.getKey()).append('=').append(e.getValue());
             }
-            AppProf.save(appPkg, sb.toString());
+            String spec = sb.toString();
+            AppProf.save(appPkg, spec);
             AppProf.fg(appPkg);
-            syncApp();
+            String label = appPkg;
+            try { label = String.valueOf(ctx.getPackageManager().getApplicationLabel(ctx.getPackageManager().getApplicationInfo(appPkg, 0))); } catch (Throwable ignored) { }
+            String sum = AppProf.summary(spec);
+            set(appHint, label + (sum.length() > 0 ? " · " + sum : ""));
         } else {
             globalSmoothMode = val;
             HostLink.settings("KFB_SMOOTH=" + val + "\n");
@@ -480,14 +506,17 @@ final class BlocksPanel {
 
     private void step(Blocks.BlockBar bar, String cmd, int dir) {
         int max = Math.max(1, barMax(bar));
-        int unit = Math.max(1, Math.round(max / 12f));
+        int unit = Math.max(1, Math.round(max / 24f));
         int v = Math.max(0, Math.min(max, bar.value() + dir * unit));
         if (v == bar.value()) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if ("light".equals(cmd)) lastLightSetAt = now; else if ("warmth".equals(cmd)) lastWarmSetAt = now;
         bar.setValue(v);
         HostLink.cmd(cmd + " " + v);
     }
 
     private int lightMax = 24;
+    private long lastLightSetAt = 0, lastWarmSetAt = 0, lastBtSetAt = 0;
     private int barMax(Blocks.BlockBar b) { return lightMax; }
 
     private static Icons.Kind icon(String id) {
@@ -511,7 +540,13 @@ final class BlocksPanel {
     /** 和经典面板的快捷开关做同样的事（同样的宿主命令和设置键）。 */
     private void action(String id) {
         if ("wifi".equals(id)) { wifiOn = wifiOn == 1 ? 0 : 1; HostLink.cmd("wifi " + wifiOn); paintTiles(); }
-        else if ("bt".equals(id)) { finish(); BluetoothActivity.open(ctx); }
+        else if ("bt".equals(id)) {
+            btOn = btOn == 1 ? 0 : 1;
+            lastBtSetAt = android.os.SystemClock.uptimeMillis();
+            HostLink.cmd(btOn == 1 ? "bt enable" : "bt disable");
+            paintTiles();
+            VeraToast.show(ctx, btOn == 1 ? "正在打开蓝牙…（长按进入配对）" : "正在关闭蓝牙…");
+        }
         else if ("invert".equals(id)) { invertOn = invertOn == 1 ? 0 : 1; HostLink.cmd("invert"); paintTiles(); }
         else if ("clear".equals(id)) {
             // 先收起面板、等它从屏幕上下去（约 0.5 秒）再整屏刷新：以前面板还在时就刷，刷完收起面板又在那块留下残影
@@ -524,7 +559,7 @@ final class BlocksPanel {
             HostLink.cmd("status");
             paintTiles();
         }
-        else if ("shot".equals(id)) { finish(); handler.postDelayed(new Runnable() { @Override public void run() { HostLink.cmd("screenshot"); } }, 1200); }
+        else if ("shot".equals(id)) { finish(); handler.postDelayed(new Runnable() { @Override public void run() { WebAdmin.saveScreenshot(ctx, true); } }, 800); }
         else if ("kindle".equals(id)) { HostLink.cmd("exit"); finish(); }
         else if ("home".equals(id)) goHome();
         else if ("anim".equals(id)) { animOn = animOn > 0 ? 0 : animLast; HostLink.settings("KFB_ANIM_MODE=" + animOn + "\n"); paintTiles(); }
@@ -554,7 +589,7 @@ final class BlocksPanel {
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.OPAQUE);
         lp.gravity = Gravity.TOP | Gravity.LEFT;
         lp.windowAnimations = 0;
@@ -565,6 +600,7 @@ final class BlocksPanel {
     private void open() {
         if (showing) return;
         showing = true;
+        if (scroll != null) scroll.scrollTo(0, 0);
         HostLink.epdHint(Panel.PANEL_HINT_MS, Panel.PANEL_HINT_PCT);
         set(clock, Ui.clock(ctx));
         readStatus();
@@ -606,17 +642,17 @@ final class BlocksPanel {
     private static void set(TextView v, String t) { if (v != null && !t.contentEquals(v.getText())) v.setText(t); }
     private static void vis(View v, boolean on) { if (v != null && (v.getVisibility() == View.VISIBLE) != on) v.setVisibility(on ? View.VISIBLE : View.GONE); }
 
-    /** 只读状态 / 设置文件；两个文件都没改过就什么也不做。 */
+    /** 只读状态 / 设置文件；内容没变且不在防回跳窗口内就直接返回（不用 1 秒精度的 lastModified 捷径，避免同秒 status_patch 漏刷新）。 */
     private void readStatus() {
-        java.io.File f1 = new java.io.File(HostLink.CTL + "status"), f2 = new java.io.File(HostLink.KFB + "settings");
-        long stamp = f1.lastModified() * 31 + f1.length() * 7 + f2.lastModified() * 17 + f2.length() + System.currentTimeMillis() / 60000L;
-        if (stamp == seenStamp && seen != null) return;
-        seenStamp = stamp;
         Map<String, String> st = HostLink.status(ctx);
         Map<String, String> cfg = HostLink.kv(HostLink.KFB + "settings");
-        String key = new java.util.TreeMap<String, String>(st).toString() + new java.util.TreeMap<String, String>(cfg).toString() + System.currentTimeMillis() / 60000L;
-        if (key.equals(seen)) return;
-        seen = key;
+        long nowMs = android.os.SystemClock.uptimeMillis();
+        boolean guarded = (nowMs - lastLightSetAt <= 1500L) || (nowMs - lastWarmSetAt <= 1500L) || (nowMs - lastBtSetAt <= 5000L);
+        Transfer xfer = Transfer.get(ctx);
+        String key = new java.util.TreeMap<String, String>(st).toString() + new java.util.TreeMap<String, String>(cfg).toString()
+            + "|" + xfer.running() + ":" + xfer.port() + ":" + xfer.pin() + "|" + (System.currentTimeMillis() / 60000L);
+        if (!guarded && key.equals(seen)) return;
+        seen = guarded ? null : key;
         set(clock, Ui.clock(ctx));
         StringBuilder sb = new StringBuilder();
         if (panelName.length() > 0) sb.append(panelName).append("  ·  ");
@@ -632,12 +668,12 @@ final class BlocksPanel {
         vis(warmRow, hasWarm); vis((View) warmRow.getTag(), hasWarm);
         vis(autoRow, hasAuto); vis((View) autoRow.getTag(), hasAuto);
         light.setMax(lightMax); warm.setMax(lightMax);
-        light.setValue(HostLink.num(st, "light", 0));
-        warm.setValue(HostLink.num(st, "warmth", 0));
+        if (nowMs - lastLightSetAt > 1500L) light.setValue(HostLink.num(st, "light", 0));
+        if (nowMs - lastWarmSetAt > 1500L) warm.setValue(HostLink.num(st, "warmth", 0));
         if (hasAuto && autoSwitch.isOn() != (HostLink.num(st, "lightauto", 0) == 1)) autoSwitch.set(HostLink.num(st, "lightauto", 0) == 1);
         wifiOn = HostLink.num(st, "wifi", 1);
         invertOn = HostLink.num(st, "invert", 0);
-        btOn = HostLink.num(st, "bton", 0);
+        if (nowMs - lastBtSetAt > 5000L) btOn = HostLink.num(st, "bton", 0);
         try { animOn = Integer.parseInt(cfg.get("KFB_ANIM_MODE")); } catch (Throwable ignored) { animOn = 0; }
         if (animOn > 0) animLast = animOn;
         lightfOn = Math.max(0, Math.min(3, HostLink.num(cfg, "KFB_LIGHTF", 0)));
@@ -682,7 +718,7 @@ final class BlocksPanel {
         java.util.List<StatusBarNotification> show = new java.util.ArrayList<StatusBarNotification>();
         for (StatusBarNotification sbn : list) {
             Notification n = sbn.getNotification();
-            if (n == null || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) continue;
+            if (n == null || n.extras == null || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) continue;
             if (n.extras.getCharSequence(Notification.EXTRA_TITLE) == null && n.extras.getCharSequence(Notification.EXTRA_TEXT) == null) continue;
             show.add(sbn);
         }
@@ -694,6 +730,8 @@ final class BlocksPanel {
         vis(notesBox, !show.isEmpty());
         if (show.isEmpty()) return;
         set(notesHead, "通知 · " + show.size());
+        int clearable = 0;
+        for (StatusBarNotification s : show) if (s.isClearable()) clearable++;
         int n0 = 0;
         for (final StatusBarNotification sbn : show) {
             if (n0 >= MAX_NOTES) break;
@@ -726,33 +764,39 @@ final class BlocksPanel {
             } });
             Blocks.fast(col);
             r.addView(col, Blocks.weight(1));
-            FrameLayout x = new FrameLayout(ctx);
-            x.addView(new Icons.IconView(ctx, Icons.Kind.CLOSE), new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER));
-            x.setClickable(true);
-            x.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
-                NotifService s = NotifService.instance;
-                if (s != null) s.cancelNotification(sbn.getKey());
-                notesList.setTag(null);
-                handler.postDelayed(new Runnable() { @Override public void run() { if (showing) loadNotes(); } }, 150);
-            } });
-            Blocks.fast(x);
-            r.addView(x, Blocks.lp(dp(44), dp(44)));
+            if (sbn.isClearable()) {
+                FrameLayout x = new FrameLayout(ctx);
+                x.addView(new Icons.IconView(ctx, Icons.Kind.CLOSE), new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER));
+                x.setClickable(true);
+                x.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+                    NotifService s = NotifService.instance;
+                    if (s != null) s.cancelNotification(sbn.getKey());
+                    notesList.setTag(null);
+                    handler.postDelayed(new Runnable() { @Override public void run() { if (showing) loadNotes(); } }, 150);
+                } });
+                Blocks.fast(x);
+                r.addView(x, Blocks.lp(dp(44), dp(44)));
+            }
             notesList.addView(r, Blocks.match());
             n0++;
         }
-        LinearLayout foot = new LinearLayout(ctx);
-        foot.setGravity(Gravity.CENTER_VERTICAL);
-        foot.setPadding(dp(12), dp(4), dp(8), dp(8));
-        TextView more = Ui.text(ctx, show.size() > MAX_NOTES ? "还有 " + (show.size() - MAX_NOTES) + " 条" : "", 13, false);
-        foot.addView(more, Blocks.weight(1));
-        foot.addView(Blocks.button(ctx, "全部清除", false, new View.OnClickListener() { @Override public void onClick(View v) {
-            NotifService s = NotifService.instance;
-            if (s != null) for (StatusBarNotification n : NotifService.active()) if (n.isClearable()) s.cancelNotification(n.getKey());
-            notesList.setTag(null);
-            handler.postDelayed(new Runnable() { @Override public void run() { if (showing) loadNotes(); } }, 150);
-        } }));
-        notesList.addView(Blocks.hair(ctx));
-        notesList.addView(foot, Blocks.match());
+        if (show.size() > MAX_NOTES || clearable > 0) {
+            LinearLayout foot = new LinearLayout(ctx);
+            foot.setGravity(Gravity.CENTER_VERTICAL);
+            foot.setPadding(dp(12), dp(4), dp(8), dp(8));
+            TextView more = Ui.text(ctx, show.size() > MAX_NOTES ? "还有 " + (show.size() - MAX_NOTES) + " 条" : "", 13, false);
+            foot.addView(more, Blocks.weight(1));
+            if (clearable > 0) {
+                foot.addView(Blocks.button(ctx, "全部清除", false, new View.OnClickListener() { @Override public void onClick(View v) {
+                    NotifService s = NotifService.instance;
+                    if (s != null) for (StatusBarNotification n : NotifService.active()) if (n.isClearable()) s.cancelNotification(n.getKey());
+                    notesList.setTag(null);
+                    handler.postDelayed(new Runnable() { @Override public void run() { if (showing) loadNotes(); } }, 150);
+                } }));
+            }
+            notesList.addView(Blocks.hair(ctx));
+            notesList.addView(foot, Blocks.match());
+        }
     }
 
     private int dp(int v) { return Ui.dp(ctx, v); }

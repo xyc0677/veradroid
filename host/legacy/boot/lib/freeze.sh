@@ -52,12 +52,14 @@ saver_exit_check() {
 # 触摸前端（veradroid-input）：Android 里所有按下的触点都抬起。冻结前 / 解冻前各发一次：冻结期间或之前
 # 被手势吞掉的触摸不会在解冻后变成永远按着的触点。写 inject FIFO 用 1<>：没人读也不会阻塞；veradroid-input 没在跑就不写。
 vinput_reset() {
-    [ -p $W/inject ] && kill -0 "$(cat $W/input.pid 2>/dev/null)" 2>/dev/null || return 0
+    _ip=$(cat $W/input.pid 2>/dev/null)
+    [ -p $W/inject ] && [ -n "$_ip" ] && kill -0 "$_ip" 2>/dev/null || return 0
     echo "reset ${1:-host}" 1<>$W/inject 2>/dev/null
     return 0
 }
 android_freeze() {
     freezer_setup || return 1
+    _nhp=$(cat $W/netheal.pid 2>/dev/null); [ -n "$_nhp" ] && { kill "$_nhp" 2>/dev/null; rm -f $W/netheal.pid; }
     vinput_reset freeze
     # sync 不再挡在冻结前面：真机上它要等镜像文件的脏页全部写完（几十秒），屏保 / 返回 Kindle 都被它拖住。
     # 进程停住以后不会再有新的脏页，放到后台写，结果一样。
@@ -142,7 +144,7 @@ android_thaw_staged() {
 # 解法：解冻前把名为 watchdog 的那个线程单独放进自冻结的子组 $FZ/wd，先解冻其余线程，
 # 4 秒后各 Handler 已经跑完积压的检查消息（mCompleted=true），再把它放回去。stop.sh 停 Android 时不分步（要尽快杀掉）。
 # 兜底日志：freeze.sh 也会被 stop.sh / sleep.sh 单独 source，那时 common.sh 的 t() 未必已定义
-type t >/dev/null 2>&1 || t() { echo "[$(date +%H:%M:%S) up=$(cut -d' ' -f1 /proc/uptime)] $*" >> /mnt/base-us/system/veradroid/veradroid.log 2>/dev/null; }
+type t >/dev/null 2>&1 || t() { echo "[$(date +%H:%M:%S) up=$(cut -d' ' -f1 /proc/uptime)] $*" >> "${LOG:-/mnt/base-us/system/veradroid/veradroid.log}" 2>/dev/null; }
 wd_hold() {
     case "$0" in *stop.sh) return 0 ;; esac
     [ -d $FZ/wd ] && return 0
@@ -171,7 +173,7 @@ wd_release() {
 }
 wd_release_later() {
     [ -d $FZ/wd ] || return 0
-    ( sleep 4; wd_release; t "thaw: watchdog thread released" ) </dev/null >>/mnt/base-us/system/veradroid/veradroid.log 2>&1 &
+    ( sleep 4; wd_release; t "thaw: watchdog thread released" ) </dev/null >>"${LOG:-/mnt/base-us/system/veradroid/veradroid.log}" 2>&1 &
 }
 freezer_cleanup() {
     wd_release 2>/dev/null
@@ -184,4 +186,25 @@ freezer_cleanup() {
     fi
     rmdir $W/freezer 2>/dev/null
     rm -f $W/fzmode
+}
+# 安装 APK / dex2oat / patchoat / 后台预编译期间禁止空闲冻结与屏保冻结，避免 540s 预编译超时强杀或 Watchdog 杀 system_server
+pkg_busy() {
+    alive $W/installing && return 0
+    alive $W/compile.pid && return 0
+    alive $W/aot.pid && return 0
+    [ "$(sed -n 's/^state=//p' $X/ctl/compile.status 2>/dev/null)" = running ] && return 0
+    type compile_held >/dev/null 2>&1 && compile_held && return 0
+    if type compile_session_pending >/dev/null 2>&1; then
+        compile_session_pending && return 0
+    else
+        pb_now=$(date +%s)
+        for pb_d in $SYS/data/app/vmdl*.tmp; do
+            [ -d "$pb_d" ] || continue
+            pb_m=$(stat -c %Y "$pb_d" 2>/dev/null) || continue
+            [ $((pb_now - pb_m)) -lt ${COMPILE_SESSION_S:-600} ] && return 0
+        done
+    fi
+    pgrep -x dex2oat >/dev/null 2>&1 && return 0
+    pgrep -x patchoat >/dev/null 2>&1 && return 0
+    return 1
 }

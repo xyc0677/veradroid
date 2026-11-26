@@ -140,7 +140,7 @@ final class Lib {
         Store.prefs(c, "reader").edit().putBoolean("d:" + b.path, done).apply();
         b.done = done;
         if (done) b.percent = 100; else refreshProgress(c);
-        changed(false);
+        changed(true);
     }
 
     static void touch(Context c, Book b) {
@@ -368,9 +368,19 @@ final class Lib {
                         if (bm != null) {
                             File out = coverFile(app, b);
                             out.getParentFile().mkdirs();
-                            FileOutputStream fo = new FileOutputStream(out);
-                            bm.compress(Bitmap.CompressFormat.PNG, 100, fo);
-                            fo.close();
+                            File tmp = new File(out.getParentFile(), out.getName() + ".tmp");
+                            FileOutputStream fo = null;
+                            try {
+                                fo = new FileOutputStream(tmp);
+                                bm.compress(Bitmap.CompressFormat.PNG, 100, fo);
+                                fo.flush();
+                                fo.close();
+                                fo = null;
+                                if (!tmp.renameTo(out)) tmp.delete();
+                            } finally {
+                                if (fo != null) try { fo.close(); } catch (Throwable ignored) { }
+                                if (tmp.exists()) tmp.delete();
+                            }
                             if (bm.getConfig() != Bitmap.Config.RGB_565) {
                                 Bitmap small = bm.copy(Bitmap.Config.RGB_565, false);
                                 if (small != null) { bm.recycle(); bm = small; }
@@ -456,6 +466,15 @@ final class Lib {
         Intent i = new Intent(Intent.ACTION_VIEW);
         i.setDataAndType(Uri.fromFile(b.file), mime);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            android.content.pm.ResolveInfo ri = a.getPackageManager().resolveActivity(i, 0);
+            if (ri != null && ri.activityInfo != null) {
+                String targetPkg = ri.activityInfo.packageName;
+                if (targetPkg != null && !targetPkg.equals("android") && !targetPkg.equals(a.getPackageName())) {
+                    AppProf.prepareLaunch(a, targetPkg);
+                }
+            }
+        } catch (Throwable ignored) { }
         // targetSdk 25：带 file:// 的 Intent 会被 StrictMode 拦下（FileUriExposedException），书一本也打不开。
         // KOReader / 静读天下都按文件路径记进度，所以仍给 file://，只在这一次 startActivity 时放开这条检查（/sdcard 对所有应用可读）。
         android.os.StrictMode.VmPolicy vp = android.os.StrictMode.getVmPolicy();
@@ -466,8 +485,39 @@ final class Lib {
         finally { android.os.StrictMode.setVmPolicy(vp); }
     }
 
+    private static final String[] READER_PFX = { "p:", "t:", "s:", "c:", "o:", "e:", "ch:", "st:", "fl:", "r:", "bm:", "d:" };
+
+    /** 删书后同步清理该路径在 reader 偏好里的书签与全部进度键。 */
+    static void purgeReaderState(Context c, String path) {
+        if (c == null || path == null || path.length() == 0) return;
+        try {
+            SharedPreferences p = Store.prefs(c, "reader");
+            SharedPreferences.Editor e = null;
+            for (String pfx : READER_PFX) {
+                String k = pfx + path;
+                if (p.contains(k)) {
+                    if (e == null) e = p.edit();
+                    e.remove(k);
+                }
+            }
+            if (e != null) e.apply();
+        } catch (Throwable ignored) { }
+    }
+
+    /** 文件已在后台删掉后，在主线程同步移除书库内存索引。 */
+    static void removeFromIndex(Context c, String path) {
+        if (path == null) return;
+        Book b = known.remove(path);
+        if (b == null) return;
+        books.remove(b);
+        covers.remove(path);
+        saveIndex(c);
+        changed(true);
+    }
+
     static boolean delete(Context c, Book b) {
         if (!b.file.delete()) return false;
+        purgeReaderState(c, b.path);
         books.remove(b);
         known.remove(b.path);
         covers.remove(b.path);

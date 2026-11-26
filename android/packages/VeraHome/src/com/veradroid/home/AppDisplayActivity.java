@@ -109,7 +109,11 @@ public class AppDisplayActivity extends Activity {
         for (int i = 0; i < ks.size(); i++) {
             Knob k = ks.get(i);
             int p = picked[i];
-            if (p <= 0 || p >= k.values.length || k.values[p] == null) m.remove(k.key); else m.put(k.key, k.values[p]);
+            if (p <= 0 || p >= k.values.length || k.values[p] == null) m.remove(k.key);
+            else {
+                m.put(k.key, k.values[p]);
+                if ("KFB_SMOOTH".equals(k.key)) m.remove("KFB_MODE");
+            }
         }
         StringBuilder sb = new StringBuilder();
         for (java.util.Map.Entry<String, String> e : m.entrySet()) {
@@ -122,7 +126,7 @@ public class AppDisplayActivity extends Activity {
     static List<String> readLines(String path) {
         List<String> out = new ArrayList<String>();
         try {
-            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(path));
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(path), "UTF-8"));
             try { String l; while ((l = r.readLine()) != null && out.size() < 64) out.add(l); } finally { r.close(); }
         } catch (Exception ignored) { }
         return out;
@@ -177,7 +181,7 @@ public class AppDisplayActivity extends Activity {
         row.addView(Ui.button(this, newHost ? "恢复默认" : "恢复跟随", 16, false, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 savedOrReset = true;
-                Store.prefs(AppDisplayActivity.this, "home").edit().remove("appdisp_" + pkg).commit();
+                Store.prefs(AppDisplayActivity.this, "home").edit().remove("appdisp_" + pkg).remove("bgkeep_" + pkg).commit();
                 AppFont.set(AppDisplayActivity.this, pkg, 0f);
                 if (newHost) AppProf.save(pkg, ""); else HostLink.cmd("appdisp home");
                 UiMode.guide(AppDisplayActivity.this, label + " 已恢复默认推荐配置");
@@ -246,7 +250,8 @@ public class AppDisplayActivity extends Activity {
             section(body, "二、排版与交互");
             font = seg(body, "应用字号（仅对当前应用生效）", AppFont.LABELS, new Seg.Listener() {
                 @Override public void onPick(int idx) {
-                    UiMode.guide(AppDisplayActivity.this, idx == 0 ? "字号设为跟随全局" : "该应用字号已选「" + AppFont.LABELS[idx] + "」，点“完成”后生效");
+                    dirty = true;
+                    UiMode.guide(AppDisplayActivity.this, idx == 0 ? "字号设为跟随全局" : "该应用字号已选「" + AppFont.LABELS[idx] + "」，点“完成”或返回保存");
                 }
             });
             for (Knob k : gLayout) k.seg = segKnob(body, k);
@@ -255,6 +260,7 @@ public class AppDisplayActivity extends Activity {
             if (!hostKeep && Cleaner.userApp(this, pkg))
                 keep = seg(body, "保持后台（不被自动清理）", new String[] { "关", "开" }, new Seg.Listener() {
                     @Override public void onPick(int idx) {
+                        dirty = true;
                         UiMode.guide(AppDisplayActivity.this, idx == 1 ? "开启保持后台：切走后不会自动清理，下次秒回原位置" : "关闭保持后台：切走闲置时自动释放内存");
                     }
                 });
@@ -327,7 +333,14 @@ public class AppDisplayActivity extends Activity {
 
     private void load() {
         java.util.Map<String, String> m = AppProf.parse(currentSpec());
-        for (Knob k : knobs) if (k.seg != null) k.seg.select(k.index(m.get(k.key)));
+        boolean localKeep = false;
+        try { localKeep = Store.prefs(this, "home").getBoolean("bgkeep_" + pkg, false); } catch (Throwable ignored) { }
+        for (Knob k : knobs) {
+            if (k.seg == null) continue;
+            String v = m.get(k.key);
+            if (KEEP_KEY.equals(k.key) && v == null && localKeep) v = "1";
+            k.seg.select(k.index(v));
+        }
         font.select(AppFont.index(AppFont.get(this, pkg)));
         if (keep != null) keep.select(Cleaner.keepAlive(this, pkg) ? 1 : 0);
     }
@@ -343,7 +356,12 @@ public class AppDisplayActivity extends Activity {
         for (int i = 0; i < p2.length; i++) p2[i] = sp.get(i);
         String spec = merge(currentSpec(), shown, p2);
         AppFont.set(this, pkg, AppFont.VALUES[Math.max(0, font.selected())]);
-        if (keep != null) Cleaner.setKeepAlive(this, pkg, keep.selected() == 1);
+        if (keep != null) {
+            Cleaner.setKeepAlive(this, pkg, keep.selected() == 1);
+        } else if (hostKeep) {
+            String ka = AppProf.parse(spec).get(KEEP_KEY);
+            try { Store.prefs(this, "home").edit().putBoolean("bgkeep_" + pkg, "1".equals(ka)).apply(); } catch (Throwable ignored) { }
+        }
         if (newHost) {
             // 全选“跟随”：有内置推荐的应用存成 "-"（不然内置的会回来），没有的就删掉这一行
             AppProf.save(pkg, spec.length() > 0 ? spec : AppProf.builtin(table, pkg) ? "-" : "");
@@ -351,6 +369,23 @@ public class AppDisplayActivity extends Activity {
         }
         Store.prefs(this, "home").edit().putString("appdisp_" + pkg, spec).commit();
         HostLink.cmd(spec.length() == 0 ? "appdisp home" : "appdisp " + pkg + "|" + spec);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
+    }
+
+    @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
+        super.onDestroy();
     }
 
     private int dp(int v) { return Ui.dp(this, v); }

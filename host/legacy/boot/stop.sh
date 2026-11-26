@@ -4,7 +4,7 @@
 # 卸载挂载，最后恢复 Kindle 界面。重复执行没关系。--stale：启动前清上次残留，不恢复 Kindle 界面。
 VD=${VD:-$(cd "$(dirname "$0")/.." && pwd)}
 . "$VD/boot/lib/common.sh"
-for m in settings memory freeze framework container input network tester; do . "$VD/boot/lib/$m.sh"; done
+for m in settings memory memkeep freeze framework container input network tester; do . "$VD/boot/lib/$m.sh"; done
 # VD_STOP_REASON：调用方说明为什么停（安装器等）。父进程常常已经退出，光看父进程看不出是谁停的（用户诊断）
 [ "$1" = "--stale" ] || { test_on && tup > $W/test.stop0 2>/dev/null; }
 [ "$1" = "--stale" ] || echo "[$(date +%H:%M:%S)] stop.sh called (parent $PPID: $(tr '\000' ' ' < /proc/$PPID/cmdline 2>/dev/null | cut -c1-120))${VD_STOP_REASON:+ reason: $VD_STOP_REASON}" >> $LOG
@@ -18,7 +18,7 @@ STALE=; [ "$1" = "--stale" ] && STALE=1
 # 干净时也不卸下系统盘：common.sh 刚挂上，卸下来 veradroid.sh 马上又要再挂一次（再跑一次 e2fsck）。
 # 完整停止以后 $W 里还留着的（PW4 模拟器 0.8.13 实测）：常驻的自动更新 / 测试看守和它们的 pid、上次的日志和画面状态、
 # 设置的副本。下面的完整流程不碰它们（input.log 除外：它只是删掉一个日志，触摸前端下次启动时重写）。
-STALE_KEEP="appprof.pkg auto-update.sh autoupdate.pid bat.logt bat.start bgnice docs.before docs.missing gestures inject input.log poem shutw.log splash.cells splash.last splash.t0 splash.txt ss.pid stop-shutdown.sh submodel tester-watch.sh testwatch.pid tz.android uiderr.lines vdkaf.log"
+STALE_KEEP="appprof.pkg auto-update.sh autoupdate.pid bat.logt bat.start bgnice boot.retry docs.before docs.missing gestures inject input.log poem shutw.log splash.cells splash.last splash.t0 splash.txt ss.pid stop-shutdown.sh submodel tester-watch.sh testwatch.pid tz.android uiderr.lines vdkaf.log"
 stale_clean() {
     sc_p=$(cat "${VD_STOP_PIDF:-/tmp/veradroid-stop.pid}" 2>/dev/null); [ -n "$sc_p" ] && kill -0 "$sc_p" 2>/dev/null && return 1
     for sc_f in $(ls -A $W 2>/dev/null); do
@@ -27,6 +27,7 @@ stale_clean() {
     done
     awk -v r="$R" -v s="$SYS/" '$2 == r || index($2, r "/") == 1 || index($2, s) == 1 { f = 1 } END { exit f }' "${VD_MOUNTS:-/proc/mounts}" || return 1
     [ -d $FZ ] && return 1
+    [ -e "${VD_ADBKEYS:-$SYS/data/misc/adb/adb_keys}" ] && return 1
     [ -z "$(pgrep -f "^unshare -m -u -i -n -p -f -- sh .*--in-ns" 2>/dev/null)" ] || return 1
     [ -z "$(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null)" ] || return 1
     [ -z "$(chroot_pids)" ] || return 1
@@ -66,19 +67,28 @@ kmsg "begin"
 RS=; [ -f $W/restarting ] && RS=1
 
 [ -d $FZ ] && android_thaw 2>/dev/null          # 冻着的进程收不到 SIGKILL
+type bg_thaw_all >/dev/null 2>&1 && bg_thaw_all 2>/dev/null
 type net_resume >/dev/null 2>&1 && net_resume     # 冻结时停下的 slirp4netns（freeze.sh）：停着收不到 SIGTERM
+# Collect full ancestor chain so saver_exit_check (grandchild of sleep_watch) never kills stop.sh itself.
+anc=" $$ "
+_ap=$$; _ai=0
+while [ $_ai -lt 16 ]; do
+    _ap=$(awk '$1=="PPid:"{print $2; exit}' /proc/$_ap/status 2>/dev/null)
+    case "$_ap" in ''|0|1|*[!0-9]*) break ;; esac
+    anc="$anc$_ap "
+    _ai=$((_ai + 1))
+done
+in_anc() { case "$anc" in *" $1 "*) return 0 ;; esac; return 1; }
 ps=
 for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do
     p=$(cat $W/$f.pid 2>/dev/null)
-    [ "$p" = "$PPID" ] && continue              # 看门狗自己调的：它在等这个脚本跑完
-    [ "$p" = "$$" ] && continue                 # vdshutwatch exec 成了本脚本：pid 就是自己
-    # 先杀子进程（watchdog 的 sleep 20 之类）：父进程死了它们还会继承着打开的脚本文件，让 /mnt/base-us 卸不掉
-    # 只限这几个循环：cmd 的子进程里有脱离出去的卸载 / 整包更新，不能杀
-    # legacy：after_boot 在容器里跑命令用的是 chroot /proc/<init>/root（没有 PID 命名空间可进），这些子进程不会随容器
-    # 一起死；after_boot 不停，它就在我们杀完容器之后继续起新的，占着系统盘（PW3 模拟器实测：返回 Kindle 后系统盘卸不掉）
-    case "$f" in guard|watchdog|sleep|lipc|usb|boot|afterboot|compile) [ -n "$p" ] && for c in $(pgrep -P "$p" 2>/dev/null); do kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
-    [ -n "$p" ] && kill $p 2>/dev/null && ps="$ps $p"
+    [ -n "$p" ] || continue
+    # 先杀非祖先子进程（watchdog 的 sleep 20 / sleep_watch 的 lipc-wait-event / after_boot 等）
+    case "$f" in guard|watchdog|sleep|lipc|usb|boot|afterboot|compile) for c in $(pgrep -P "$p" 2>/dev/null); do for cc in $(pgrep -P "$c" 2>/dev/null); do in_anc "$cc" && continue; kill $cc 2>/dev/null && ps="$ps $cc"; done; in_anc "$c" && continue; kill $c 2>/dev/null && ps="$ps $c"; done ;; esac
+    in_anc "$p" && continue
+    kill $p 2>/dev/null && ps="$ps $p"
 done
+for p in $(pgrep -f "lipc-wait-event .*com\.lab126\.hal usbPlugIn,usbPlugOut" 2>/dev/null); do kill $p 2>/dev/null && ps="$ps $p"; done
 # 预编译的看守循环（compile_hold 起的，pid 在 compile.guard）也写 $LOG：一起停。工作进程看到 compile.quit 就不再开始新的等待
 : > $W/compile.quit 2>/dev/null
 p=$(cat $W/compile.guard 2>/dev/null); [ -n "$p" ] && kill $p 2>/dev/null && ps="$ps $p"
@@ -95,16 +105,21 @@ for p in $ps; do kill -9 $p 2>/dev/null; done
 kmsg "helpers and container killed"
 for p in $(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null); do kill $p 2>/dev/null; done
 for f in guard watchdog sleep lipc usb cmd boot afterboot slirp shutw compile; do rm -f $W/$f.pid; done
-rm -rf $W/compile.quit $W/compile.guard $W/compile.stale $W/compile.lock $W/compile.queue $W/compile.total $W/compile.index $W/booted $W/pkglist.stamp $W/wifi.rx $W/wifi.busy
+rm -rf $W/appslim.lock $W/compile.quit $W/compile.guard $W/compile.stale $W/compile.lock $W/compile.queue $W/compile.total $W/compile.index $W/booted $W/pkglist.stamp $W/wifi.rx $W/wifi.busy
+[ -n "$STALE" ] || [ "${VD_KEEP_RETRY:-0}" = 1 ] || rm -f $W/boot.retry
 croot=$(chroot_root)        # legacy：容器根的 设备号:inode，要在删 $W/pid、杀 init 之前记下来（之后就读不到了）
 input_stop
 display_stop
 # 共用网络模式下传书开着时放行过的端口（cmd.sh fwd_on）：撤掉，不让 Kindle 的防火墙一直开着这个口
 case "$(cat $W/fwd.id 2>/dev/null)" in ipt:*) iptables -D INPUT -i "$(cut -d: -f3 $W/fwd.id)" -p tcp --dport "$(cut -d: -f2 $W/fwd.id)" -j ACCEPT 2>/dev/null ;; esac
 # saver_*：屏保期间被停掉时 sleep.sh 来不及删；残留的 saver_frozen 让下一次运行的看门狗一直当作在屏保（不预编译、不应用设置、蓝牙按键全丢；PW6 真机遇到）
+[ -f $W/adbfwd.ipt ] && iptables -D INPUT -i "$(cut -d: -f2 $W/adbfwd.ipt)" -p tcp --dport "$(cut -d: -f1 $W/adbfwd.ipt)" -j ACCEPT 2>/dev/null   # 无线调试（webadmin.sh）
+rm -f $W/adbfwd.ipt $W/adbfwd.id $W/adb.until $X/ctl/adb.on $SYS/data/misc/adb/adb_keys 2>/dev/null
+[ -f $W/fwd.ipt ] && iptables -D INPUT -i "$(cut -d: -f2 $W/fwd.ipt)" -p tcp --dport "$(cut -d: -f1 $W/fwd.ipt)" -j ACCEPT 2>/dev/null
 kill $(cat $W/netheal.pid 2>/dev/null) 2>/dev/null
 rm -f $W/netheal.pid $W/net.sig $W/net.last $W/resolv.new
-rm -f $W/fwd.id $W/epd.log $W/pid $W/unshare.pid $W/frozen $W/saver_frozen $W/saver_nofreeze $W/slirp.sock $W/slirp.log $W/resolv.conf $W/input.log $W/input.err
+rm -f $W/fwd.id $W/fwd.ipt $W/epd.log $W/pid $W/unshare.pid $W/frozen $W/saver_frozen $W/saver_nofreeze $W/slirp.sock $W/slirp.log $W/resolv.conf $W/input.log $W/input.err
+rm -rf $W/bgfz.lock $W/memfg.bg $W/memfg.bg.tmp* $W/memfg.frozen $W/memfg.frozen.tmp* $W/memfg.stopped $W/wifi.idle $W/wifi.idleoff $W/exiting $W/exit.ack $W/sleep.cur $W/lastinput $W/lasttouch $W/memfg.cur
 
 # legacy（3.0 内核，只有挂载命名空间）：容器进程不会随 init 一起消失，按“根目录和容器 init 相同”逐个杀；
 # 挂载在私有挂载命名空间里，随它一起消失；下面的卸载只是兜底

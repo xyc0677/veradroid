@@ -150,7 +150,7 @@ vd_root_tidy() {
 # 包里自带的文件名记在 state/bundled.<文件夹>（整包安装时写）：带过去时跳过旧包自带的（新包有自己的那份；新包去掉的也不复活）。
 # 目标里已有同名文件的不动（包里有的以包为准）。这一段在 bootstrap*.sh 和各机型 boot/lib/tidy.sh 里是同一份
 # （tests/user-files-test.sh 核对）。set -eu 下不能失败。
-VD_USER_DIRS="fonts screensaver apps kindle-crash"
+VD_USER_DIRS="fonts screensaver apps kindle-crash webview-alt"
 # vd_user_carry 从 到 "文件夹…" [mv]：$1/<d>/ 下（含子文件夹）用户的文件拷进 $2/<d>/；mv=mv 时挪过去（同一个盘，卸载留下的那份）。
 # 同一个文件系统上先试硬链接（不多占地方，host.bak 里的那份照样能回退），不行再拷。输出带过去的文件数。
 vd_user_carry() {
@@ -247,7 +247,7 @@ vd_unlock() { [ "$(cat "$INSTALL_LOCK/pid" 2>/dev/null)" = "$$" ] || return 0; r
 # 临时目录（整包 + 解开的 ~290 MB）和安装锁就留到下一次安装（老机型存储小）。先删临时目录、放锁，再做别的。
 vd_cleanup() { set +eu; type syncer_off >/dev/null 2>&1 && syncer_off; vd_kill_users "$TMP"; rm -rf "$TMP"
     [ -d "$TMP" ] && { sleep 1; vd_kill_users "$TMP"; rm -rf "$TMP"; }; vd_unlock
-    [ -n "${KEEPAWAKE:-}" ] && lipc-set-prop com.lab126.powerd preventScreenSaver "$KEEPAWAKE" >/dev/null 2>&1 && rm -f /mnt/base-us/veradroid/state/keepawake.orig; return 0; }
+    [ -n "${KEEPAWAKE:-}" ] && lipc-set-prop -i com.lab126.powerd preventScreenSaver "$KEEPAWAKE" >/dev/null 2>&1 && rm -f /mnt/base-us/veradroid/state/keepawake.orig; return 0; }
 if ! mkdir "$INSTALL_LOCK" 2>/dev/null; then
     lp=$(cat "$INSTALL_LOCK/pid" 2>/dev/null || true); lb=$(cat "$INSTALL_LOCK/boot" 2>/dev/null || true)
     # 锁在 /mnt/base-us 上，断电后还在：只认本次开机（boot_id 相同）里还活着的持有者
@@ -957,8 +957,9 @@ vp_netdiag() { # 输出文件 [服务器根地址]
         return 0
     fi
     vp_kvw "$nf" state=running step=speed "line1=正在测下载速度（用真实的安装包下 6 秒）…" "lines=$NC_LINES" "start=$t0"
-    case "$(uname -r)" in 3.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/api/bootstrap" ;; esac
+    case "$(uname -r)" in 3.*|4.1.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/static/bootstrap-pw6.json?t=$t0" ;; esac
     u=$(curl_do -fsSL --max-time 15 "$m" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p')
+    [ -z "$u" ] && case "$m" in */bootstrap-pw6.json*) u=$(curl_do -fsSL --max-time 15 "$nb/api/bootstrap" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p') ;; esac
     sp=0
     [ -n "$u" ] && sp=$(curl_do -s -o /dev/null --connect-timeout 10 --max-time 6 -w '%{speed_download}' "$u" 2>/dev/null | cut -d. -f1)
     case "$sp" in ''|*[!0-9]*) sp=0 ;; esac
@@ -1178,15 +1179,25 @@ vd_download() {
         # 结束标记文件 + kill -0 一起看：只看 kill -0 时，Linux 上的 busybox 测试偶尔一直转圈（进程早就结束了）
         rm -f "$dw_o.rc"
         { vd_fetch "$dw_u" "$dw_o" "$dw_t" && echo 0 > "$dw_o.rc" || echo $? > "$dw_o.rc"; } &
-        dw_p=$!; dw_t0=$(vp_now); dw_a=$(vd_have "$dw_o"); dw_k=0
+        dw_p=$!; dw_t0=$(vp_now); dw_a=$(vd_have "$dw_o"); dw_k=0; dw_ps=$dw_a; dw_pt=$dw_t0
         while [ ! -s "$dw_o.rc" ] && kill -0 $dw_p 2>/dev/null; do
             sleep 1; dw_k=$((dw_k + 1)); [ $((dw_k % 5)) = 0 ] || continue
-            dw_sz=$(vd_have "$dw_o"); dw_dt=$(( $(vp_now) - dw_t0 )); [ $dw_dt -ge 1 ] || dw_dt=1
+            dw_sz=$(vd_have "$dw_o"); dw_now=$(vp_now); dw_dt=$((dw_now - dw_t0)); [ $dw_dt -ge 1 ] || dw_dt=1
+            if [ "$dw_sz" -gt "$dw_ps" ] 2>/dev/null; then dw_ps=$dw_sz; dw_pt=$dw_now; fi
             dw_kb=$(( (dw_sz - dw_a) / 1024 / dw_dt ))
             if [ $dw_t -gt 0 ]; then
                 dw_pct=$(( dw_sz / 1024 * 100 / (dw_t / 1024 + 1) )); [ $dw_pct -gt 100 ] && dw_pct=100
                 progress_line $dw_pct "Downloading / 下载中 $(vp_mb $dw_sz)/$(vp_mb $dw_t) MB ${dw_kb} KB/s"
             else show "下载中 $(vp_mb $dw_sz) MB ${dw_kb} KB/s"; fi
+            if [ $((dw_now - dw_pt)) -ge 60 ]; then
+                vlog "download: stalled at $dw_sz bytes for $((dw_now - dw_pt))s, restarting fetch"
+                for _kp in /proc/[0-9]*; do
+                    _kp=${_kp##*/}; [ "$_kp" = "$$" ] && continue
+                    tr '\0' ' ' < "/proc/$_kp/cmdline" 2>/dev/null | grep -Fq "$dw_o" && kill "$_kp" 2>/dev/null || true
+                done
+                kill $dw_p 2>/dev/null || true
+                break
+            fi
         done
         DL_RC=0; wait $dw_p 2>/dev/null || true
         DL_RC=$(cat "$dw_o.rc" 2>/dev/null || echo 1); rm -f "$dw_o.rc"; [ -n "$DL_RC" ] || DL_RC=1
@@ -1230,9 +1241,9 @@ vd_parts_get() {
     done
     return 1
 }
-# 目录下所有普通文件（不跨挂载点）："sha256 路径"
+# 目录下所有普通文件（不跨挂载点）："sha256 路径"（跳过含单引号的路径，与组装阶段保持一致）
 vd_parts_hash() {
-    for ph_d in "$@"; do [ -d "$ph_d" ] && $UNPACK_PRI find "$ph_d" -xdev -type f -exec sha256sum {} + 2>/dev/null; done | awk '{ print substr($0, 1, 64) " " substr($0, 67) }'
+    for ph_d in "$@"; do [ -d "$ph_d" ] && $UNPACK_PRI find "$ph_d" -xdev -type f -exec sha256sum {} + 2>/dev/null; done | awk 'index(substr($0, 67), "\047") == 0 { print substr($0, 1, 64) " " substr($0, 67) }'
     return 0
 }
 # 树的清单（在树里运行，路径 ./…）："hexmode perm uid gid dev ino size mtime 路径"
@@ -1267,8 +1278,8 @@ vd_parts_canon() {
 # 非递归地把 $SYS/rootfs 再绑一次（只看得到镜像本身，看不到上面的挂载），读原文件的 sha256。输出 "sha 路径"（路径是
 # 正常的 $SYS/rootfs/...：第二段在 Android 停了、挂载都卸掉以后才从那里拷，那时就是原文件）。
 # 临时目录在 tmpfs 上，只 rmdir 不 rm -rf：万一卸不掉，也不会顺着它删到镜像里。
-vd_parts_under_list() { # $SYS/rootfs 里被挂载盖住的路径（相对 rootfs；data/ 不管；带转义的怪名字跳过）
-    awk -v r="$SYS/rootfs/" 'index($2, r) == 1 && $2 != r "data" && index($2, r "data/") != 1 && index($2, "\\") == 0 { print substr($2, length(r) + 1) }' "${VD_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null
+vd_parts_under_list() { # $SYS/rootfs 里被挂载盖住的路径（相对 rootfs；data/ 不管；带转义或单引号的怪名字跳过）
+    awk -v r="$SYS/rootfs/" 'index($2, r) == 1 && $2 != r "data" && index($2, r "data/") != 1 && index($2, "\\") == 0 && index($2, "\047") == 0 { print substr($2, length(r) + 1) }' "${VD_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null
 }
 vd_parts_under() {
     [ -d "$SYS/rootfs" ] || return 0
@@ -1327,7 +1338,7 @@ vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没
     for pp_d in "$SYS/rootfs" "$SYS/slim-removed"; do
         [ -d "$pp_d" ] || continue
         vd_parts_canon "$pp_d" "$PD/c.out"
-        awk -v d="$pp_d" 'FILENAME == ARGV[1] { if ($1 == "f" && $2 != "?") { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]* /, "", p); print $2, d "/" substr(p, 3) }; next }' "$PD/c.out" >> "$PD/src.rootfs"
+        awk -v d="$pp_d" 'FILENAME == ARGV[1] { if ($1 == "f" && $2 != "?") { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]* /, "", p); if (index(p, "\047") == 0) print $2, d "/" substr(p, 3) }; next }' "$PD/c.out" >> "$PD/src.rootfs"
     done
     vd_parts_under >> "$PD/src.rootfs"
     vlog "parts: hashed local files in $(( $(vp_now) - pp_t0 ))s ($(wc -l < "$PD/src.host" | tr -d ' ') program files, $(wc -l < "$PD/src.rootfs" | tr -d ' ') image files)"
@@ -1412,7 +1423,15 @@ vd_parts_prepare() { # 元数据 json；成功：$TMP/veradroid-pw6 就绪（没
     # 整包安装也一样（装好的程序目录同在这块盘上），以前这里每次都失败、增量更新全部退回整包（r093 闸门 KT5 / PW5 实测）
     pp_pm=1; : > "$PD/.permtest" && chmod 640 "$PD/.permtest" 2>/dev/null && [ "$(stat -c %a "$PD/.permtest" 2>/dev/null)" = 640 ] || pp_pm=
     rm -f "$PD/.permtest"
-    [ -n "$pp_pm" ] || vlog "parts: this file system keeps no permission bits (read back $(stat -c %a "$TMP/veradroid-pw6/VERSION" 2>/dev/null)): checking contents only"
+    [ -n "$pp_pm" ] || vlog "parts: this file system keeps no permission bits (read back $(stat -c %a "$TMP/veradroid-pw6/version" 2>/dev/null)): checking contents only"
+    # FAT32 / fuse fsp（KPW4 / KO2 / KO3 / KPW5 / KT5 / KT6 / Scribe 等）不区分文件名大小写：若包内存在仅大小写不同的文件，按小写去重比对
+    pp_ci=; : > "$PD/.CiTest" 2>/dev/null && [ -f "$PD/.citest" ] && pp_ci=1
+    rm -f "$PD/.CiTest" "$PD/.citest"
+    if [ -n "$pp_ci" ]; then
+        awk '{ k = tolower($2); p[k] = $1 } END { for (k in p) print p[k], k }' "$PD/got.files" | LC_ALL=C sort -k2 > "$PD/got.files.ci"
+        awk '{ k = tolower($2); p[k] = $1 } END { for (k in p) print p[k], k }' "$PD/want.files" | LC_ALL=C sort -k2 > "$PD/want.files.ci"
+        mv -f "$PD/got.files.ci" "$PD/got.files"; mv -f "$PD/want.files.ci" "$PD/want.files"
+    fi
     if ! cmp -s "$PD/got.files" "$PD/want.files" || { [ -n "$pp_pm" ] && ! cmp -s "$PD/got.perm" "$PD/want.perm"; }; then
         vlog "parts: program files do not match the index: $(diff "$PD/want.files" "$PD/got.files" 2>/dev/null | head -5 | tr '\n' ' ') $(diff "$PD/want.perm" "$PD/got.perm" 2>/dev/null | grep '^[-+][0-9]' | head -20 | tr '\n' ' ')"
         return 1
@@ -1886,8 +1905,8 @@ bk_prune() {
 }
 USER_SAFE=; BK_RESULT=empty; BK_FELL=
 BK_MODE=$(vd_backup_mode)
-# emulator-only 机型（没在真机上验证过）：安装前一定要有一份备份，“不备份”在这里按“只备份设置和阅读进度”做
-if [ "$BK_MODE" = off ] && [ "$TESTED" = emulator-only ]; then BK_MODE=light; vlog "user backup: off is not allowed on emulator-only models, using light"; fi
+# emulator-only 机型首次安装时仍强制保留轻量备份；已经装好后用户在设置里明确选了“不备份”，更新时尊重用户选择
+if [ "$BK_MODE" = off ] && [ "$TESTED" = emulator-only ] && [ ! -f "$VD/version" ] && [ ! -f "$SYS/version" ]; then BK_MODE=light; vlog "user backup: off is not allowed on first install of emulator-only models, using light"; fi
 if [ "$BK_MODE" = off ]; then
     BK_RESULT=off; : > $BKL; : > $BKC; BK_NEEDK=0; BK_SKIPN=0; BK_SKIPK=0
     vlog "user backup: off (UPDATE_BACKUP=off); the documents manifest is still taken and checked after the first boot, nothing to restore from"
@@ -1908,7 +1927,7 @@ if [ "$TESTED" = emulator-only ]; then
     KEEPAWAKE=$(lipc-get-prop com.lab126.powerd preventScreenSaver 2>/dev/null || true); case "$KEEPAWAKE" in 1) ;; *) KEEPAWAKE=0 ;; esac
     # 被硬杀（SIGKILL）时上面的 EXIT 陷阱不跑，1 会一直留着、电源键进不了屏保：原值同时记在 state/keepawake.orig，下次启动时 veradroid.sh 放回
     [ "$KEEPAWAKE" = 0 ] && { echo 0 > /mnt/base-us/veradroid/state/keepawake.orig; } 2>/dev/null || true
-    lipc-set-prop com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1 || true
+    lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1 || true
 fi
 FS=$(stat -f -c %T /mnt/base-us 2>/dev/null || true)
 LOOP=0
@@ -1986,6 +2005,23 @@ if [ "$LOOP" = 1 ]; then
         fi
         mkdir -p "$SYS"
         loop_mount "$SYSTEM_IMG" "$SYS" || die "无法挂载 ext4 系统盘"
+    fi
+    # 系统盘（ext4 loop 镜像）现在才挂上：重读一次 $SYS/settings.conf 里的 UPDATE_BACKUP，
+    # 避免 Android 停着时从 Kindle/KUAL 触发更新、还没挂系统盘时误用默认 full（KO3/PW4 关掉备份仍备份书库）。
+    bk_after=$(vd_backup_mode)
+    if [ "$bk_after" = off ] && [ "$TESTED" = emulator-only ] && [ ! -f "$VD/version" ] && [ ! -f "$SYS/version" ]; then
+        bk_after=light
+    fi
+    if [ "$bk_after" != "$BK_MODE" ]; then
+        vlog "user backup: re-read after loop_mount: $BK_MODE -> $bk_after"
+        BK_MODE=$bk_after
+        if [ "$BK_MODE" = off ]; then
+            BK_RESULT=off; : > $BKL; : > $BKC; BK_NEEDK=0; BK_SKIPN=0; BK_SKIPK=0
+            vlog "user backup: off (UPDATE_BACKUP=off from mounted settings.conf); skipping backup"
+        else
+            [ "$BK_MODE" = light ] && BK_BUDGETK=0
+            bk_select || true
+        fi
     fi
     # 卸载（或更早的非 loop 安装）留下的书 / 微信读书下载 / token 在 $SYS.pre-ext4.*/data/media：搬进系统盘（不覆盖、原目录保留）
     if [ ! -d "$SYS/data/media/0" ]; then
@@ -2245,10 +2281,10 @@ else
         *) meta="$BASE/api/bootstrap" ;;
     esac
     json=$(vd_meta "$meta" --connect-timeout 20 --max-time 30) || die "无法连接更新服务器"
-    url=$(printf '%s' "$json" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
-    sha=$(printf '%s' "$json" | sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p')
-    ver=$(printf '%s' "$json" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-    size=$(printf '%s' "$json" | sed -n 's/.*"size":\([0-9]*\).*/\1/p')
+    url=$(printf '%s' "$json" | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p')
+    sha=$(printf '%s' "$json" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p')
+    ver=$(printf '%s' "$json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
+    size=$(printf '%s' "$json" | sed -n 's/.*"size": *\([0-9]*\).*/\1/p')
     [ -n "$url" ] && [ -n "$sha" ] || die "服务器没有可用的安装包"
     vd_mirrors_from "$json"
     mkdir -p "$TMP"
@@ -2380,7 +2416,15 @@ if [ -s $BKL ]; then
         elif [ "$BK_BUDGETK" = 0 ]; then show "Backing up settings and reading progress ($((need / 1024)) MB), do NOT restart / 正在备份设置和阅读进度（约 $((need / 1024)) MB，书不备份），请勿重启 Kindle"
         else show "Backing up settings and books ($((need / 1024)) MB), do NOT restart / 正在备份设置和书（约 $((need / 1024)) MB），请勿重启 Kindle"; fi
         [ "$BK_SKIPN" -gt 0 ] && vlog "user backup: $BK_SKIPN files (${BK_SKIPK}K) not in the backup, they stay where they are"
-        vp_step backup "书和设置打一个备份包（约 $((need / 1024)) MB）" "只在本机；装完核对书库；请勿重启 Kindle"
+        if [ "$BK_BUDGETK" = 0 ]; then
+            bk_l1="备份设置和阅读进度（约 $((need / 1024)) MB）"
+            bk_l2="书不备份；装完核对书库；请勿重启 Kindle"
+            [ -n "$BK_FELL" ] && bk_l2="空间不够做完整备份，这次书不备份；装完核对书库"
+        else
+            bk_l1="书和设置打一个备份包（约 $((need / 1024)) MB）"
+            bk_l2="只在本机；装完核对书库；请勿重启 Kindle"
+        fi
+        vp_step backup "$bk_l1" "$bk_l2"
         t0=$(date +%s)
         vlog "user backup: ${need}K to back up ($(wc -l < $BKL | tr -d ' ') files)"
         # 2026-11-20 老机型“点了更新装不上”（PW4 现场日志：user backup FAILED … tar: error exit delayed from previous errors，
@@ -2806,32 +2850,39 @@ fi
 # 删掉旧的卸载入口后让书库马上把它的条目拿掉（索引服务一会儿也会自己发现，这里不等）
 [ -n "$RETIRED" ] && lipc-set-prop com.lab126.scanner doFullScan 1 2>/dev/null || true
 if [ -f "$TMP/veradroid-pw6/VeraDroid-Launch.sh" ]; then
-    # Kindle's home library may use either mount; put the launcher in both so
-    # returning to Kindle always finds a "VeraDroid 启动" entry.
-    for D in "$DOCS" /mnt/us/documents /mnt/base-us/documents; do
-        [ -d "$D" ] || continue
-        cp "$TMP/veradroid-pw6/VeraDroid-Launch.sh" "$D/VeraDroid 启动.sh" 2>/dev/null || true
-        chmod 755 "$D/VeraDroid 启动.sh" 2>/dev/null || true
-        # force a fresh library scan without touching user books
-        touch "$D/VeraDroid 启动.sh" 2>/dev/null || true
-    done
-    sync 2>/dev/null || true
-    # 旧包里的启动入口没有忽略 SIGPIPE：书库启动器的 fbink 管道断开时会一点就退出。在文件头注释后补一行。
-    if ! grep -q "trap '' PIPE" "$DOCS/VeraDroid 启动.sh" 2>/dev/null; then
-        awk 'f==0 && !/^#/ {print "trap '\'''\'' PIPE"; f=1} {print}' "$DOCS/VeraDroid 启动.sh" > "$DOCS/.vd-launch.tmp" 2>/dev/null \
-            && mv "$DOCS/.vd-launch.tmp" "$DOCS/VeraDroid 启动.sh"
+    # 先在临时文件准备好最终带 trap '' PIPE 的启动入口；内容完全一致时不重复覆写，
+    # 避免触发 Kindle sh_integration 的“删条目 + 重建”bug 导致重启后启动入口从书库消失。
+    _vl_src="$TMP/veradroid-pw6/VeraDroid-Launch.sh"
+    _vl_out="$TMP/vd-launch-ready.sh"
+    if grep -q "trap '' PIPE" "$_vl_src" 2>/dev/null; then
+        cp "$_vl_src" "$_vl_out" 2>/dev/null || true
+    else
+        awk 'f==0 && !/^#/ {print "trap '\'''\'' PIPE"; f=1} {print}' "$_vl_src" > "$_vl_out" 2>/dev/null || cp "$_vl_src" "$_vl_out" 2>/dev/null || true
     fi
-    chmod 755 "$DOCS/VeraDroid 启动.sh" 2>/dev/null || true
-    # 马上就要启动 Android（会停掉 Kindle 的索引服务 scanner）：趁它还在，点名让它现在就索引这个入口，
-    # 否则入口文件在、书库里却看不到（“安装后书库入口不见”）。
-    lipc-set-prop com.lab126.scanner reScanFile "/mnt/us/documents/VeraDroid 启动.sh" 2>/dev/null || true
-    sleep 2
+    _vl_dst="$DOCS/VeraDroid 启动.sh"
+    [ -d /mnt/us/documents ] && _vl_dst="/mnt/us/documents/VeraDroid 启动.sh"
+    if [ -s "$_vl_out" ] && ! cmp -s "$_vl_out" "$_vl_dst" 2>/dev/null; then
+        cp "$_vl_out" "$_vl_dst" 2>/dev/null || cp "$_vl_out" "$DOCS/VeraDroid 启动.sh" 2>/dev/null || true
+        chmod 755 "$_vl_dst" "$DOCS/VeraDroid 启动.sh" 2>/dev/null || true
+        touch "$_vl_dst" 2>/dev/null || true
+        sync 2>/dev/null || true
+        lipc-set-prop com.lab126.scanner reScanFile "/mnt/us/documents/VeraDroid 启动.sh" 2>/dev/null || true
+        sleep 2
+    fi
+    rm -f "$_vl_out" 2>/dev/null || true
 fi
 # KUAL is an alternative for jailbreaks that do not index .sh books.
-if [ -d "$TMP/veradroid-pw6/kual" ]; then
-    mkdir -p /mnt/us/extensions/VeraDroid 2>/dev/null || true
-    cp -a "$TMP/veradroid-pw6/kual/." /mnt/us/extensions/VeraDroid/ 2>/dev/null || true
-    chmod 755 /mnt/us/extensions/VeraDroid/start.sh /mnt/us/extensions/VeraDroid/install.sh 2>/dev/null || true
+_kual_src=
+if [ -d "$TMP/veradroid-pw6/kual" ]; then _kual_src="$TMP/veradroid-pw6/kual"
+elif [ -d "$VD/kual" ]; then _kual_src="$VD/kual"; fi
+if [ -n "$_kual_src" ]; then
+    for _kd in /mnt/us/extensions/VeraDroid /mnt/base-us/extensions/VeraDroid; do
+        [ -d "${_kd%/VeraDroid}" ] || [ "$_kd" = /mnt/us/extensions/VeraDroid ] || continue
+        mkdir -p "$_kd" 2>/dev/null || continue
+        cp -a "$_kual_src/." "$_kd/" 2>/dev/null || true
+        chmod 755 "$_kd/start.sh" "$_kd/install.sh" "$_kd/restore-entry.sh" 2>/dev/null || true
+        break
+    done
 fi
 if [ -n "${cur_ver:-}" ]; then vd_result done 0 "已更新到 ${ver:-}" "数据、书架、绑定账号都保留"; else vd_result done 0 "已安装 VeraDroid ${ver:-}" "书和 Kindle 的设置都没有动"; fi
 # BH081-1：自动更新（VD_NO_START=1）时用户正在用 Kindle（Android 冻结或没开）：装完不要把 Android 弹到前台。
@@ -2869,3 +2920,4 @@ if [ -n "$bak_list" ]; then
 else
     echo "完成。"
 fi
+echo "提示：如果 Kindle 书库不显示“VeraDroid 启动”，可直接打开 KUAL → VeraDroid → 启动 VeraDroid 一键进入。"

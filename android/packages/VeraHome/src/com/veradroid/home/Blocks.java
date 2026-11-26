@@ -465,7 +465,8 @@ final class Blocks {
      */
     static int statusInset(android.app.Activity a) {
         if (a instanceof StatsActivity || a instanceof StorageActivity || a instanceof BackupActivity || a instanceof StoreActivity || a instanceof FontStoreActivity || a instanceof InboxActivity
-            || a instanceof TransferActivity || a instanceof HomeActivity) return 0;
+            || a instanceof TransferActivity || a instanceof HomeActivity || a instanceof LockSettingsActivity || a instanceof ScreensaverActivity
+            || a instanceof WifiActivity || a instanceof BluetoothActivity || a instanceof HostSettingsActivity || a instanceof AppDisplayActivity || a instanceof FilePickerActivity) return 0;
         try { if (!Store.prefs(a, "home").getBoolean("statusbar", true)) return 0; } catch (Throwable ignored) { }
         if (StatusBarService.reserving()) return 0;
         return StatusBarService.height(a);
@@ -501,14 +502,35 @@ final class Blocks {
         pp.topMargin = dp(c, 6);
         box.addView(pager, pp);
         final Runnable label = new Runnable() { @Override public void run() {
-            pager.set(sv.currentPage(), sv.pages());
-            int vis = sv.pages() > 1 ? View.VISIBLE : View.GONE;
+            int n = sv.pages();
+            pager.set(sv.currentPage(), n);
+            int vis = n > 1 ? View.VISIBLE : View.GONE;
             if (pager.getVisibility() != vis) pager.setVisibility(vis);
         } };
         pager.setVisibility(View.GONE);
         sv.setOnPage(label);
-        sv.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
-            @Override public void onGlobalLayout() { if (sv.getHeight() > 0) label.run(); }
+        final android.view.ViewTreeObserver.OnPreDrawListener pdl = new android.view.ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                if (sv.getHeight() <= 0) return true;
+                int n = sv.pages();
+                pager.set(sv.currentPage(), n);
+                int vis = n > 1 ? View.VISIBLE : View.GONE;
+                if (pager.getVisibility() != vis) {
+                    pager.setVisibility(vis);
+                    return false;   // 跳过未放翻页条的半成品帧，立刻重排后再一次画齐（墨水屏少一次整屏重刷）
+                }
+                android.view.ViewTreeObserver vto = sv.getViewTreeObserver();
+                if (vto.isAlive()) vto.removeOnPreDrawListener(this);
+                return true;
+            }
+        };
+        sv.getViewTreeObserver().addOnPreDrawListener(pdl);
+        sv.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View v) { }
+            @Override public void onViewDetachedFromWindow(View v) {
+                android.view.ViewTreeObserver vto = sv.getViewTreeObserver();
+                if (vto.isAlive()) vto.removeOnPreDrawListener(pdl);
+            }
         });
         return box;
     }
@@ -846,7 +868,8 @@ final class Blocks {
         private final Paint p = new Paint();
         private int blocks = 10, level, max = 10;
         private Listener listener;
-        private boolean showPct = true;
+        /** 0 = 无文字，1 = 百分比（"50%"），2 = 数值档位（"12"，与 Kindle 原厂亮度/暖光一致） */
+        private int labelMode = 1;
 
         BlockBar(Context c, int blocks) {
             super(c);
@@ -862,45 +885,92 @@ final class Blocks {
         void setMax(int m) { max = Math.max(1, m); invalidate(); }
         void setValue(int v) { int nv = Math.max(0, Math.min(max, v)); if (nv != level) { level = nv; invalidate(); } }
         int value() { return level; }
-        void noPercent() { showPct = false; }
+        void noPercent() { labelMode = 0; }
+        void showValue() { labelMode = 2; p.setTextSize(dp(getContext(), 14)); invalidate(); }
 
         @Override protected void onMeasure(int w, int h) {
             setMeasuredDimension(MeasureSpec.getSize(w), dp(getContext(), 34));
         }
 
-        private int labelW() { return showPct ? dp(getContext(), 40) : 0; }
+        private int labelW() {
+            if (labelMode == 0) return 0;
+            return dp(getContext(), labelMode == 2 ? 28 : 40);
+        }
 
         @Override protected void onDraw(Canvas c) {
             int w = getWidth() - labelW(), h = getHeight();
-            int g = dp(getContext(), 3);
+            int g = blocks > 16 ? Math.max(1, dp(getContext(), 2)) : dp(getContext(), 3);
             float bw = (w - g * (blocks - 1)) / (float) blocks;
             int filled = Math.round(level * blocks / (float) max);
+            float sw = blocks > 16 ? 1.5f : 2f;
             for (int i = 0; i < blocks; i++) {
                 float x = i * (bw + g);
                 p.setColor(Color.BLACK);
                 if (i < filled) { p.setStyle(Paint.Style.FILL); c.drawRect(x, 2, x + bw, h - 2, p); }
-                else { p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(2); c.drawRect(x + 1, 3, x + bw - 1, h - 3, p); }
+                else { p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(sw); c.drawRect(x + 1, 3, x + bw - 1, h - 3, p); }
             }
-            if (showPct) {
+            if (labelMode != 0) {
                 p.setStyle(Paint.Style.FILL);
-                String s = (level * 100 / max) + "%";
+                String s = labelMode == 2 ? String.valueOf(level) : ((level * 100 / max) + "%");
                 p.setTextAlign(Paint.Align.RIGHT);
                 c.drawText(s, getWidth(), h / 2f + p.getTextSize() / 2.8f, p);
             }
         }
 
+        private float downX;
+        private boolean dragged;
+        private int startLevel;
+
+        private int xToCell(float x, int w) {
+            if (x <= 0) return 0;
+            if (x >= w) return blocks - 1;
+            return Math.min(blocks - 1, (int) (x * blocks / Math.max(1, w)));
+        }
+
         @Override public boolean onTouchEvent(MotionEvent e) {
             if (listener == null) return false;
-            if (e.getActionMasked() == MotionEvent.ACTION_DOWN) { getParent().requestDisallowInterceptTouchEvent(true); Perf.touch(e); return true; }
-            if (e.getActionMasked() != MotionEvent.ACTION_UP) return true;
             int w = getWidth() - labelW();
-            if (e.getX() > w) return true;
-            int cell = (int) (Math.max(0, e.getX()) * blocks / Math.max(1, w));
-            // 点已经是最后一格亮着的那一格：退一格（这样能点回 0）
-            int filled = Math.round(level * blocks / (float) max);
-            int nb = cell + 1 == filled ? cell : cell + 1;
-            int nv = Math.round(nb * max / (float) blocks);
-            if (nv != level) { level = nv; invalidate(); listener.onCommit(level); }
+            int act = e.getActionMasked();
+            if (act == MotionEvent.ACTION_DOWN) {
+                getParent().requestDisallowInterceptTouchEvent(true);
+                Perf.touch(e);
+                downX = e.getX();
+                dragged = false;
+                startLevel = level;
+                return true;
+            }
+            if (act == MotionEvent.ACTION_MOVE) {
+                if (Math.abs(e.getX() - downX) > dp(getContext(), 6)) dragged = true;
+                if (dragged) {
+                    int nb = e.getX() <= dp(getContext(), 4) ? 0 : xToCell(e.getX(), w) + 1;
+                    int nv = Math.max(0, Math.min(max, Math.round(nb * max / (float) blocks)));
+                    if (nv != level) { level = nv; invalidate(); }
+                }
+                return true;
+            }
+            if (act == MotionEvent.ACTION_UP || (act == MotionEvent.ACTION_CANCEL && dragged)) {
+                int slop = dp(getContext(), 24);
+                if (act == MotionEvent.ACTION_UP && (e.getY() < -slop || e.getY() > getHeight() + slop)) {
+                    if (level != startLevel) { level = startLevel; invalidate(); }
+                    return true;
+                }
+                int nv;
+                if (dragged) {
+                    int nb = e.getX() <= dp(getContext(), 4) ? 0 : xToCell(e.getX(), w) + 1;
+                    nv = Math.round(nb * max / (float) blocks);
+                } else {
+                    int cell = xToCell(e.getX(), w);
+                    // 静止点击：点在当前最后一格亮着的格子上时退一格（方便点回 0）
+                    int filled = Math.round(startLevel * blocks / (float) max);
+                    int nb = (cell + 1 == filled) ? cell : cell + 1;
+                    nv = Math.round(nb * max / (float) blocks);
+                }
+                nv = Math.max(0, Math.min(max, nv));
+                level = nv;
+                invalidate();
+                if (nv != startLevel || act == MotionEvent.ACTION_UP) listener.onCommit(level);
+                return true;
+            }
             return true;
         }
     }

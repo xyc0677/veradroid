@@ -30,19 +30,93 @@ final class AppProf {
     /** 宿主认得每个应用的显示设置（appprof.sh）。 */
     static boolean host() { return new File(TABLE).exists(); }
 
+    /** 启动第三方应用前的统一预启动钩子：同步 appdirs、应用专属显示档位/DPI 与独立字号。 */
+    static void prepareLaunch(Context c, String pkg) {
+        if (c == null || pkg == null || pkg.length() == 0) return;
+        HostLink.cmd("appdirs " + pkg);
+        if (host()) {
+            HostService.launchedPkg = pkg;
+            launching(pkg);
+        } else {
+            String spec = Store.prefs(c, "home").getString("appdisp_" + pkg, "");
+            if (spec != null && spec.length() > 0) HostLink.cmd("appdisp " + pkg + "|" + spec);
+        }
+        AppFont.forForeground(c, pkg, null);
+    }
+
     /** 合并后的表：包名（可以以 * 结尾 = 前缀）→ {来源 b|u, spec} */
     static Map<String, String[]> table() {
         Map<String, String[]> m = new LinkedHashMap<String, String[]>();
+        BufferedReader r = null;
         try {
-            BufferedReader r = new BufferedReader(new FileReader(TABLE));
+            r = new BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(TABLE), "UTF-8"));
             String line;
             while ((line = r.readLine()) != null) {
                 String[] a = line.trim().split("\\s+");
                 if (a.length >= 3) m.put(a[0], new String[] { a[1], a[2] });
             }
-            r.close();
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {
+        } finally {
+            if (r != null) try { r.close(); } catch (Exception ignored) { }
+        }
         return m;
+    }
+
+    private static final Object KA_LOCK = new Object();
+    private static long kaMtime = -1, kaLen = -1;
+    private static Map<String, String[]> kaTable;
+
+    /**
+     * 宿主 /dev/kfb/appprof 里该包的 KEEPALIVE 设置：
+     *   Boolean.TRUE  -> KEEPALIVE=1（保持后台，不被自动/手动清理）
+     *   Boolean.FALSE -> KEEPALIVE=0（显式关闭保持后台）
+     *   null          -> 未在宿主表设置（回退桌面本地 bgkeep_ 偏好）
+     */
+    static Boolean keepAliveOverride(String pkg) {
+        if (pkg == null || pkg.length() == 0) return null;
+        File f = new File(TABLE);
+        if (!f.exists()) return null;
+        long mt = f.lastModified(), len = f.length();
+        String spec;
+        synchronized (KA_LOCK) {
+            if (kaTable == null || mt != kaMtime || len != kaLen) {
+                kaTable = table();
+                kaMtime = mt;
+                kaLen = len;
+            }
+            spec = lookup(kaTable, pkg)[1];
+        }
+        if (spec == null || spec.length() == 0) return null;
+        String v = parse(spec).get(AppDisplayActivity.KEEP_KEY);
+        if ("1".equals(v)) return Boolean.TRUE;
+        if ("0".equals(v)) return Boolean.FALSE;
+        return null;
+    }
+
+    /** 桌面长按 / 切换器加锁切换保活时，同步写入宿主 appprof 的 KEEPALIVE=1/0 并刷新内存缓存。 */
+    static void setKeepAlive(String pkg, boolean on) {
+        if (pkg == null || pkg.length() == 0) return;
+        File f = new File(TABLE);
+        if (!f.exists()) return;
+        long mt = f.lastModified(), len = f.length();
+        String spec;
+        synchronized (KA_LOCK) {
+            if (kaTable == null || mt != kaMtime || len != kaLen) {
+                kaTable = table();
+                kaMtime = mt;
+                kaLen = len;
+            }
+            Map<String, String> m = parse(lookup(kaTable, pkg)[1]);
+            m.put(AppDisplayActivity.KEEP_KEY, on ? "1" : "0");
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : m.entrySet()) {
+                if (sb.length() > 0) sb.append(';');
+                sb.append(e.getKey()).append('=').append(e.getValue());
+            }
+            spec = sb.toString();
+            kaTable.put(pkg, new String[] { builtin(kaTable, pkg) ? "ub" : "u", spec });
+        }
+        HostLink.cmd("appset " + pkg + "|" + spec);
     }
 
     /** 这个应用现在的设置：{来源 b|u|"", spec（"" = 跟随全局）}；用户的 > 内置精确 > 内置前缀（最长的） */
@@ -142,18 +216,29 @@ final class AppProf {
         long end = android.os.SystemClock.uptimeMillis() + 500;
         File f = new File(HostLink.KFB + "density.fg");
         while (android.os.SystemClock.uptimeMillis() < end) {
+            BufferedReader r = null;
             try {
-                BufferedReader r = new BufferedReader(new FileReader(f));
+                r = new BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
                 String v = r.readLine();
-                r.close();
                 if (v != null && v.trim().equals(pkg)) return;
-            } catch (Exception ignored) { }
+            } catch (Exception ignored) {
+            } finally {
+                if (r != null) try { r.close(); } catch (Exception ignored) { }
+            }
             android.os.SystemClock.sleep(10);
         }
     }
 
     /** spec："" = 删掉用户的（回到内置推荐 / 全局），"-" = 全跟随，否则 KEY=v;KEY=v */
-    static void save(String pkg, String spec) { HostLink.cmd("appset " + pkg + "|" + spec); }
+    static void save(String pkg, String spec) {
+        synchronized (KA_LOCK) {
+            if (kaTable != null && pkg != null && pkg.length() > 0) {
+                if (spec == null || spec.length() == 0) kaTable = null;
+                else kaTable.put(pkg, new String[] { builtin(kaTable, pkg) ? "ub" : "u", spec });
+            }
+        }
+        HostLink.cmd("appset " + pkg + "|" + spec);
+    }
 
     /** 老版本桌面存在自己偏好里的 appdisp_包名：交给宿主一次，之后删掉（宿主的文件升级不动，桌面数据清了也还在） */
     static void migrate(Context c) {

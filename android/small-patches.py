@@ -132,6 +132,27 @@ PATCHES = [
     ('frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java',
      '                if (config.getIpAssignment() == IpAssignment.STATIC) {',
      '                final LinkProperties vdHostLp = VdHostNet.enabled() ? VdHostNet.waitForKindle(mIface) : null;  // VeraDroid: never DHCP in hostnet\n                if (VdHostNet.enabled() && vdHostLp == null) {\n                    Log.i(TAG, "VeraDroid hostnet: provisioning of " + mIface + " stopped before the Kindle configured it");\n                    synchronized(EthernetNetworkFactory.this) { mIpProvisioningThread = null; }\n                    return;\n                } else if (vdHostLp != null) {\n                    linkProperties = vdHostLp;\n                } else if (config.getIpAssignment() == IpAssignment.STATIC) {'),
+    # 京东读书 / 京东读书专业版（com.jingdong.jdsdk.utils.NetUtils.getSummaryType、NetWorkUtils、jd.wjlogin_sdk）等国产应用
+    # 硬编码只认 TYPE_WIFI(1) / TYPE_MOBILE(0) / TRANSPORT_WIFI，看到 TYPE_ETHERNET(9) 直接判离线（"一直没网络，登录不上"）。
+    # Kindle 本身就是 Wi-Fi 设备，以太网工厂对外统一上报 TYPE_WIFI / "WIFI" / TRANSPORT_WIFI（底层仍走 eth0/VdHostNet）。
+    ('frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java',
+     '    EthernetNetworkFactory(RemoteCallbackList<IEthernetServiceListener> listeners) {\n'
+     '        mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_ETHERNET, 0, NETWORK_TYPE, "");',
+     '    EthernetNetworkFactory(RemoteCallbackList<IEthernetServiceListener> listeners) {\n'
+     '        mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_WIFI, 0, "WIFI", ""); // VeraDroid: report Wi-Fi to apps'),
+    ('frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java',
+     '            mNetworkAgent = null;\n'
+     '            mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_ETHERNET, 0, NETWORK_TYPE, "");',
+     '            mNetworkAgent = null;\n'
+     '            mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_WIFI, 0, "WIFI", ""); // VeraDroid: report Wi-Fi to apps'),
+    ('frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java',
+     '        setInterfaceInfoLocked("", null);\n'
+     '        mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_ETHERNET, 0, NETWORK_TYPE, "");',
+     '        setInterfaceInfoLocked("", null);\n'
+     '        mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_WIFI, 0, "WIFI", ""); // VeraDroid: report Wi-Fi to apps'),
+    ('frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java',
+     '        mNetworkCapabilities.addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET);',
+     '        mNetworkCapabilities.addTransportType(NetworkCapabilities.TRANSPORT_WIFI); // VeraDroid: report Wi-Fi transport'),
     # 系统里没有 FusedLocation 应用：LocationManagerService.systemRunning() 在这里抛 IllegalStateException，
     # SystemServer 记一条 "BOOT FAILURE Notifying Location Service running"（每次开机一个 wtf + dropbox 记录），
     # 而且位置服务的初始化就停在半路（后面的 passive 之外的提供者、设置监听、用户切换监听都没装上），

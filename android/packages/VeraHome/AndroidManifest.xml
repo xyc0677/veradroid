@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.veradroid.home"
-    android:versionCode="99"
-    android:versionName="1.09">
+    android:versionCode="138"
+    android:versionName="1.49">
     <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="25" />
     <uses-permission android:name="android.permission.MANAGE_ACTIVITY_STACKS" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -39,6 +39,7 @@
     <!-- 方块风格首页的 Android 小部件卡片（AppWidgetHost）：平台签名的特权应用可以直接绑定 -->
     <uses-permission android:name="android.permission.BIND_APPWIDGET" />
     <application
+        android:name=".VeraApp"
         android:label="VeraDroid"
         android:allowBackup="false"
         android:persistent="true"
@@ -53,7 +54,7 @@
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
@@ -68,7 +69,7 @@
             android:excludeFromRecents="true"
             android:windowSoftInputMode="stateAlwaysHidden"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".PanelActivity"
             android:theme="@android:style/Theme.Holo.Light.Dialog.NoActionBar"
@@ -76,48 +77,50 @@
             android:launchMode="singleInstance"
             android:taskAffinity="com.veradroid.home.panel"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".InboxActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".StatsActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".StorageActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".BackupActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".StoreActivity"
+            android:launchMode="singleTop"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".FontStoreActivity"
+            android:launchMode="singleTop"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".FilePickerActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale">
             <intent-filter>
                 <action android:name="android.intent.action.GET_CONTENT" />
                 <action android:name="android.intent.action.OPEN_DOCUMENT" />
@@ -135,7 +138,7 @@
             android:name=".AppDisplayActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <!-- 系统里没有“设置”应用：应用在没网时打开系统的 Wi-Fi 设置（Settings.ACTION_WIFI_SETTINGS 等）会因为
              ActivityNotFoundException 直接闪退（用户诊断：多看 com.duokan.reader 书架的“去联网”）。由这一页接住。 -->
         <activity
@@ -143,7 +146,7 @@
             android:exported="true"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale">
             <intent-filter>
                 <action android:name="android.settings.WIFI_SETTINGS" />
                 <action android:name="android.settings.WIFI_IP_SETTINGS" />
@@ -161,7 +164,7 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:noHistory="true"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale">
             <intent-filter>
                 <action android:name="android.settings.SECURITY_SETTINGS" />
                 <action android:name="android.settings.MANAGE_UNKNOWN_APP_SOURCES" />
@@ -179,7 +182,7 @@
             android:exported="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale">
             <intent-filter>
                 <action android:name="android.settings.INPUT_METHOD_SETTINGS" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -189,32 +192,32 @@
             android:name=".BluetoothActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".TransferActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".BookshelfActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:windowSoftInputMode="stateAlwaysHidden|adjustPan"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".TouchTestActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".ReaderActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".SwitcherActivity"
             android:theme="@android:style/Theme.Holo.Light.Dialog.NoActionBar"
@@ -222,7 +225,7 @@
             android:launchMode="singleInstance"
             android:taskAffinity="com.veradroid.home.switcher"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <!-- feat/parity-gaps：显示与刷新 / 系统与性能、锁屏密码、屏保挑选；同时兜底 android.settings.SETTINGS 等常见系统设置意图（修复用户诊断 中 Legado 跳系统设置闪退） -->
         <activity
             android:name=".HostSettingsActivity"
@@ -230,7 +233,7 @@
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize">
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale">
             <intent-filter>
                 <action android:name="android.settings.SETTINGS" />
                 <action android:name="android.settings.DISPLAY_SETTINGS" />
@@ -246,13 +249,13 @@
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <activity
             android:name=".ScreensaverActivity"
             android:theme="@android:style/Theme.Holo.Light.NoActionBar"
             android:excludeFromRecents="true"
             android:screenOrientation="nosensor"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|density|fontScale" />
         <service android:name=".HostService" android:exported="false" />
         <service android:name=".StatusBarService" android:exported="false" />
         <service android:name=".NavBarService" android:exported="false" />

@@ -66,6 +66,8 @@ static struct dev devs[MAXDEV];
 static int btkeys = -1;
 static const char *map = "volume";
 static int swap_dir;
+static const char *def_map = "volume";
+static int def_swap;
 static const char *pidfile, *action;
 static const char *drops[4]; static int ndrops;
 static const char *names[4]; static int nnames;
@@ -89,6 +91,8 @@ static void on_sig(int s) { if (s == SIGUSR1) want_release = 1; else if (s == SI
 static void read_conf(void) {
     if (!conf) return;
     FILE *f = fopen(conf, "r"); if (!f) return;
+    map = def_map;
+    swap_dir = def_swap;
     char l[256];
     while (fgets(l, sizeof l, f)) {
         l[strcspn(l, "\r\n")] = 0;
@@ -252,6 +256,17 @@ static int uinput_event(int ufd, const char *name, char *out, size_t n) {
     return -1;
 }
 
+/* Verify /proc/<pid>/root still points to Android's rootfs (not host's / after PID reuse or before pivot_root). */
+static int container_root_ok(int pid) {
+    if (pid <= 0) return 0;
+    char p[128]; struct stat st_host, st_ct;
+    snprintf(p, sizeof p, "/proc/%d/root/system/build.prop", pid);
+    if (access(p, F_OK) < 0) return 0;
+    snprintf(p, sizeof p, "/proc/%d/root", pid);
+    if (stat("/", &st_host) < 0 || stat(p, &st_ct) < 0) return 0;
+    return st_host.st_dev != st_ct.st_dev;
+}
+
 /* make the keyboard clone visible to Android: mknod its char device inside the container's /dev/input.
  * The device number comes from sysfs, so this also works on kernels without devtmpfs. */
 static void clone_publish(struct dev *dv) {
@@ -263,10 +278,9 @@ static void clone_publish(struct dev *dv) {
     if (sscanf(num, "%u:%u", &ma, &mi) != 2) { lg("%s: no device number", p); dv->pending = 0; return; }
     int pid = container_pid();
     char root[96]; struct stat st_host, st_ct;
-    snprintf(root, sizeof root, "/proc/%d/root/system/build.prop", pid);
     /* Not before Android's root is in place: before pivot_root /proc/<pid>/root/dev/input is the host's devtmpfs,
      * and unlinking "our" node there would delete a real host node. */
-    if (!pid || access(root, F_OK) < 0) {
+    if (!container_root_ok(pid)) {
         if (!dv->pending) lg("keyboard %s: container not running yet, will publish when it is", dv->name);
         dv->pending = 1; return;
     }
@@ -277,13 +291,32 @@ static void clone_publish(struct dev *dv) {
         /* container shares the host's /dev (chroot mode on old kernels): the node is already visible there */
         dv->pending = 0; lg("keyboard %s -> %s (shared /dev)", dv->name, ev); return;
     }
-    snprintf(dv->clone_node, sizeof dv->clone_node, "/proc/%d/root/dev/input/%s", pid, ev);
-    unlink(dv->clone_node);
-    if (mknod(dv->clone_node, S_IFCHR | 0666, makedev(ma, mi)) < 0) {
-        /* container's /dev/input not there yet (init still setting up): try again later */
-        if (!dv->pending) lg("mknod %s: %s (will retry)", dv->clone_node, strerror(errno));
-        dv->clone_node[0] = 0; dv->pending = 1; return;
+    /* Pick a free high-numbered slot (event16..31) so we never collide with container bind mounts (event0..3)
+     * or veradroid-btkeys (event3 / event10..15). Never unlink pre-existing nodes. */
+    char node[160] = "";
+    int last_err = 0;
+    for (int k = 16; k < 32; k++) {
+        snprintf(node, sizeof node, "/proc/%d/root/dev/input/event%d", pid, k);
+        if (access(node, F_OK) == 0) { node[0] = 0; continue; }
+        if (errno != ENOENT) { last_err = errno; node[0] = 0; break; }
+        if (mknod(node, S_IFCHR | 0666, makedev(ma, mi)) == 0) break;
+        last_err = errno;
+        node[0] = 0;
+        if (last_err != EEXIST) break;
     }
+    if (!node[0]) {
+        /* Retry only if /dev/input disappeared while container init was setting up; otherwise give up to avoid 2s spin. */
+        if (last_err == ENOENT) {
+            if (!dv->pending) lg("mknod in %s: %s (will retry)", root, strerror(last_err));
+            dv->pending = 1;
+        } else {
+            lg("mknod in %s failed: %s", root, last_err ? strerror(last_err) : "no free event16..31 slot");
+            dv->pending = 0;
+        }
+        dv->clone_node[0] = 0;
+        return;
+    }
+    snprintf(dv->clone_node, sizeof dv->clone_node, "%s", node);
     chmod(dv->clone_node, 0666);
     dv->pending = 0;
     lg("keyboard %s -> %s (%u:%u) in container", dv->name, dv->clone_node, ma, mi);
@@ -316,7 +349,20 @@ static int make_clone(struct dev *dv) {
 static void dev_close(struct dev *dv, const char *why) {
     lg("drop %s (%s): %s", dv->path, dv->name, why);
     release_held_keys(dv);
-    if (dv->clone_node[0]) { unlink(dv->clone_node); dv->clone_node[0] = 0; }
+    if (dv->clone_node[0]) {
+        int pid = 0;
+        if (sscanf(dv->clone_node, "/proc/%d/root/", &pid) == 1 && container_root_ok(pid)) {
+            char dir[128]; struct stat st_host, st_ct;
+            snprintf(dir, sizeof dir, "/proc/%d/root/dev/input", pid);
+            if (stat("/dev/input", &st_host) == 0 && stat(dir, &st_ct) == 0 && st_host.st_dev != st_ct.st_dev)
+                unlink(dv->clone_node);
+            else
+                lg("skip unlink %s: shared /dev/input", dv->clone_node);
+        } else {
+            lg("skip unlink %s: container root gone or changed", dv->clone_node);
+        }
+        dv->clone_node[0] = 0;
+    }
     if (dv->ufd >= 0) { ioctl(dv->ufd, UI_DEV_DESTROY); close(dv->ufd); }
     close(dv->fd);
     memset(dv, 0, sizeof *dv); dv->fd = -1; dv->ufd = -1;
@@ -395,7 +441,7 @@ static void handle(struct dev *dv) {
             }
             if (e[i].type != EV_KEY) continue;
             int c = e[i].code, v = e[i].value;
-            if (c == KEY_BRIGHTNESSUP || c == KEY_BRIGHTNESSDOWN) { if (v) run_action("light", c == KEY_BRIGHTNESSUP ? "+" : "-"); continue; }
+            if (c == KEY_BRIGHTNESSUP || c == KEY_BRIGHTNESSDOWN) { if (v == 1) run_action("light", c == KEY_BRIGHTNESSUP ? "+" : "-"); continue; }
             if (c == KEY_POWER) continue;               /* Kindle Remote "sleep": Kindle's powerd owns sleep */
             int m = remap(c);
             if (v == 1) { int d = direction(c); if (d) epd_dir(swap_dir ? -d : d); }   /* before Android draws the new page */
@@ -420,8 +466,8 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: vdbtkeys <log> [--map volume|page|dpad|raw] [--swap] [--conf F] [--pidfile F] [--drop-flag F] [--action S] [--name-match N] [--state F] [--no-kindle-pt]\n"); return 2; }
     logf_ = fopen(argv[1], "a");
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--map") && i + 1 < argc) map = argv[++i];
-        else if (!strcmp(argv[i], "--swap")) swap_dir = 1;
+        if (!strcmp(argv[i], "--map") && i + 1 < argc) { map = argv[++i]; def_map = map; }
+        else if (!strcmp(argv[i], "--swap")) { swap_dir = 1; def_swap = 1; }
         else if (!strcmp(argv[i], "--conf") && i + 1 < argc) conf = argv[++i];
         else if (!strcmp(argv[i], "--pidfile") && i + 1 < argc) pidfile = argv[++i];
         else if (!strcmp(argv[i], "--drop-flag") && i + 1 < argc && ndrops < 4) drops[ndrops++] = argv[++i];
@@ -445,7 +491,11 @@ int main(int argc, char **argv) {
     while (!want_quit) {
         if (want_release) { want_release = 0; set_grab(0); }
         if (want_grab) { want_grab = 0; set_grab(1); }
-        if (want_conf) { want_conf = 0; read_conf(); }
+        if (want_conf) {
+            want_conf = 0;
+            for (int i = 0; i < MAXDEV; i++) if (devs[i].fd >= 0) release_held_keys(&devs[i]);
+            read_conf();
+        }
         struct pollfd p[MAXDEV + 1]; int idx[MAXDEV + 1], n = 0;
         p[n].fd = in; p[n].events = POLLIN; idx[n++] = -1;
         for (int i = 0; i < MAXDEV; i++) if (devs[i].fd >= 0) { p[n].fd = devs[i].fd; p[n].events = POLLIN; idx[n++] = i; }

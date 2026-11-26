@@ -3,14 +3,18 @@ package com.veradroid.home;
 
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.text.Layout;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -143,5 +147,65 @@ final class Ui {
         v.setBackgroundColor(color);
         v.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, px));
         return v;
+    }
+
+    /**
+     * E-ink friendly EditText: disables Android's 500 ms blinking cursor (zero idle EPD refreshes)
+     * and draws a crisp static solid-black insertion caret whenever focused.
+     */
+    static final class EinkEditText extends EditText {
+        private final Paint caret = new Paint();
+
+        EinkEditText(Context c) {
+            super(c);
+            setCursorVisible(false);
+            caret.setColor(Color.BLACK);
+            caret.setStyle(Paint.Style.FILL);
+            caret.setAntiAlias(false);
+        }
+
+        @Override protected void onSelectionChanged(int selStart, int selEnd) {
+            super.onSelectionChanged(selStart, selEnd);
+            invalidate();
+        }
+
+        @Override protected void onFocusChanged(boolean focused, int direction, android.graphics.Rect previouslyFocusedRect) {
+            super.onFocusChanged(focused, direction, previouslyFocusedRect);
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (!isFocused() || !isEnabled()) return;
+            int start = getSelectionStart(), end = getSelectionEnd();
+            if (start < 0 || start != end) return;
+            Layout layout = getLayout();
+            if (layout == null) return;
+            int len = getText() == null ? 0 : getText().length();
+            if (start > len) start = len;
+            int line = layout.getLineForOffset(start);
+            float cw = Math.max(2f, dp(getContext(), 2));
+            float x = getCompoundPaddingLeft() + layout.getPrimaryHorizontal(start);
+            int minX = getScrollX() + getCompoundPaddingLeft();
+            int maxX = getScrollX() + getWidth() - getCompoundPaddingRight() - (int) Math.ceil(cw);
+            if (maxX >= minX) {
+                if (x < minX) x = minX;
+                else if (x > maxX) x = maxX;
+            }
+            int topPad = getExtendedPaddingTop();
+            int vSpace = getHeight() - topPad - getExtendedPaddingBottom();
+            int vGrav = getGravity() & android.view.Gravity.VERTICAL_GRAVITY_MASK;
+            int vOff = 0;
+            if (vGrav == android.view.Gravity.BOTTOM) vOff = Math.max(0, vSpace - layout.getHeight());
+            else if (vGrav == android.view.Gravity.CENTER_VERTICAL) vOff = Math.max(0, (vSpace - layout.getHeight()) / 2);
+            float top = topPad + vOff + layout.getLineTop(line) + 1f;
+            float bot = topPad + vOff + layout.getLineBottom(line) - 1f;
+            if (bot <= top + 4f) bot = top + Math.max(12f, getTextSize());
+            canvas.drawRect(x, top, x + cw, bot, caret);
+        }
+    }
+
+    static EditText editText(Context c) {
+        return new EinkEditText(c);
     }
 }

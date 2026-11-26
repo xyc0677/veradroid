@@ -36,14 +36,24 @@ PID=/dev/shm/veradroid/autoupdate.pid
 LOCK=/mnt/base-us/veradroid/state/autoupdate.lock
 mkdir -p /mnt/base-us/veradroid/logs /mnt/base-us/veradroid/state 2>/dev/null
 [ -f "$VD/autoupdate" ] && [ "$(cat "$VD/autoupdate")" = "0" ] && exit 0
+au_is() { case "$(tr '\000' ' ' < /proc/$1/cmdline 2>/dev/null)" in "sh "*"/auto-update.sh "*) return 0 ;; esac; return 1; }
+au_others() {
+    for d in /proc/[0-9]*; do
+        p=${d#/proc/}; [ "$p" = "$$" ] && continue
+        au_is "$p" && [ "$(awk '{print $4}' $d/stat 2>/dev/null)" != "$$" ] && return 0
+    done
+    return 1
+}
 if [ -d "$LOCK" ]; then
     old=$(cat "$LOCK/pid" 2>/dev/null)
-    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then exit 0; fi
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null && au_is "$old"; then exit 0; fi
     rm -rf "$LOCK"
 fi
+au_others && exit 0
 mkdir "$LOCK" 2>/dev/null || exit 0
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
+au_mine() { [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] || { trap - EXIT; exit 0; }; }
 echo $$ > "$PID"
 # au_kmod_mine：这台机器现在加载的那一套模块，"<uname -r>/<套件>=<编号>"（和 pack-legacy.sh 写的 kmod.sets 同一格式、同一算法：
 # 套件目录里全部文件按路径排序后内容的 sha256 前 12 位；选套件同 boot/lib/kmod.sh 的 kmod_dir）。认不出时什么都不输出。
@@ -84,6 +94,7 @@ cur_version() {
 }
 sleep 120
 while :; do
+    au_mine
     [ -f "$VD/autoupdate" ] && [ "$(cat "$VD/autoupdate")" = "0" ] && exit 0
     cur=$(cur_version)
     # Old installs may not have a version file at all. Treat them as 0 so
@@ -101,8 +112,10 @@ while :; do
     # 版本号有 "version":"x" 和 "version": "x" 两种写法
     new=$(printf '%s' "$json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
     # 安装时记录的实验机型：更新时沿用，否则 bootstrap 会拒绝（要求 VD_EXPERIMENTAL=1）
-    m=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null)
-    case "$m" in ''|pw6) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac
+    # loop 镜像机型停机时系统盘已卸载，回退读镜像外的 $VD/model；4.9.* 内核一律置 VD_EXPERIMENTAL=1
+    m=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null || cat "$VD/model" 2>/dev/null)
+    case "$m" in ''|pw6|cs) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac
+    case "$(uname -r)" in 4.9.*) export VD_EXPERIMENTAL=1 ;; esac
     [ -n "$new" ] || { sleep 3600; continue; }
     # 只往新版本更新：本地版本更新（比如用离线包装了新版）时绝不降级（KT6 模拟器实测 0.25 被拉回 0.24）
     # 只在模拟器上验证过的机型（$VD/tested = emulator-only）：内核模块（binder / uinput / zram）换了的更新绝不在后台悄悄装，

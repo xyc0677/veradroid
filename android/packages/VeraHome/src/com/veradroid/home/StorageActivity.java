@@ -45,7 +45,8 @@ public class StorageActivity extends Activity {
         page.addView(title);
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
-        page.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        LinearLayout paged = Blocks.paged(this, list);
+        page.addView(paged, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.CENTER_VERTICAL);
         actions.addView(Ui.button(this, "返回", 16, false, new View.OnClickListener() {
@@ -61,6 +62,7 @@ public class StorageActivity extends Activity {
 
     /** 问宿主要一次数字；答复文件出现（或变新）就重画。5 秒没有答复就说明宿主太旧。 */
     private void ask() {
+        if (isFinishing()) return;
         asked = System.currentTimeMillis();
         final long before = new File(INFO).lastModified();
         HostLink.cmd("storage info");
@@ -68,6 +70,7 @@ public class StorageActivity extends Activity {
         handler.postDelayed(new Runnable() {
             int n = 0;
             @Override public void run() {
+                if (isFinishing()) return;
                 File f = new File(INFO);
                 if (f.isFile() && f.lastModified() != before || (f.isFile() && n >= 12)) { st = HostLink.kv(INFO); render(); return; }
                 if (++n > 25) { list.removeAllViews(); line("读不到存储信息。这一版的系统不支持调整，请先更新 VeraDroid。", 18, false); return; }
@@ -101,7 +104,11 @@ public class StorageActivity extends Activity {
             "剩余 " + size(n("kindle_free")) + " / 共 " + size(n("kindle_total")));
         list.addView(Ui.rule(this, 2, Color.BLACK));
 
-        if ("1".equals(st.get("st.busy"))) { line("正在调整，请稍候…", 18, true); return; }
+        if ("1".equals(st.get("st.busy"))) {
+            line("正在调整，请稍候…", 18, true);
+            handler.postDelayed(new Runnable() { @Override public void run() { ask(); } }, 1500);
+            return;
+        }
         if (target < 0) target = image;
         target = Math.max(min, Math.min(max, target));
         list.addView(Blocks.sectionTitle(this, "调整大小", 20));
@@ -161,7 +168,12 @@ public class StorageActivity extends Activity {
         col.addView(Ui.text(this, "剩余不到 200 MB、Kindle 还有地方时，每次扩大 512 MB。", 14, false));
         ar.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         ar.addView(Ui.button(this, auto ? "开" : "关", 16, auto, new View.OnClickListener() {
-            @Override public void onClick(View v) { HostLink.cmd("storage auto " + (auto ? "off" : "on")); handler.postDelayed(new Runnable() { @Override public void run() { ask(); } }, 300); }
+            @Override public void onClick(View v) {
+                v.setEnabled(false);
+                HostLink.cmd("storage auto " + (auto ? "off" : "on"));
+                handler.removeCallbacksAndMessages(null);
+                handler.postDelayed(new Runnable() { @Override public void run() { if (!isFinishing()) ask(); } }, 350);
+            }
         }));
         list.addView(ar);
         list.addView(Ui.rule(this, 1, Color.BLACK));
@@ -197,7 +209,11 @@ public class StorageActivity extends Activity {
     }
 
     private void send(final int to) {
-        new File(RESULT).delete();
+        final File rf = new File(RESULT);
+        final boolean hadOld = rf.isFile();
+        final long oldMod = hadOld ? rf.lastModified() : 0L;
+        final long oldLen = hadOld ? rf.length() : -1L;
+        final boolean deletedOld = !hadOld || rf.delete();
         HostLink.cmd("storage resize " + to);
         list.removeAllViews();
         line("正在调整，请稍候…", 20, true);
@@ -205,9 +221,13 @@ public class StorageActivity extends Activity {
         handler.removeCallbacksAndMessages(null);
         handler.postDelayed(new Runnable() {
             int n = 0;
+            boolean sawGone = deletedOld;
             @Override public void run() {
+                if (isFinishing()) return;
                 File f = new File(RESULT);
-                if (f.isFile()) {
+                if (!f.isFile()) {
+                    sawGone = true;
+                } else if (sawGone || f.lastModified() != oldMod || f.length() != oldLen) {
                     Map<String, String> r = HostLink.kv(RESULT);
                     if ("1".equals(r.get("ok")) && "offline".equals(r.get("mode"))) return;   // Android 马上被关掉
                     if ("1".equals(r.get("ok"))) VeraToast.show(StorageActivity.this, "已调整为 " + size(to));

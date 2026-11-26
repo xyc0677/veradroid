@@ -17,6 +17,7 @@ final class UiMode {
     static final String KEY_EXPERT = "ui_expert";
     static final String KEY_CHOSEN = "ui_mode_v";
     static final int CUR_VER = 2;
+    private static boolean oobeShowing;
 
     private UiMode() { }
 
@@ -28,25 +29,28 @@ final class UiMode {
         SharedPreferences p = Store.prefs(c, "home");
         p.edit().putBoolean(KEY_EXPERT, expert).putInt(KEY_CHOSEN, CUR_VER).commit();
         if (!expert && applyDefault) {
-            // 小白模式自动套用开箱即用推荐配置：均衡刷新 + 标准对比度 1.3 + 每 6 页清残影 + 30 秒看书空闲省电 + 8 小时锁屏自动回 Kindle
-            HostLink.settings("KFB_SMOOTH=2\nKFB_CONTRAST=1.3\nKFB_LIGHTF=0\nKFB_DARKEN=0\nKFB_FLASH=6\nIDLE_FREEZE=30\nSAVER_EXIT_H=8\n");
+            // 小白模式自动套用开箱即用推荐配置：均衡刷新 + 标准对比度 1.3 + 每 6 页清残影 + 8 小时锁屏自动回 Kindle（空闲冻结默认关，省电更稳）
+            HostLink.settings("KFB_SMOOTH=2\nKFB_CONTRAST=1.3\nKFB_LIGHTF=0\nKFB_DARKEN=0\nKFB_FLASH=6\nIDLE_FREEZE=0\nSAVER_EXIT_H=8\n");
         }
     }
 
     /** 首次开机 3 步墨水屏引导页（OOBE），引导完成后写入 CUR_VER 不再弹出。 */
     static void maybeAsk(final HomeActivity a) {
-        if (a == null || a.standalone) return;
+        if (a == null || a.standalone || a.isFinishing() || oobeShowing) return;
         SharedPreferences p = Store.prefs(a, "home");
         if (p.getInt(KEY_CHOSEN, 0) >= CUR_VER) return;
-        // 先标记防止 onResume 重复弹窗；完成第 3 步时正式保存模式
-        p.edit().putInt(KEY_CHOSEN, CUR_VER).apply();
         showOobeStep(a, 1);
     }
 
     private static void showOobeStep(final HomeActivity a, final int step) {
+        if (a == null || a.isFinishing()) { oobeShowing = false; return; }
+        oobeShowing = true;
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         int dp8 = Ui.dp(a, 8), dp12 = Ui.dp(a, 12);
+        final android.content.DialogInterface.OnDismissListener clearShowing = new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface d) { oobeShowing = false; }
+        };
 
         if (step == 1) {
             TextView intro = Ui.text(a, "欢迎使用 VeraDroid！10 秒上手墨水屏三大核心用法：", 15, true);
@@ -58,7 +62,7 @@ final class UiMode {
             box.addView(new View(a), new LinearLayout.LayoutParams(1, dp8));
             box.addView(modeCard(a, "2. 自动按应用记忆刷新模式",
                 "• 在微信读书选「高清」、在浏览器选「快速」，切来切去系统会自动记住，不用重复调"));
-            new VeraDialog.Builder(a)
+            android.app.Dialog d1 = new VeraDialog.Builder(a)
                 .title("新手引导（1/3）· 刷新模式")
                 .view(box)
                 .negative("跳过引导", new Runnable() {
@@ -72,6 +76,7 @@ final class UiMode {
                     @Override public void run() { showOobeStep(a, 2); }
                 })
                 .show();
+            if (d1 != null) d1.setOnDismissListener(clearShowing);
             return;
         }
 
@@ -86,7 +91,7 @@ final class UiMode {
             box.addView(modeCard(a, "随时回到 Kindle（防卡死逃生）",
                 "• 常规：顶部下滑面板点「回到 Kindle」\n"
                 + "• 应急：任意界面「长按左下角 2 秒」可强制退回 Kindle"));
-            new VeraDialog.Builder(a)
+            android.app.Dialog d2 = new VeraDialog.Builder(a)
                 .title("新手引导（2/3）· 省电与回 Kindle")
                 .view(box)
                 .negative("上一步", new Runnable() {
@@ -96,6 +101,7 @@ final class UiMode {
                     @Override public void run() { showOobeStep(a, 3); }
                 })
                 .show();
+            if (d2 != null) d2.setOnDismissListener(clearShowing);
             return;
         }
 
@@ -149,6 +155,7 @@ final class UiMode {
                 }
             })
             .show();
+        if (ref[0] != null) ref[0].setOnDismissListener(clearShowing);
     }
 
     private static LinearLayout modeCard(Context c, String title, String desc) {
@@ -184,6 +191,7 @@ final class UiMode {
         if ("KFB_SMOOTH".equals(key)) {
             try { return smoothEffect(Integer.parseInt(val)); } catch (Exception e) { return "已更新刷新模式：" + label; }
         }
+        if ("KFB_COLOR".equals(key)) return "0".equals(val) ? "已切换为黑白模式：关闭彩色滤镜，纯文字更锐利、刷新更快" : "2".equals(val) ? "已切换为鲜艳彩色（4096 色增强饱和度）：适合漫画、封面与彩色批注" : "已切换为标准彩色（Colorsoft 原生 4096 色 CFA）";
         if ("KFB_CONTRAST".equals(key)) return "对比度已设为 " + label + "：数值越高淡字越黑，背景浅灰也会略加深";
         if ("KFB_LIGHTF".equals(key)) return "0".equals(val) ? "已关闭浅色过滤：保留原始浅灰背景" : "浅色过滤已设为「" + label + "」：浅灰/米色底自动漂白成纯白，减少残影";
         if ("KFB_DARKEN".equals(key)) return "1".equals(val) ? "已开启深色加深：把偏灰细字统一加黑，对比更清晰" : "已关闭深色加深：恢复原图灰阶";
@@ -199,7 +207,8 @@ final class UiMode {
         if ("KFB_IMG".equals(key)) return "0".equals(val) ? "已关闭图片灰度增强：整页统一节奏刷新" : "已开启图片灰度：漫画与封面自动走 16 级灰度，文字照常快刷";
         if ("KFB_REAGL_MIN".equals(key)) return "整页判定阈值已设为「" + label + "」：单次变化超过此面积时走高清整页刷新";
         if ("KFB_ANIM_MODE".equals(key)) return "0".equals(val) ? "已关闭硬件翻页滑动动画：翻页直出画面更快" : "已开启硬件翻页滑动动画";
-        if ("BG_FREEZE".equals(key)) return "1".equals(val) ? "已开启切应用自动冻结后台：后台应用立刻暂停占 CPU 和内存，切回秒速恢复" : "已关闭自动冻结后台：已解冻全部后台应用";
+        if ("BG_FREEZE".equals(key)) return "1".equals(val) ? "已开启实验性后台冻结（切走 15 秒后冻结）：若遇后台下载中断或缓存丢失请改回关闭" : "已关闭自动冻结后台：后台应用正常保活，避免广播超时强杀与缓存丢失";
+        if ("KLIB_BIND".equals(key)) return "ro".equals(val) ? "已设为只读挂载 Kindle 原机书库：重启 Android 后可安全查看与阅读原机书籍" : "1".equals(val) ? "已设为读写挂载 Kindle 原机书库：重启 Android 后生效" : "已关闭实验机型 Kindle 书库挂载：重启 Android 后生效";
         if ("IDLE_FREEZE".equals(key)) return "0".equals(val) ? "已关闭阅读空闲冻结：看书期间保持安卓常驻" : "已开启阅读空闲省电（" + label + "）：看书不动屏自动冻住安卓省电，一碰屏瞬间唤醒";
         if ("SAVER_EXIT_H".equals(key)) return "0".equals(val) ? "已关闭长时间锁屏自动回 Kindle" : "已设为锁屏超过 " + label + " 自动退回 Kindle，避免隔夜耗电";
         if ("LOWMEM".equals(key)) return "小内存模式已设为「" + label + "」：下次重启安卓后生效，内存更充裕";

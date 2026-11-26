@@ -6,8 +6,8 @@
 trap '' PIPE   # 书库启动器把输出管道给 fbink；fbink 缺失/崩溃时管道断开，不能让 SIGPIPE 杀掉脚本
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH; export PATH   # 系统自带的 curl/tar 优先：越狱工具或插件装的 curl 可能没有根证书（HTTPS 全部失败）
 if [ -f /mnt/base-us/veradroid/boot/veradroid.sh ]; then
-    eips 1 2 "正在启动 VeraDroid…" 2>/dev/null
+    eips 1 2 "Starting VeraDroid...                             " 2>/dev/null
     sh /mnt/base-us/veradroid/boot/veradroid.sh home
 else
-    eips 1 2 "VeraDroid 未安装，请先运行安装脚本" 2>/dev/null
+    eips 1 2 "VeraDroid not installed. Run installer first.     " 2>/dev/null
 fi

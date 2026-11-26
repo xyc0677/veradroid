@@ -2,7 +2,6 @@
 # KPM install hook for VeraDroid Scribe (experimental). Never factory-wipe on upgrade; preserves user settings/apps/fonts/books.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH; export PATH
 trap '' PIPE
-export VD_MODEL=ks
 export VD_EXPERIMENTAL=1
 BASE="${VD_BASE:-https://veradroid.wenjin.jp}"
 [ -f /mnt/base-us/veradroid/network.conf ] && . /mnt/base-us/veradroid/network.conf
@@ -47,7 +46,7 @@ if [ -f /mnt/base-us/veradroid-sys.img ] || [ -d /mnt/base-us/system/veradroid ]
     NEED_MB=250
     UPGRADE=1
 fi
-AVAIL_MB=$(df -m /mnt/base-us 2>/dev/null | awk 'NR==2{print $4}')
+AVAIL_MB=$(df -m /mnt/base-us 2>/dev/null | awk 'END{print $(NF-2)}')
 if [ -n "$AVAIL_MB" ] && [ "$AVAIL_MB" -lt "$NEED_MB" ] 2>/dev/null; then
     show "存储空间不足（剩余 ${AVAIL_MB} MB，至少需要 ${NEED_MB} MB），请清理空间后重试" "Not enough space (${AVAIL_MB}MB free, need ${NEED_MB}MB)"
     exit 21

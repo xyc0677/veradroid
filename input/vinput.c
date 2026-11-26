@@ -673,8 +673,11 @@ static void epd_dir(int dir)
 }
 
 /* ---- touch boost (see the header) ---- */
-static long long boost_until = 0;          /* 0 = not boosted */
+static long long boost_until = 0;          /* 0 = not boosted (or finger still down) */
+static long long boost_t0 = 0;             /* when boost_begin raised scaling_min_freq */
+#define BOOST_HOLD_MAX_MS 1500             /* safety cap: never lock CPU at max freq if a finger rests or a lift is missed */
 static int boost_on = 0;
+static int prev_any = 0;
 static char boost_orig[24];
 static unsigned long n_boost = 0;
 static char CPUFREQ_MIN[160], CPUFREQ_MAX[160];   /* empty = no --cpufreq: boost off */
@@ -704,12 +707,12 @@ static void boost_begin(void)
     if (BOOST_KHZ > 0) snprintf(mx, sizeof(mx), "%d", BOOST_KHZ);
     else if (sysfs_read(CPUFREQ_MAX, mx, sizeof(mx)) < 0) return;
     if (atol(mx) <= atol(boost_orig)) return;       /* already there (or capped below the minimum: powersave) */
-    if (sysfs_write(CPUFREQ_MIN, mx) == 0) { boost_on = 1; n_boost++; }
+    if (sysfs_write(CPUFREQ_MIN, mx) == 0) { boost_on = 1; boost_t0 = now_ms(); n_boost++; }
 }
 static void boost_end(void)
 {
     if (boost_on && sysfs_write(CPUFREQ_MIN, boost_orig) < 0) logf_("boost: could not put scaling_min_freq back to %s", boost_orig);
-    boost_on = 0; boost_until = 0;
+    boost_on = 0; boost_until = 0; boost_t0 = 0;
 }
 
 /* ---- idle freeze: thaw on touch (see the header) ---- */
@@ -785,8 +788,9 @@ static int in_corner(int x, int y, const char **name)
    eb_third: which third this touch started in (0 left, 1 middle, 2 right; -1 = plain bottom-edge back for this touch).
    EDGE_ARM: the swipe up was seen and the touch is ours; lifting fires the third's action, holding still for G_EB_HOLD_MS
    fires G_EB_HOLD. Moving more than the slop restarts the hold clock (a slow drag is not a hold). */
-static int eb_third = -1, arm_x, arm_y;
+static int eb_third = -1, eb_slot = 0, arm_x, arm_y;
 static long long arm_t = 0;
+static int active_slot(void);
 static int eb_none(int i) { return !strcmp(G_EB[i], "none"); }
 static int eb_slop(void) { int s = 30 * (PW ? PW : W) / 1272; return s < 8 ? 8 : s; }
 static void eb_fire(int i)
@@ -802,16 +806,17 @@ static void eb_swipe(int lifted)
 {
     if (eb_third < 0) { logf_("edge swipe up -> back"); back_key(); return; }
     if (lifted || eb_none(3)) { eb_fire(eb_third); return; }   /* no hold action: no reason to wait for the lift */
-    arm_x = sl[cur_slot].x; arm_y = sl[cur_slot].y; arm_t = now_ms();
+    eb_slot = active_slot();
+    arm_x = sl[eb_slot].x; arm_y = sl[eb_slot].y; arm_t = now_ms();
     md = EDGE_ARM;
 }
 /* a frame (or the idle tick, frame = 0) while armed */
 static void eb_armed(int active, int frame)
 {
-    if (frame && active == 0) { eb_fire(eb_third); md = IDLE; return; }
+    if (frame && (active == 0 || !sl[eb_slot].active)) { eb_fire(eb_third); md = active ? SWALLOW : IDLE; return; }
     if (active == 0) return;
-    if (frame && (abs(sl[cur_slot].x - arm_x) > eb_slop() || abs(sl[cur_slot].y - arm_y) > eb_slop())) {
-        arm_x = sl[cur_slot].x; arm_y = sl[cur_slot].y; arm_t = now_ms();
+    if (frame && (abs(sl[eb_slot].x - arm_x) > eb_slop() || abs(sl[eb_slot].y - arm_y) > eb_slop())) {
+        arm_x = sl[eb_slot].x; arm_y = sl[eb_slot].y; arm_t = now_ms();
         return;
     }
     if (now_ms() - arm_t >= G_EB_HOLD_MS) { eb_fire(3); md = SWALLOW; }
@@ -847,6 +852,11 @@ static void two_finger_end(void)
     two_done = 1;
 }
 
+/* source ranges of the position axes: drivers report one past the advertised maximum at an edge (fts_ts / ili211x take
+   the panel size as the maximum; cyttsp4 mirrors an axis as max - v, giving 1..max+1 on PW3 / Oasis 1), and Android 7
+   drops a touch-down outside the range. Unrotated events are clamped to the source range, rotated ones in rot_event. */
+static int sx_min = 0, sx_max = -1, sy_min = 0, sy_max = -1;
+
 /* panel coordinates -> logical ones. A rotation by a multiple of 90 degrees maps each panel axis onto one logical axis,
    possibly flipped, so every event is rewritten on its own (code and value), no state is needed. */
 static void rot_event(struct input_event *e)
@@ -858,6 +868,20 @@ static void rot_event(struct input_event *e)
     int mt = e->code == ABS_MT_POSITION_X || e->code == ABS_MT_POSITION_Y;
     int cx = mt ? ABS_MT_POSITION_X : ABS_X, cy = mt ? ABS_MT_POSITION_Y : ABS_Y;
     int v = e->value;
+    if (!ROT_ON && ROT == 180) {
+        if (isx && sx_max > sx_min && (sx_min != 0 || (sx_max != PW - 1 && sx_max != PW && sx_max != VW - 1 && sx_max != VW))) {
+            e->value = sx_max + sx_min - v;
+            if (e->value < sx_min) e->value = sx_min;
+            else if (e->value > sx_max) e->value = sx_max;
+            return;
+        }
+        if (isy && sy_max > sy_min && (sy_min != 0 || (sy_max != PH - 1 && sy_max != PH))) {
+            e->value = sy_max + sy_min - v;
+            if (e->value < sy_min) e->value = sy_min;
+            else if (e->value > sy_max) e->value = sy_max;
+            return;
+        }
+    }
     switch (ROT) {
     case 90:  if (isx) { e->code = cy; e->value = VW - 1 - v; } else { e->code = cx; e->value = v; } break;
     case 180: if (isx) e->value = VW - 1 - v; else e->value = PH - 1 - v; break;
@@ -869,10 +893,6 @@ static void rot_event(struct input_event *e)
     if (e->value < 0) e->value = 0;
     else if (e->value > lim) e->value = lim;
 }
-/* source ranges of the position axes: drivers report one past the advertised maximum at an edge (fts_ts / ili211x take
-   the panel size as the maximum; cyttsp4 mirrors an axis as max - v, giving 1..max+1 on PW3 / Oasis 1), and Android 7
-   drops a touch-down outside the range. Unrotated events are clamped to the source range, rotated ones in rot_event. */
-static int sx_min = 0, sx_max = -1, sy_min = 0, sy_max = -1;
 static void clamp_event(struct input_event *e)
 {
     if (e->type != EV_ABS) return;
@@ -891,12 +911,20 @@ static void rot_frame(struct input_event *fr, int n)
 
 /* PENDING (one finger, inside the two-finger window): did it move more than PASS_PX (scaled to the panel width) from
    where it landed? Then it is a drag and is released to Android at once. 0 = always wait the whole window (old way). */
+static int active_slot(void)
+{
+    if (cur_slot >= 0 && cur_slot < MAXSLOT && sl[cur_slot].active) return cur_slot;
+    for (int i = 0; i < MAXSLOT; i++) if (sl[i].active) return i;
+    return cur_slot;
+}
+
 static int pending_moved(void)
 {
     if (PASS_PX <= 0 || count_active() != 1) return 0;
-    const struct slot *s = &sl[cur_slot];
-    if (s->sx < 0 || s->sy < 0) return 0;
-    int thr = PASS_PX * PW / 1272;
+    const struct slot *s = &sl[active_slot()];
+    if (!s->active || s->sx < 0 || s->sy < 0) return 0;
+    int thr = PASS_PX * (PW ? PW : W) / 1272;
+    if (thr < 4) thr = 4;
     return abs(s->x - s->sx) > thr || abs(s->y - s->sy) > thr;
 }
 
@@ -918,7 +946,6 @@ static void handle_frame(struct input_event *fr, int n)
     }
     int active = count_active();
     (void)down_edge;
-    static int prev_any = 0;
     if (active && !prev_any) {        /* first finger down: boost before anything else (the gconf may switch it off) */
         idle_thaw();                  /* the container first: the frame below goes to its input reader */
         gconf_load();
@@ -1021,23 +1048,40 @@ static void handle_frame(struct input_event *fr, int n)
             break;
         }
         const char *cn;
-        if (!corner_fired && CORNER_MS > 0 && active == 1 && now_ms() - t_down >= CORNER_MS && in_corner(sl[cur_slot].x, sl[cur_slot].y, &cn)
-            && abs(sl[cur_slot].x - sl[cur_slot].sx) < 40 && abs(sl[cur_slot].y - sl[cur_slot].sy) < 40) {
-            corner_fired = 1;
-            cancel_to_android();
-            action(cn, NULL);
-            md = SWALLOW;
+        if (!corner_fired && CORNER_MS > 0 && active == 1 && now_ms() - t_down >= CORNER_MS) {
+            int as = active_slot();
+            int sx = sl[as].sx >= 0 ? sl[as].sx : sl[as].x, sy = sl[as].sy >= 0 ? sl[as].sy : sl[as].y;
+            if (sl[as].active && in_corner(sl[as].x, sl[as].y, &cn)
+                && abs(sl[as].x - sx) < 40 && abs(sl[as].y - sy) < 40) {
+                corner_fired = 1;
+                cancel_to_android();
+                action(cn, NULL);
+                md = SWALLOW;
+            }
         }
         break;
     }
     case EDGE_B:
     case EDGE_T: {
-        /* a touch that starts in the top/bottom edge strip is held for WINDOW_MS: if it turns into the edge swipe (back / panel)
+        /* a touch that starts in the top/bottom edge strip is held for EDGE_HOLD_MS: if it turns into the edge swipe (back / panel)
            it is swallowed, otherwise Android gets it -- a plain tap there must still work */
-        int sx = sl[cur_slot].sx >= 0 ? sl[cur_slot].sx : sl[cur_slot].x;
-        int sy = sl[cur_slot].sy >= 0 ? sl[cur_slot].sy : sl[cur_slot].y;
-        int dx = sl[cur_slot].x - sx;
-        int dy = sl[cur_slot].y - sy;
+        if (active >= 2 && !corner_fired) {
+            if (gest && two_any()) {
+                nheld = 0;
+                md = TWO; two_t0 = now_ms();
+                two_begin();
+            } else {
+                for (int i = 0; i < n && nheld < MAXEV; i++) held[nheld++] = fr[i];
+                flush_held();
+                md = PASS;
+            }
+            break;
+        }
+        int as = active == 1 ? active_slot() : cur_slot;
+        int sx = sl[as].sx >= 0 ? sl[as].sx : sl[as].x;
+        int sy = sl[as].sy >= 0 ? sl[as].sy : sl[as].y;
+        int dx = sl[as].x - sx;
+        int dy = sl[as].y - sy;
         int swipe = !corner_fired && ((md == EDGE_B && dy < -EDGE_SWIPE) || (md == EDGE_T && dy > EDGE_SWIPE)) && abs(dy) > abs(dx);
         if (active == 0) {
             if (swipe) {                    /* a fast flick that ended before the swipe was seen while held */
@@ -1064,10 +1108,11 @@ static void handle_frame(struct input_event *fr, int n)
         break;
     }
     case EDGE_FWD: {
-        int sx = sl[cur_slot].sx >= 0 ? sl[cur_slot].sx : sl[cur_slot].x;
-        int sy = sl[cur_slot].sy >= 0 ? sl[cur_slot].sy : sl[cur_slot].y;
-        int dx = sl[cur_slot].x - sx;
-        int dy = sl[cur_slot].y - sy;
+        int as = active == 1 ? active_slot() : cur_slot;
+        int sx = sl[as].sx >= 0 ? sl[as].sx : sl[as].x;
+        int sy = sl[as].sy >= 0 ? sl[as].sy : sl[as].y;
+        int dx = sl[as].x - sx;
+        int dy = sl[as].y - sy;
         dz_forward(fr, n);
         if (active == 0) { md = IDLE; break; }
         if (!corner_fired && ((edge_kind == EDGE_B && dy < -EDGE_SWIPE) || (edge_kind == EDGE_T && dy > EDGE_SWIPE)) && abs(dy) > abs(dx)) {
@@ -1080,8 +1125,8 @@ static void handle_frame(struct input_event *fr, int n)
             /* corner long press also for touches that started inside the top/bottom edge strip (they are in EDGE_FWD,
                not PASS): same rule as below -- one finger, held >= CORNER_MS, moved < 40 px */
             const char *ecn;
-            if (!corner_fired && CORNER_MS > 0 && active == 1 && now_ms() - t_down >= CORNER_MS
-                && in_corner(sl[cur_slot].x, sl[cur_slot].y, &ecn) && abs(dx) < 40 && abs(dy) < 40) {
+            if (!corner_fired && CORNER_MS > 0 && active == 1 && sl[as].active && now_ms() - t_down >= CORNER_MS
+                && in_corner(sl[as].x, sl[as].y, &ecn) && abs(dx) < 40 && abs(dy) < 40) {
                 corner_fired = 1;
                 cancel_to_android();
                 action(ecn, NULL);
@@ -1092,8 +1137,11 @@ static void handle_frame(struct input_event *fr, int n)
     }
     case TWO:
         if (active == 0) { two_finger_end(); md = IDLE; nheld = 0; }
-        else if (!two_done && G_TWO_LONG && now_ms() - two_t0 >= 2000 && abs(sl[two_i[0]].x - two_sx[0]) < 60 && abs(sl[two_i[0]].y - two_sy[0]) < 60) {
-            action("invert", NULL); two_done = 1;       /* long press fires while the fingers are still down */
+        else if (!two_done && G_TWO_LONG && active >= 2 && sl[two_i[0]].active && sl[two_i[1]].active
+            && now_ms() - two_t0 >= 2000
+            && abs(sl[two_i[0]].x - two_sx[0]) < 60 && abs(sl[two_i[0]].y - two_sy[0]) < 60
+            && abs(sl[two_i[1]].x - two_sx[1]) < 60 && abs(sl[two_i[1]].y - two_sy[1]) < 60) {
+            action("invert", NULL); two_done = 1;       /* long press fires while both fingers are still down and still */
         }
         break;
     case SWALLOW:
@@ -1311,6 +1359,10 @@ static int setup_uinput_keys(void)
 static void touch_reset(const char *why)
 {
     n_reset++;
+    if (scroll_sent == 1) epd_cmd("SCROLL 0\n");
+    scroll_sent = 0;
+    prev_any = 0;
+    dz_on = 0;
     int n = release_android(1, why);
     nheld = 0;
     md = count_active() ? SWALLOW : IDLE;
@@ -1385,11 +1437,15 @@ static void inject_cmd(int fd)
             inj_frame(-1, 0, 0);
         } else if (sscanf(line, "tap %d %d %d", &x1, &y1, &ms) >= 2) {
             if (sscanf(line, "tap %*d %*d %d", &ms) != 1) ms = 60;
+            if (ms < 0) { logf_("inject tap ignored: invalid ms=%d", ms); continue; }
+            if (ms > 30000) ms = 30000;
             logf_("inject tap %d,%d", x1, y1);
             inj_frame(77, x1, y1);
             usleep((useconds_t)ms * 1000);
             inj_frame(-1, 0, 0);
         } else if (sscanf(line, "swipe %d %d %d %d %d", &x1, &y1, &x2, &y2, &ms) == 5) {
+            if (ms < 0) { logf_("inject swipe ignored: invalid ms=%d", ms); continue; }
+            if (ms > 30000) ms = 30000;
             int steps = 12;      /* optional 6th number: steps (a real panel reports every ~8-16 ms; 12 steps is a coarse 24 Hz) */
             if (sscanf(line, "swipe %*d %*d %*d %*d %*d %d", &steps) != 1 || steps < 1 || steps > 500) steps = 12;
             logf_("inject swipe %d,%d -> %d,%d", x1, y1, x2, y2);
@@ -1525,12 +1581,16 @@ int main(int argc, char **argv)
         if (want_release) {
             want_release = 0;
             boost_end();
+            if (scroll_sent == 1) epd_cmd("SCROLL 0\n");
+            scroll_sent = 0;
+            prev_any = 0;
+            dz_on = 0;
             if (!paused) { release_android(1, "released to the Kindle"); ioctl(tfd, EVIOCGRAB, 0); if (tapfd >= 0) ioctl(tapfd, EVIOCGRAB, 0); paused = 1; md = IDLE; nheld = 0; nf = 0; memset(sl, 0, sizeof(sl)); memset(as_, 0, sizeof(as_)); st_btn = 0; logf_("released"); }
         }
         if (want_grab) {
             want_grab = 0;
             if (paused) {
-                ioctl(tfd, EVIOCGRAB, 1); if (tapfd >= 0) ioctl(tapfd, EVIOCGRAB, 1); paused = 0; md = IDLE; nheld = 0; nf = 0; memset(sl, 0, sizeof(sl)); memset(as_, 0, sizeof(as_)); st_btn = 0;
+                ioctl(tfd, EVIOCGRAB, 1); if (tapfd >= 0) ioctl(tapfd, EVIOCGRAB, 1); paused = 0; md = IDLE; prev_any = 0; scroll_sent = 0; dz_on = 0; nheld = 0; nf = 0; memset(sl, 0, sizeof(sl)); memset(as_, 0, sizeof(as_)); st_btn = 0;
                 struct input_absinfo ai;
                 if (src_proto == PROTO_B && ioctl(tfd, EVIOCGABS(ABS_MT_SLOT), &ai) == 0 && ai.value >= 0 && ai.value < MAXSLOT) hw_slot = cur_slot = ai.value;
                 release_android(1, "grabbed again");
@@ -1539,6 +1599,7 @@ int main(int argc, char **argv)
         }
         long long now_t = now_ms();
         if (boost_until && now_t >= boost_until) boost_end();
+        else if (boost_on && !boost_until && boost_t0 && now_t - boost_t0 >= BOOST_HOLD_MAX_MS) boost_end();
         struct pollfd pf[3] = { { tfd, POLLIN, 0 }, { ifd, POLLIN, 0 }, { tapfd, POLLIN, 0 } };
         /* Exact deadline poll timeout: avoids 100 Hz wakeups during touch hold and removes up to 10 ms jitter on WINDOW_MS / EDGE_HOLD_MS */
         int pto = -1;
@@ -1554,6 +1615,7 @@ int main(int argc, char **argv)
         }
         if (STUCK_MS > 0 && (out_any() || count_active())) { int w = STUCK_MS / 4 > 10 ? STUCK_MS / 4 : 10; if (pto < 0 || w < pto) pto = w; }
         if (boost_until) { long long left = boost_until - now_t; if (left < 1) left = 1; if (pto < 0 || left < pto) pto = (int)left; }
+        else if (boost_on && boost_t0) { long long left = (boost_t0 + BOOST_HOLD_MAX_MS) - now_t; if (left < 1) left = 1; if (pto < 0 || left < pto) pto = (int)left; }
         int pr = poll(pf, 3, pto);   /* a negative fd is skipped by poll */
         if (pr > 0 && tapfd >= 0 && (pf[2].revents & (POLLIN | POLLERR | POLLHUP))) {
             tap_read();
@@ -1574,26 +1636,31 @@ int main(int argc, char **argv)
                 md = EDGE_FWD;
             }
             if (md == EDGE_ARM) eb_armed(count_active(), 0);   /* swipe up and hold: a still finger sends nothing */
-            if (md == TWO && !two_done && G_TWO_LONG && now_ms() - two_t0 >= 2000 && abs(sl[two_i[0]].x - two_sx[0]) < 60 && abs(sl[two_i[0]].y - two_sy[0]) < 60) {
-                action("invert", NULL); two_done = 1;
+            if (md == TWO && !two_done && G_TWO_LONG && now_ms() - two_t0 >= 2000) {
+                two_done = 1;                    /* evaluated once: never re-arm expired deadline (prevents 1000 Hz poll spin) */
+                if (count_active() >= 2 && sl[two_i[0]].active && sl[two_i[1]].active
+                    && abs(sl[two_i[0]].x - two_sx[0]) < 60 && abs(sl[two_i[0]].y - two_sy[0]) < 60
+                    && abs(sl[two_i[1]].x - two_sx[1]) < 60 && abs(sl[two_i[1]].y - two_sy[1]) < 60) action("invert", NULL);
             }
             if (md == PASS && !corner_fired && CORNER_MS > 0 && count_active() == 1 && now_ms() - t_down >= CORNER_MS) {
-                int as = cur_slot;
-                if (!sl[as].active) for (int i = 0; i < MAXSLOT; i++) if (sl[i].active) { as = i; break; }
+                corner_fired = 1;                /* evaluated once: non-corner hold must not spin poll(1ms) forever */
+                int as = active_slot();
                 const char *cn;
                 int sx = sl[as].sx >= 0 ? sl[as].sx : sl[as].x, sy = sl[as].sy >= 0 ? sl[as].sy : sl[as].y;
                 if (sl[as].active && in_corner(sl[as].x, sl[as].y, &cn) && abs(sl[as].x - sx) < 40 && abs(sl[as].y - sy) < 40) {
-                    corner_fired = 1; cancel_to_android(); action(cn, NULL); md = SWALLOW;
+                    cancel_to_android(); action(cn, NULL); md = SWALLOW;
                 }
             }
             /* the same for a touch that started in the top / bottom edge strip and was handed to Android (EDGE_FWD): a finger
                held still sends no events, so only this tick sees the time run out. Same rule as handle_frame's EDGE_FWD
                branch (moved < 40 px) */
             if (md == EDGE_FWD && !corner_fired && CORNER_MS > 0 && count_active() == 1 && now_ms() - t_down >= CORNER_MS) {
+                corner_fired = 1;
+                int as = active_slot();
                 const char *cn;
-                int sx = sl[cur_slot].sx >= 0 ? sl[cur_slot].sx : sl[cur_slot].x, sy = sl[cur_slot].sy >= 0 ? sl[cur_slot].sy : sl[cur_slot].y;
-                if (in_corner(sl[cur_slot].x, sl[cur_slot].y, &cn) && abs(sl[cur_slot].x - sx) < 40 && abs(sl[cur_slot].y - sy) < 40) {
-                    corner_fired = 1; cancel_to_android(); action(cn, NULL); md = SWALLOW;
+                int sx = sl[as].sx >= 0 ? sl[as].sx : sl[as].x, sy = sl[as].sy >= 0 ? sl[as].sy : sl[as].y;
+                if (sl[as].active && in_corner(sl[as].x, sl[as].y, &cn) && abs(sl[as].x - sx) < 40 && abs(sl[as].y - sy) < 40) {
+                    cancel_to_android(); action(cn, NULL); md = SWALLOW;
                 }
             }
             stuck_watchdog();
@@ -1632,7 +1699,7 @@ int main(int argc, char **argv)
                         }
                     }
                     for (int k = 0; k < nf; k++)
-                        if (frame[k].type == EV_ABS && frame[k].code == ABS_MT_SLOT && frame[k].value >= 0 && frame[k].value < MAXSLOT) hw_slot = frame[k].value;
+                        if (frame[k].type == EV_ABS && frame[k].code == ABS_MT_SLOT) hw_slot = frame[k].value;
                     if (new_touch_over_active(frame, nf)) resync_slots(0);
                     rot_frame(frame, nf);
                     handle_frame(frame, nf);

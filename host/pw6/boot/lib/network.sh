@@ -9,11 +9,9 @@ net_setup() {
     # DNS：ANDROID_DNS 在前，Kindle 当前的在后。只在 slirp 自己的 mount 命名空间里 bind，不动 Kindle 的 /etc
     { for d in $ANDROID_DNS; do echo "nameserver $d"; done
       grep '^nameserver' "$(readlink -f /etc/resolv.conf)" 2>/dev/null; } > $W/resolv.conf
-    # 运行启动时若未强制始终省电，先关闭 Wi-Fi 省电避免首启/加载页面卡顿（空闲 2 分钟或休眠自动恢复省电）
-    if [ "${WIFI_PS:-auto}" != on ]; then
-        cut -d. -f1 /proc/uptime > $W/wifi.busy 2>/dev/null || true
-        wifi_ps_off
-    fi
+    # Wi-Fi 省电模式保持开着（电池优先）：仅在 WIFI_PS=off 或传书/下载（wifi_ps_tick）时关闭，避免离线/轻度阅读白耗电
+    [ "${WIFI_PS:-auto}" = off ] && wifi_ps_off
+    return 0
 }
 
 # Wi-Fi 省电。设置 WIFI_PS：
@@ -51,15 +49,24 @@ wifi_ps_tick() {
         *)
             d=$(wifi_dev); now=$(cut -d. -f1 /proc/uptime)
             rx=$(cat /sys/class/net/$d/statistics/rx_bytes 2>/dev/null || echo 0)
-            tx=$(cat /sys/class/net/$d/statistics/tx_bytes 2>/dev/null || echo 0)
-            tot=$((rx + tx))
-            set -- $(cat $W/wifi.rx 2>/dev/null); prx=${2:-$tot}; pt=${1:-$now}
-            echo "$now $tot" > $W/wifi.rx
+            set -- $(cat $W/wifi.rx 2>/dev/null); prx=${2:-$rx}; pt=${1:-$now}
+            echo "$now $rx" > $W/wifi.rx
             busy=
             [ -f $W/fwd.id ] && busy=fwd                                  # 传书网页开着
-            dt=$((now - pt)); [ $dt -gt 0 ] && [ $(( (tot - prx) / dt )) -ge ${WIFI_BUSY_BPS:-2048} ] && busy=rx   # ≥ 2 KB/s 即判定在联网交互，立刻唤醒 Wi-Fi 降延迟
+            if [ -f $W/dl.active ]; then
+                dl_t=$(cat $W/dl.active 2>/dev/null)
+                case "$dl_t" in
+                    ''|*[!0-9]*)
+                        dl_m=$(stat -c %Y $W/dl.active 2>/dev/null || echo 0)
+                        set -- $(cat $W/wifi.dl 2>/dev/null)
+                        if [ "$1" = "$dl_m" ] && [ -n "$2" ]; then dl_t=$2
+                        else dl_t=$now; echo "$dl_m $now" > $W/wifi.dl; fi ;;
+                esac
+                [ $((now - dl_t)) -ge 0 ] && [ $((now - dl_t)) -lt 35 ] && busy=dl   # 商店/字体/OTA 弱网下载期间关 Wi-Fi 省电（/proc/uptime 单调秒）
+            fi
+            dt=$((now - pt)); [ $dt -gt 0 ] && [ $(( (rx - prx) / dt )) -ge ${WIFI_BUSY_BPS:-16384} ] && busy=rx   # ≥ 16 KB/s 下载/同步时临时关省电，避免后台心跳误唤醒射频
             if [ -n "$busy" ]; then echo $now > $W/wifi.busy; wifi_ps_off
-            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge 120 ]; then wifi_ps_restore
+            elif [ -f $W/wifi.ps ] && [ $((now - $(cat $W/wifi.busy 2>/dev/null || echo 0))) -ge 60 ]; then wifi_ps_restore
             fi ;;
     esac
 }
@@ -128,10 +135,13 @@ net_start() {
 # 用着的时候（没冻结、没屏保）每 NET_CHECK_S 秒（默认 600，0 = 不查）也查一次；平时看门狗只比较几个 /sys、/proc 里的值，不发包。
 NET_PROBE_HOSTS=${NET_PROBE_HOSTS:-"connect.rom.miui.com www.baidu.com www.qq.com"}
 net_sig() { # Kindle 现在的网络：默认路由的网卡 + 它的 ifindex + IPv4 地址 + 网关 + DNS（变了就要查一次）
-    ns_dev=$(ip route 2>/dev/null | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
-    ns_gw=$(ip route 2>/dev/null | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit } }')
+    set -- $(ip route 2>/dev/null | awk '$1 == "default" { d=""; g=""; for (i = 1; i < NF; i++) { if ($i == "dev") d = $(i + 1); else if ($i == "via") g = $(i + 1) } if (d != "") { print d, g; exit } }')
+    ns_dev=$1; ns_gw=$2
     [ -n "$ns_dev" ] || { echo none; return 0; }
-    echo "$ns_dev $(cat /sys/class/net/$ns_dev/ifindex 2>/dev/null) $(ip -4 addr show dev "$ns_dev" 2>/dev/null | awk '$1 == "inet" { print $2; exit }') $ns_gw $(grep '^nameserver' "$(readlink -f /etc/resolv.conf)" 2>/dev/null | awk '{ printf "%s,", $2 }')"
+    ns_idx=; read -r ns_idx < "/sys/class/net/$ns_dev/ifindex" 2>/dev/null || true
+    ns_ip=$(ip -4 addr show dev "$ns_dev" 2>/dev/null | awk '$1 == "inet" { print $2; exit }')
+    ns_dns=$(awk '/^nameserver/ { printf "%s,", $2 }' /etc/resolv.conf 2>/dev/null)
+    echo "$ns_dev $ns_idx $ns_ip $ns_gw $ns_dns"
 }
 net_host_up() { # Kindle 自己有默认路由和地址（不发包）。chroot：还得是 Android 跟踪的那块网卡（Wi-Fi 断着时可能只剩 USB 网络）
     nh_d=$(net_sig | cut -d' ' -f1); [ "$nh_d" != none ] || return 1
@@ -162,26 +172,55 @@ net_slirp_restart() {
     sp=$(cat $W/slirp.pid 2>/dev/null)
     for p in $(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null) $sp; do kill -CONT $p 2>/dev/null; kill $p 2>/dev/null; done
     i=0; while [ $i -lt 20 ] && [ -n "$(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null)" ]; do usleep 100000; i=$((i + 1)); done
+    for p in $(pgrep -f "^[^ ]*slirp4netns .*--api-socket $W/slirp.sock" 2>/dev/null) $sp; do kill -9 $p 2>/dev/null; done
     net_setup
     P=$(cat $W/pid 2>/dev/null) net_start
-    # 传书的端口转发在旧的 slirp 里：重新加（cmd.sh 的 fwd 会自己处理“已经开着”）
-    nf_port=$(cut -d: -f1 $W/fwd.ipt 2>/dev/null)
+    # 传书和无线调试的端口转发在旧的 slirp 里：重新加（fwd_on / wa_adb_fwd_on 会自己清理旧记录）
+    nf_port=$(cat $W/fwd.port 2>/dev/null)
+    [ -n "$nf_port" ] || nf_port=$(cut -d: -f1 $W/fwd.ipt 2>/dev/null)
     [ -f $W/fwd.id ] && [ -n "$nf_port" ] && type fwd_on >/dev/null 2>&1 && { fwd_on "$nf_port"; t "net: transfer port $nf_port forwarded again"; }
+    if [ -f $W/adbfwd.id ] || [ -f $X/ctl/adb.on ]; then
+        type wa_adb_fwd_on >/dev/null 2>&1 || { [ -f "$VD/boot/lib/webadmin.sh" ] && . "$VD/boot/lib/webadmin.sh"; }
+        type wa_adb_fwd_on >/dev/null 2>&1 && { wa_adb_fwd_on >/dev/null 2>&1 && t "net: adb port forwarded again"; }
+    fi
+    if [ "${DNS_MODE:-auto}" != auto ] && type dns_apply >/dev/null 2>&1; then
+        (
+            _dp=$(cat $W/pid 2>/dev/null)
+            _di=0
+            while [ $_di -lt 25 ] && [ -n "$_dp" ] && kill -0 "$_dp" 2>/dev/null; do
+                P=$_dp; $(vd_in) /system/bin/ip -4 addr show dev eth0 2>/dev/null | grep -q 'inet ' && break
+                sleep 1; _di=$((_di + 1))
+            done
+            sleep 2
+            dns_apply
+        ) </dev/null >/dev/null 2>&1 &
+    fi
 }
 netd_wedged() { # chroot 模式：netd 有线程一直在跑（老 netd 的 clearTetheringRules 死循环）
     np=$(chroot /proc/$(cat $W/pid)/root /system/bin/toybox pidof netd 2>/dev/null | cut -d' ' -f1)
     [ -n "$np" ] || np=$(for d in /proc/[0-9]*; do [ "$(cat $d/comm 2>/dev/null)" = netd ] && { echo ${d#/proc/}; break; }; done)
     [ -n "$np" ] || return 1
-    a=$(awk '{ s += $14 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null); sleep 2
-    b=$(awk '{ s += $14 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null)
-    [ $((b - a)) -ge 150 ] 2>/dev/null   # 2 秒里用户态 ≥ 1.5 秒 = 在空转
+    a=$(awk '{ if (sub(/^.*\) +/, "")) s += $12 + $13 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null); sleep 2
+    b=$(awk '{ if (sub(/^.*\) +/, "")) s += $12 + $13 } END { print s + 0 }' /proc/$np/task/*/stat 2>/dev/null)
+    [ $((b - a)) -ge 150 ] 2>/dev/null   # 2 秒里用户态+内核态 ≥ 1.5 秒 = 在空转
+}
+net_frozen() { # Android 处于屏保或冻结态：不要做探测或重启 slirp（43313616300AD 诊断：锁屏 24s 后 net_heal 误判并重启 slirp）
+    [ "$(cat $W/sleep.cur 2>/dev/null)" = saver ] && return 0
+    if [ "$(cat $W/fzmode 2>/dev/null)" = signal ]; then
+        [ "$(cat $FZ/state 2>/dev/null)" = FROZEN ]
+    else
+        case "$(cat $FZ/freezer.state 2>/dev/null)" in FROZEN|FREEZING) return 0 ;; esac
+        return 1
+    fi
 }
 # $1 = 为什么查（resume / thaw / change / periodic / manual）。在后台跑；同时只有一个。
 net_heal() {
     [ -f $W/booted ] || return 0
     nh_why=$1
+    net_frozen && { t "net check ($nh_why): android frozen/saver, skipping"; return 0; }
     # 醒来以后 Kindle 要几秒到几十秒才重新连上 Wi-Fi：等它（最多 90 秒）。Kindle 自己没网（Wi-Fi 关着、飞行模式）就不是我们的事
-    i=0; while ! net_host_up && [ $i -lt 45 ]; do sleep 2; i=$((i + 1)); done
+    i=0; while ! net_host_up && ! net_frozen && [ $i -lt 45 ]; do sleep 2; i=$((i + 1)); done
+    net_frozen && { t "net check ($nh_why): android frozen/saver while waiting, skipping"; return 0; }
     net_host_up || { t "net check ($nh_why): kindle has no network itself, nothing to do"; return 0; }
     # chroot：给 Android 的那份（DNS 等）按 Kindle 现在的重写，但只在默认路由还在同一块网卡上时（Wi-Fi 断着、走 USB 网络的那一刻
     # 写进去的 iface=usb0 会让以太网服务一直等一块它不跟踪的网卡：模拟器实测）
@@ -189,20 +228,32 @@ net_heal() {
         [ "$(net_sig | cut -d' ' -f1)" = "$(sed -n 's/^iface=//p' $X/hostnet 2>/dev/null)" ] && hostnet_write >/dev/null
     else net_slirp_dns; fi
     sleep ${NET_SETTLE_S:-3}
+    net_frozen && { t "net check ($nh_why): android frozen/saver before probe, skipping"; return 0; }
     net_probe && { [ "$nh_why" = periodic ] || t "net check ($nh_why): ok ($NP_OK)"; echo "$(cut -d. -f1 /proc/uptime) ok" > $W/net.last; return 0; }
+    net_frozen && { t "net check ($nh_why): android frozen/saver during probe, skipping repair"; return 0; }
+    net_host_up || { t "net check ($nh_why): kindle lost network during probe, skipping repair"; return 0; }
     t "net check ($nh_why): android cannot reach the internet but the kindle is online ($(net_sig)): repairing"
     if [ "$(cat $W/mode 2>/dev/null)" = chroot ]; then
+        hostnet_fix_rules
+        [ "$(net_sig | cut -d' ' -f1)" = "$(sed -n 's/^iface=//p' $X/hostnet 2>/dev/null)" ] && hostnet_write >/dev/null
+        type dns_apply >/dev/null 2>&1 && dns_apply
         if netd_wedged; then
             t "net: netd ($np) is spinning (old netd, wlan0 was removed): ending it, init restarts it"
             kill -9 "$np" 2>/dev/null; sleep 8
+        else
+            sleep 3
         fi
     else
         t "net: restarting slirp4netns (android's eth0 comes back and takes a new lease)"
         net_slirp_restart; sleep 12
     fi
+    net_frozen && { t "net check ($nh_why): android frozen/saver during repair, skipping"; return 0; }
     if net_probe; then t "net: repaired ($nh_why): ok ($NP_OK)"; echo "$(cut -d. -f1 /proc/uptime) repaired" > $W/net.last; return 0; fi
     sleep 15
+    net_frozen && { t "net check ($nh_why): android frozen/saver during repair retry, skipping"; return 0; }
     if net_probe; then t "net: repaired ($nh_why, slow): ok ($NP_OK)"; echo "$(cut -d. -f1 /proc/uptime) repaired" > $W/net.last; return 0; fi
+    net_frozen && { t "net check ($nh_why): android frozen/saver after repair, skipping"; return 0; }
+    net_host_up || { t "net check ($nh_why): kindle lost network during repair, skipping"; return 0; }
     t "net: still no network in android after repair ($nh_why); kindle: $(net_sig)"
     echo "$(cut -d. -f1 /proc/uptime) fail" > $W/net.last
     vd_slog "network: android had no network after $nh_why and the automatic repair did not help (kindle: $(net_sig))"

@@ -92,10 +92,11 @@ if [ $OP = grow ]; then
     st_state grow "$FROM" "$TO" resize
     if ! "$RES" "$SYSTEM_IMG"; then st_fsck; finish failed resize2fs; fi
 else
-    # resize2fs 自己估的最小块数：目标比它小就不做（什么都还没动）
+    # resize2fs 自己估的最小块数：目标比它小就不做（什么都还没动）。注意 >4 GB 镜像块数超 6 位数，不能用 st_num（上限 6 位）
     pm=$("$RES" -P "$SYSTEM_IMG" 2>/dev/null | sed -n 's/.*: *\([0-9][0-9]*\) *$/\1/p' | tail -1)
     l=$(st_sb 24)
-    if st_num "$pm"; then
+    case "$pm" in ''|*[!0-9]*) pm= ;; esac
+    if [ -n "$pm" ] && [ "${#pm}" -le 10 ]; then
         pmb=$(awk -v b="$pm" -v l="${l:-2}" 'BEGIN { printf "%d", b * (2 ^ l) / 1024 + 1 }')
         st_log "resize2fs -P: minimum $pmb MB"
         [ $((pmb + 64)) -le "$TO" ] || finish refused small

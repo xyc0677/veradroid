@@ -111,10 +111,12 @@ frontlight() {
         *) [ "$cur" -gt 0 ] && want=off || want=on ;;
     esac
     if [ $want = off ]; then
+        [ "$(lipc-get-prop $p flAuto 2>/dev/null)" = 1 ] && lipc-set-prop -i $p flAuto 0 2>/dev/null
         [ "$cur" -gt 0 ] && echo "$cur" > $W/fl.saved
         lipc-set-prop -i $p flIntensity 0
     else
         [ "$cur" -gt 0 ] && return 0
+        [ "$(lipc-get-prop $p flAuto 2>/dev/null)" = 1 ] && lipc-set-prop -i $p flAuto 0 2>/dev/null
         n=$(cat $W/fl.saved 2>/dev/null)
         case "$n" in ''|*[!0-9]*|0) max=$(lipc-get-prop $p flMaxIntensity 2>/dev/null); n=$(( ${max:-24} / 2 )) ;; esac
         lipc-set-prop -i $p flIntensity "$n"
@@ -130,7 +132,7 @@ step() {   # $1 = 属性 $2 = + / -  按 2 档调，范围 0..最大
     [ $n -lt 0 ] && n=0; [ $n -gt $max ] && n=$max
     lipc-set-prop -i $p $1 $n
     [ "$max" -gt 0 ] 2>/dev/null || return 0
-    if [ $1 = flIntensity ]; then hint light "LIGHT|亮度 $((n * 100 / max))%"; else hint warm "WARMTH|暖光 $((n * 100 / max))%"; fi
+    if [ $1 = flIntensity ]; then hint light "LIGHT|亮度 $n"; else hint warm "WARMTH|暖光 $n"; fi
 }
 case "$1" in
     clear)  POS=t; run_action "${G_TWO_TAP_ACT:-clear}" ;;      # 双指轻点（veradroid-input 固定发 clear）

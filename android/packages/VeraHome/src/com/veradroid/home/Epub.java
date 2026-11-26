@@ -76,6 +76,7 @@ final class Epub {
     private static final Pattern P_STRIP0 = Pattern.compile("(?is)<head[^>]*>.*?</head>");
     private static final Pattern P_STRIP1 = Pattern.compile("(?is)<script[^>]*>.*?</script>");
     private static final Pattern P_STRIP2 = Pattern.compile("(?is)<style[^>]*>.*?</style>");
+    private static final Pattern P_COMMENT = Pattern.compile("(?s)<!--.*?-->");
     private static final Pattern P_STRIP3 = Pattern.compile("(?i)<br\\s*/?>");
     private static final Pattern P_STRIP4 = Pattern.compile("(?i)</p\\s*>");
     private static final Pattern P_STRIP5 = Pattern.compile("(?i)</div\\s*>");
@@ -88,24 +89,29 @@ final class Epub {
     private static final Pattern P_ANYTAG = Pattern.compile("<[^>]+>");
     private static final Pattern P_SCHEME = Pattern.compile("(?i)^[a-z][a-z0-9+.-]*:.*");
     private static final Pattern P_HTMLEXT = Pattern.compile("(?i).*\\.(x?html?|htm)$");
-    private static final Pattern P_NUMENT = Pattern.compile("&#(x?)([0-9a-fA-F]+);");
-    private static final Pattern P_ITEM = Pattern.compile("(?is)<item\\b[^>]*>");
-    private static final Pattern P_SPINE = Pattern.compile("(?is)<spine\\b[^>]*>");
-    private static final Pattern P_ITEMREF = Pattern.compile("(?is)<itemref\\b[^>]*>");
+    private static final Pattern P_NUMENT = Pattern.compile("&#([xX]?)([0-9a-fA-F]{1,7});");
+    private static final Pattern P_ITEM = Pattern.compile("(?is)<(?:\\w+:)?item\\b[^>]*>");
+    private static final Pattern P_SPINE = Pattern.compile("(?is)<(?:\\w+:)?spine\\b[^>]*>");
+    private static final Pattern P_ITEMREF = Pattern.compile("(?is)<(?:\\w+:)?itemref\\b[^>]*>");
+
+    private static String findOpf(ZipFile z) {
+        String opf = null;
+        String container = readEntry(z, "META-INF/container.xml");
+        if (container != null) opf = attr(container, "rootfile", "full-path");
+        if (opf == null) {
+            Enumeration<? extends ZipEntry> en = z.entries();
+            while (en.hasMoreElements()) {
+                String n = en.nextElement().getName();
+                if (n.toLowerCase(Locale.US).endsWith(".opf")) { opf = n; break; }
+            }
+        }
+        return opf;
+    }
 
     static Book load(File f) throws Exception {
         ZipFile z = new ZipFile(f);
         try {
-            String opf = null;
-            String container = readEntry(z, "META-INF/container.xml");
-            if (container != null) opf = attr(container, "rootfile", "full-path");
-            if (opf == null) {
-                Enumeration<? extends ZipEntry> en = z.entries();
-                while (en.hasMoreElements()) {
-                    String n = en.nextElement().getName();
-                    if (n.toLowerCase(Locale.US).endsWith(".opf")) { opf = n; break; }
-                }
-            }
+            String opf = findOpf(z);
             if (opf == null) throw new Exception("EPUB 缺少 OPF");
             String opfXml = readEntry(z, opf);
             if (opfXml == null) throw new Exception("EPUB 的 OPF 读不到");
@@ -170,11 +176,13 @@ final class Epub {
             if (navHref != null) {
                 String name = resolve(base, pctDecode(navHref));
                 String xml = readEntry(z, name);
+                if (xml == null) { String raw = resolve(base, navHref); xml = readEntry(z, raw); if (xml != null) name = raw; }
                 if (xml != null) nav = resolveToc(parseNav(xml), dirOf(name), spineAt, book.chapters);
             }
             if (ncxHref != null) {
                 String name = resolve(base, pctDecode(ncxHref));
                 String xml = readEntry(z, name);
+                if (xml == null) { String raw = resolve(base, ncxHref); xml = readEntry(z, raw); if (xml != null) name = raw; }
                 if (xml != null) ncx = resolveToc(parseNcx(xml), dirOf(name), spineAt, book.chapters);
             }
             List<TocItem> given = null; String src = null;
@@ -194,18 +202,29 @@ final class Epub {
     static Chapter firstChapter(File f) throws Exception {
         ZipFile z = new ZipFile(f);
         try {
-            String container = readEntry(z, "META-INF/container.xml");
-            String opf = container != null ? attr(container, "rootfile", "full-path") : null;
+            String opf = findOpf(z);
             String opfXml = opf != null ? readEntry(z, opf) : null;
             if (opfXml == null) return null;
             String base = opf.contains("/") ? opf.substring(0, opf.lastIndexOf('/') + 1) : "";
             Map<String, String> items = new HashMap<String, String>();
+            List<String> htmlItems = new ArrayList<String>();
             Matcher im = P_ITEM.matcher(opfXml);
-            while (im.find()) { String id = attr(im.group(), "id"), href = attr(im.group(), "href"); if (id != null && href != null) items.put(id, href); }
-            Matcher sp = P_ITEMREF.matcher(opfXml);
-            for (int tries = 0; sp.find() && tries < 12; tries++) {
-                String href = items.get(attr(sp.group(), "idref"));
+            while (im.find()) {
+                String id = attr(im.group(), "id"), href = attr(im.group(), "href");
                 if (href == null) continue;
+                if (id != null) items.put(id, href);
+                if (P_HTMLEXT.matcher(href).matches()) htmlItems.add(href);
+            }
+            List<String> order = new ArrayList<String>();
+            Matcher sp = P_ITEMREF.matcher(opfXml);
+            while (sp.find()) {
+                String href = items.get(attr(sp.group(), "idref"));
+                if (href != null) order.add(href);
+            }
+            if (order.isEmpty()) order.addAll(htmlItems);
+            int tries = 0;
+            for (String href : order) {
+                if (tries++ >= 64) break;
                 String name = resolve(base, pctDecode(href));
                 String html = readEntry(z, name);
                 if (html == null) { String raw = resolve(base, href); html = readEntry(z, raw); if (html != null) name = raw; }
@@ -514,13 +533,14 @@ final class Epub {
         return null;
     }
 
-    /** 空白（含全角空格、不换行空格）合成一个空格，去掉首尾。 */
+    /** 空白（含全角空格、不换行空格、BOM）合成一个空格，去掉首尾。 */
     static String clean(String s) {
         if (s == null) return "";
         StringBuilder b = new StringBuilder(s.length());
         boolean sp = false;
         for (int i = 0; i < s.length(); i++) {
             char ch = s.charAt(i);
+            if (ch == '\uFEFF') continue;
             if (Character.isWhitespace(ch) || ch == '\u3000' || ch == '\u00a0') { sp = b.length() > 0; continue; }
             if (sp) { b.append(' '); sp = false; }
             b.append(ch);
@@ -573,20 +593,76 @@ final class Epub {
         try {
             ZipEntry e = z.getEntry(name);
             if (e == null) {
-                String decoded = java.net.URLDecoder.decode(name, "UTF-8");
-                e = z.getEntry(decoded);
+                String decoded = pctDecode(name);
+                if (!decoded.equals(name)) e = z.getEntry(decoded);
             }
             if (e == null) return null;
             InputStream in = z.getInputStream(e);
             ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            byte[] b = new byte[8192];
-            int n;
-            while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > MAX_ENTRY) break; }
-            in.close();
-            return new String(bo.toByteArray(), Charset.forName("UTF-8"));
+            try {
+                byte[] b = new byte[8192];
+                int n;
+                while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > MAX_ENTRY) break; }
+            } finally {
+                try { in.close(); } catch (Exception ignored) { }
+            }
+            byte[] raw = bo.toByteArray();
+            return decodeText(raw, raw.length);
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 文本编码识别（EPUB 章节与 TXT 电子书共用）：
+     * 1. UTF-16LE / UTF-16BE / UTF-8 BOM 精确识别并去 BOM；
+     * 2. 无 BOM 时用严格 UTF-8 解码校验，遇到任何非法 UTF-8 序列即改用 GB18030（回退 GBK），
+     *    彻底解决短中文 TXT 误判为 UTF-8 乱码与 Windows/网文 UTF-16 TXT 整本乱码。
+     */
+    static String decodeText(byte[] b, int len) {
+        if (b == null || len <= 0) return "";
+        int n = Math.min(len, b.length);
+        String s;
+        if (n >= 2 && (b[0] & 0xff) == 0xFF && (b[1] & 0xff) == 0xFE) {
+            s = new String(b, 2, n - 2, Charset.forName("UTF-16LE"));
+        } else if (n >= 2 && (b[0] & 0xff) == 0xFE && (b[1] & 0xff) == 0xFF) {
+            s = new String(b, 2, n - 2, Charset.forName("UTF-16BE"));
+        } else if (n >= 3 && (b[0] & 0xff) == 0xEF && (b[1] & 0xff) == 0xBB && (b[2] & 0xff) == 0xBF) {
+            s = new String(b, 3, n - 3, Charset.forName("UTF-8"));
+        } else {
+            s = null;
+            String declared = sniffXmlEncoding(b, n);
+            if (declared != null && !declared.equalsIgnoreCase("utf-8") && !declared.equalsIgnoreCase("utf8")) {
+                try {
+                    if (Charset.isSupported(declared)) s = new String(b, 0, n, Charset.forName(declared));
+                } catch (Throwable ignored) { }
+            }
+            if (s == null) {
+                try {
+                    java.nio.charset.CharsetDecoder dec = Charset.forName("UTF-8").newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+                    s = dec.decode(java.nio.ByteBuffer.wrap(b, 0, n)).toString();
+                } catch (java.nio.charset.CharacterCodingException badUtf8) {
+                    for (String cs : new String[] { "GB18030", "GBK" }) {
+                        try { s = new String(b, 0, n, Charset.forName(cs)); break; } catch (Throwable ignored) { }
+                    }
+                }
+            }
+            if (s == null) s = new String(b, 0, n, Charset.forName("UTF-8"));
+        }
+        if (s.length() > 0 && s.charAt(0) == '\uFEFF') s = s.substring(1);
+        return s;
+    }
+
+    private static final Pattern P_XML_ENC = Pattern.compile("(?is)<\\?xml[^>]*encoding\\s*=\\s*[\"']([A-Za-z0-9._-]+)[\"']");
+
+    private static String sniffXmlEncoding(byte[] b, int n) {
+        int headLen = Math.min(n, 256);
+        if (headLen < 20) return null;
+        String head = new String(b, 0, headLen, Charset.forName("ISO-8859-1"));
+        Matcher m = P_XML_ENC.matcher(head);
+        return m.find() ? m.group(1).trim() : null;
     }
 
     /** 百分号解码（UTF-8），+ 不动；解不了就原样返回。 */
@@ -626,8 +702,8 @@ final class Epub {
         synchronized (ATTR) {
             ps = ATTR.get(attrName);
             if (ps == null) {
-                ps = new Pattern[] { Pattern.compile("(?is)" + Pattern.quote(attrName) + "\\s*=\\s*\"([^\"]*)\""),
-                    Pattern.compile("(?is)" + Pattern.quote(attrName) + "\\s*=\\s*'([^']*)'") };
+                ps = new Pattern[] { Pattern.compile("(?is)(?:^|[\\s\"'/])" + Pattern.quote(attrName) + "\\s*=\\s*\"([^\"]*)\""),
+                    Pattern.compile("(?is)(?:^|[\\s\"'/])" + Pattern.quote(attrName) + "\\s*=\\s*'([^']*)'") };
                 ATTR.put(attrName, ps);
             }
         }
@@ -655,6 +731,7 @@ final class Epub {
         Chapter c = new Chapter();
         c.entry = entry;
         String s = html;
+        s = P_COMMENT.matcher(s).replaceAll(" ");
         s = P_STRIP0.matcher(s).replaceAll(" ");
         s = P_STRIP1.matcher(s).replaceAll(" ");
         s = P_STRIP2.matcher(s).replaceAll(" ");
@@ -675,7 +752,7 @@ final class Epub {
         List<Object[]> headRaw = new ArrayList<Object[]>();     // {级别, 标题标签里的 HTML}
         java.util.Map<Integer, List<Integer>> closeAt = new java.util.HashMap<Integer, List<Integer>>();
         StringBuilder out = new StringBuilder(s.length() + 64);
-        int last = 0, open = -1;
+        int last = 0, open = -1, aDepth = 0;
         for (int i = 0; i < tags.size(); i++) {
             int[] t = tags.get(i);
             String name = names.get(i), at = attrsL.get(i);
@@ -683,7 +760,10 @@ final class Epub {
             List<Integer> ends = closeAt.get(i);
             if (ends != null) for (int n : ends) out.append(MK).append('X').append(n).append(MK_END);
             if (t[2] == 1) {
-                if ("a".equals(name) && open >= 0) { out.append(MK).append('E').append(MK_END); open = -1; }
+                if ("a".equals(name) && open >= 0) {
+                    if (aDepth > 0) aDepth--;
+                    else { out.append(MK).append('E').append(MK_END); open = -1; }
+                }
             } else {
                 int hl = headLevel(name, at);
                 if (hl > 0 && !at.trim().endsWith("/")) {
@@ -736,9 +816,10 @@ final class Epub {
                         }
                     }
                 }
+                boolean selfClose = at.trim().endsWith("/");
                 String href = "a".equals(name) ? attr(at, "href") : null;
                 if (href != null && href.length() > 0 && !P_SCHEME.matcher(href).matches()) {
-                    if (open >= 0) out.append(MK).append('E').append(MK_END);
+                    if (open >= 0) { out.append(MK).append('E').append(MK_END); open = -1; aDepth = 0; }
                     Link k = new Link();
                     int hash = href.indexOf('#');
                     String file = hash >= 0 ? href.substring(0, hash) : href, frag = hash >= 0 ? href.substring(hash + 1) : "";
@@ -752,6 +833,9 @@ final class Epub {
                     open = links.size();
                     links.add(k);
                     out.append(MK).append('L').append(open).append(MK_END);
+                    if (selfClose) { out.append(MK).append('E').append(MK_END); open = -1; aDepth = 0; }
+                } else if ("a".equals(name) && open >= 0 && !selfClose) {
+                    aDepth++;
                 }
             }
             out.append(s, t[0], t[1]);
@@ -1001,6 +1085,7 @@ final class Epub {
 
     static String stripHtml(String html) {
         String s = html;
+        s = P_COMMENT.matcher(s).replaceAll(" ");
         s = P_STRIP0.matcher(s).replaceAll(" ");
         s = P_STRIP1.matcher(s).replaceAll(" ");
         s = P_STRIP2.matcher(s).replaceAll(" ");
@@ -1018,19 +1103,32 @@ final class Epub {
     }
 
     static String htmlToText(String s) {
-        s = s.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-             .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'");
-        Matcher m = P_NUMENT.matcher(s);
-        StringBuffer sb = new StringBuffer();
-        while (m.find()) {
-            try {
-                int cp = Integer.parseInt(m.group(2), m.group(1).length() > 0 ? 16 : 10);
-                m.appendReplacement(sb, new String(Character.toChars(cp)));
-            } catch (Exception e) {
-                m.appendReplacement(sb, "");
+        if (s == null || s.indexOf('&') < 0) return s == null ? "" : s;
+        s = s.replace("&nbsp;", " ").replace("&ensp;", " ").replace("&emsp;", "\u3000").replace("&thinsp;", " ")
+             .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'")
+             .replace("&mdash;", "\u2014").replace("&ndash;", "\u2013").replace("&hellip;", "\u2026")
+             .replace("&ldquo;", "\u201C").replace("&rdquo;", "\u201D").replace("&lsquo;", "\u2018").replace("&rsquo;", "\u2019")
+             .replace("&middot;", "\u00B7").replace("&bull;", "\u2022").replace("&copy;", "\u00A9").replace("&reg;", "\u00AE").replace("&trade;", "\u2122")
+             .replace("&times;", "\u00D7").replace("&divide;", "\u00F7").replace("&plusmn;", "\u00B1").replace("&deg;", "\u00B0")
+             .replace("&laquo;", "\u00AB").replace("&raquo;", "\u00BB");
+        if (s.indexOf("&#") >= 0) {
+            Matcher m = P_NUMENT.matcher(s);
+            StringBuffer sb = new StringBuffer();
+            while (m.find()) {
+                try {
+                    int cp = Integer.parseInt(m.group(2), m.group(1).length() > 0 ? 16 : 10);
+                    if (cp <= 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                        m.appendReplacement(sb, "");
+                    } else {
+                        m.appendReplacement(sb, Matcher.quoteReplacement(new String(Character.toChars(cp))));
+                    }
+                } catch (Exception e) {
+                    m.appendReplacement(sb, "");
+                }
             }
+            m.appendTail(sb);
+            s = sb.toString();
         }
-        m.appendTail(sb);
-        return sb.toString();
+        return s.replace("&amp;", "&");
     }
 }

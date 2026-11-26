@@ -35,7 +35,8 @@ import java.util.Locale;
  */
 public class StatusBarService extends Service {
     private static final String TAG = "VeraStatusBar";
-    private static boolean suppressed = false;   // Home / Panel 在前台时为 true
+    private static boolean legacySuppressed = false;   // 兼容旧调用方（无 owner）
+    private static final java.util.Set<Object> suppressors = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<Object, Boolean>());
     private WindowManager wm;
     private View bar;
     private View reserve;                       // 看不见的 TYPE_STATUS_BAR：只为让系统给应用留出顶部
@@ -60,7 +61,19 @@ public class StatusBarService extends Service {
 
     public static void start(Context c) { c.startService(new Intent(c, StatusBarService.class)); }
     public static void stop(Context c) { c.stopService(new Intent(c, StatusBarService.class)); }
-    public static void setSuppressed(boolean v) { suppressed = v; }
+    public static synchronized void setSuppressed(boolean v) { legacySuppressed = v; }
+    /** 按页面持有者抑止状态栏：避免半屏/透明弹窗或页面切换时互相冲掉抑止态。 */
+    public static synchronized void suppress(Object owner, boolean v) {
+        if (owner == null) { legacySuppressed = v; return; }
+        if (v) suppressors.add(owner);
+        else suppressors.remove(owner);
+    }
+    /** 清除全部抑止持有者（如内置阅读器首帧就绪、需要立刻放出状态栏时）。 */
+    static synchronized void releaseAll() {
+        legacySuppressed = false;
+        suppressors.clear();
+    }
+    private static synchronized boolean isSuppressed() { return legacySuppressed || !suppressors.isEmpty(); }
     public static void refresh(Context c) { c.startService(new Intent(c, StatusBarService.class)); }
     /** 系统按真的状态栏给应用留出顶部了（占位窗口加上了）。 */
     static boolean reserving() { return reserving; }
@@ -95,7 +108,7 @@ public class StatusBarService extends Service {
     }
 
     private void refreshNow() {
-        if (!enabled() || suppressed) { hide(); return; }
+        if (!enabled() || isSuppressed()) { hide(); return; }
         if (bar != null && builtBlocks != Blocks.on(this)) hide();   // 界面风格换了：按新风格重搭这一条
         show();
         // 主题：statusbar.json 可以关掉时间/电量、改时间格式、在左边加一段文字
@@ -113,14 +126,29 @@ public class StatusBarService extends Service {
         if (batt != null) batt.setVisibility(cfg.optBoolean("battery", true) ? View.VISIBLE : View.GONE);
         if (batt != null) {
             int p = -1;
+            boolean charging = false;
             try {
                 BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
-                p = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                if (bm != null) {
+                    int raw = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                    if (raw >= 0 && raw <= 100) p = raw;
+                    charging = bm.isCharging();
+                }
             } catch (Throwable ignored) { }
+            if (p < 0) {
+                try {
+                    Intent bi = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                    if (bi != null) {
+                        int lv = bi.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                        int sc = bi.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                        if (lv >= 0 && sc > 0) p = Math.min(100, lv * 100 / sc);
+                        int st = bi.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                        charging = (st == BatteryManager.BATTERY_STATUS_CHARGING || st == BatteryManager.BATTERY_STATUS_FULL);
+                    }
+                } catch (Throwable ignored) { }
+            }
             String battText = p >= 0 ? p + "%" : "";
             if (!battText.equals(String.valueOf(batt.getText()))) batt.setText(battText);
-            boolean charging = false;
-            try { BatteryManager bm2 = (BatteryManager) getSystemService(BATTERY_SERVICE); charging = bm2 != null && bm2.isCharging(); } catch (Throwable ignored) { }
             Stats.sampleBattery(this, p, charging);
         }
     }
@@ -215,6 +243,8 @@ public class StatusBarService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.LEFT;
+        lp.windowAnimations = 0;
+        lp.setTitle("VeraStatusBar");
         try {
             wm.addView(wrap, lp);
             bar = wrap;

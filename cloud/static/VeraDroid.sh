@@ -94,8 +94,18 @@ net_why() { # 第一次下载时 curl 的退出码
 [ "$(id -u 2>/dev/null)" = 0 ] || fail "VeraDroid：需要 root 权限，请确认越狱已生效" "Needs root. Is the jailbreak active?"
 command -v curl >/dev/null 2>&1 || fail "VeraDroid：找不到 curl，无法联网安装；请改用离线整包 $OZ" "No curl on this Kindle. Use $OZ (offline)."
 say "VeraDroid：正在下载安装器…" "VeraDroid: downloading the installer..."
-curl -fsSL --retry 3 --connect-timeout 20 "$BASE/bootstrap.sh?t=$(date +%s)" -o /tmp/vd-bootstrap.sh \
-    || { rc=$?; say "VeraDroid：下载安装器失败（curl $rc），正在检查网络…" "Download failed (curl $rc), checking network..."; net_why $rc; fail "VeraDroid：$NZ" "$NE"; }
+# 下载后先用 sh -n 校验完整性（弱网截断时不执行半截脚本；失败则自动切直链/重试一次）
+dl_bs() {
+    rm -f /tmp/vd-bootstrap.sh
+    for u in "$BASE/bootstrap.sh?t=$(date +%s)" "https://dl.wenjin.jp/bootstrap.sh?t=$(date +%s)"; do
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 120 "$u" -o /tmp/vd-bootstrap.sh && [ -s /tmp/vd-bootstrap.sh ] && sh -n /tmp/vd-bootstrap.sh 2>/dev/null && return 0
+        rc=$?
+        echo "dl_bs: failed or truncated from $u (rc=$rc)"
+        rm -f /tmp/vd-bootstrap.sh
+    done
+    return "${rc:-1}"
+}
+dl_bs || { rc=$?; say "VeraDroid：下载安装器失败（curl $rc），正在检查网络…" "Download failed (curl $rc), checking network..."; net_why $rc; fail "VeraDroid：$NZ" "$NE"; }
 VD_INSTALLER="$0" sh /tmp/vd-bootstrap.sh
 rc=$?
 rm -f /tmp/vd-bootstrap.sh

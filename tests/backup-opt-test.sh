@@ -32,7 +32,7 @@ for f in $INST; do
     awk '/^rm -f \$BKL \$BKC$/{r=1} r && /^DOCS_MANIFEST=/{ok=1} END{exit !ok}' "$f" || bad "$f: documents manifest no longer taken after the backup block"
     sh -n "$f" || bad "$f: syntax"
 done
-case " $(echo $INST) " in *bootstrap-legacy.sh*) grep -q 'TESTED" = emulator-only \]; then BK_MODE=light' cloud/static/bootstrap-legacy.sh || bad "legacy: emulator-only models must still back up" ;; esac
+case " $(echo $INST) " in *bootstrap-legacy.sh*) grep -q 'TESTED" = emulator-only \].*then BK_MODE=light' cloud/static/bootstrap-legacy.sh || bad "legacy: emulator-only models must still back up on first install" ;; esac
 for d in $HOSTS; do
     grep -q 'boot/lib/backup.sh' $d/common.sh || bad "$d/common.sh does not source backup.sh"
     for v in updatebackup backups backupdel; do grep -q "^    $v)" $d/webadmin.sh || bad "$d/webadmin.sh: no '$v' request"; done

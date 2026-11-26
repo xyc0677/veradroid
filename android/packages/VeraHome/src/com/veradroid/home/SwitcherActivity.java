@@ -25,6 +25,7 @@ public class SwitcherActivity extends Activity {
     /** 包名 -> 名称 / 图标，进程内缓存。应用更新后名称图标可能变：装卸应用时 HomeActivity 会清掉。 */
     static final java.util.Map<String, String> LABELS = new java.util.HashMap<String, String>();
     static final java.util.Map<String, android.graphics.drawable.Drawable.ConstantState> ICONS = new java.util.HashMap<String, android.graphics.drawable.Drawable.ConstantState>();
+    private static long iconsThemeVer = -1;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -77,12 +78,16 @@ public class SwitcherActivity extends Activity {
     private LinearLayout list, footBox;
     private View root;
     private boolean blk;
+    private int appCount;
 
     /** 正在运行的应用 + “桌面”。每次打开都重新取（任务会变），窗口和外框留着复用。 */
     private void fill() {
+        long tv = Theme.version();
+        if (tv != iconsThemeVer) { ICONS.clear(); iconsThemeVer = tv; }
         list.removeAllViews();
         final PackageManager pm = getPackageManager();
         final ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        final int iconPx = Ui.dp(this, 48);
         int n = 0;
         try {
             @SuppressWarnings("deprecation")
@@ -99,10 +104,14 @@ public class SwitcherActivity extends Activity {
                 if (label == null || cs == null) {
                     // 第一次见到这个应用才去问 PackageManager、解码图标；之后用进程里缓存的（切换器每次打开都要快）
                     try {
-                        label = String.valueOf(pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)));
-                        icon = pm.getApplicationIcon(pkg);
-                        LABELS.put(pkg, label);
-                        if (icon.getConstantState() != null) ICONS.put(pkg, icon.getConstantState());
+                        if (label == null) {
+                            label = String.valueOf(pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)));
+                            LABELS.put(pkg, label);
+                        }
+                        java.io.File cf = Theme.iconFile(pkg);
+                        android.graphics.Bitmap cb = cf != null ? Theme.decodeAtLeast(cf, iconPx) : null;
+                        icon = cb != null ? new android.graphics.drawable.BitmapDrawable(getResources(), cb) : pm.getApplicationIcon(pkg);
+                        if (icon != null && icon.getConstantState() != null) ICONS.put(pkg, icon.getConstantState());
                     } catch (Exception ignored) { if (label == null) label = pkg; }
                 } else icon = cs.newDrawable(getResources());
                 final Intent open = new Intent(t.baseIntent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -114,10 +123,14 @@ public class SwitcherActivity extends Activity {
                         // 和桌面点图标一样：先让宿主换好这个应用的显示参数 / 显示密度、显示桥挡住纯色的启动窗口，再把任务调到前面
                         // （以前只靠任务栈通知，宿主晚 0.1–5 秒才知道；多看要换密度，阅读页会先按旧密度重建一次、再重建一次）
                         if (AppProf.host()) { HostService.launchedPkg = tpkg; AppProf.launching(tpkg); }
+                        AppFont.forForeground(SwitcherActivity.this, tpkg, null);
                         try {
                             if (id >= 0) am.moveTaskToFront(id, 0);
                             else startActivity(open);
-                        } catch (Exception e) { startActivity(open); }
+                        } catch (Exception e) {
+                            try { startActivity(open); }
+                            catch (Throwable t2) { VeraToast.show(SwitcherActivity.this, "无法打开此应用"); }
+                        }
                         finish();
                     }
                 }));
@@ -135,6 +148,7 @@ public class SwitcherActivity extends Activity {
                 finish();
             }
         }));
+        appCount = n;
         footBox.removeAllViews();
         footBox.addView(footer(n));
     }
@@ -162,7 +176,7 @@ public class SwitcherActivity extends Activity {
     private android.widget.TextView mem;
 
     static String memLine() {
-        long total = 0, avail = 0;
+        long total = 0, avail = -1, free = 0, buffers = 0, cached = 0;
         try {
             java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/proc/meminfo"));
             try {
@@ -170,9 +184,13 @@ public class SwitcherActivity extends Activity {
                 while ((l = r.readLine()) != null) {
                     if (l.startsWith("MemTotal:")) total = Long.parseLong(l.replaceAll("[^0-9]", "")) / 1024;
                     else if (l.startsWith("MemAvailable:")) avail = Long.parseLong(l.replaceAll("[^0-9]", "")) / 1024;
+                    else if (l.startsWith("MemFree:")) free = Long.parseLong(l.replaceAll("[^0-9]", ""));
+                    else if (l.startsWith("Buffers:")) buffers = Long.parseLong(l.replaceAll("[^0-9]", ""));
+                    else if (l.startsWith("Cached:")) cached = Long.parseLong(l.replaceAll("[^0-9]", ""));
                 }
             } finally { r.close(); }
         } catch (Throwable ignored) { }
+        if (avail < 0) avail = (free + buffers + cached) / 1024;
         return total <= 0 ? "" : "可用内存 " + avail + " MB / 共 " + total + " MB";
     }
 
@@ -184,7 +202,17 @@ public class SwitcherActivity extends Activity {
     /** 关掉一个应用：把它的任务从最近任务里拿掉，再在后台结束它的进程（和“清后台”同一套：有前台服务的不杀）。 */
     private void close(final String pkg, int taskId, View row) {
         removeTask(taskId);
-        if (row != null && row.getParent() == list) list.removeView(row);
+        if (row != null && row.getParent() == list) {
+            list.removeView(row);
+            appCount = Math.max(0, appCount - 1);
+            if (appCount == 0) {
+                android.widget.TextView none = Ui.text(this, "没有正在运行的应用", 18, false);
+                none.setPadding(0, Ui.dp(this, 20), 0, Ui.dp(this, 20));
+                list.addView(none, 0);
+                footBox.removeAllViews();
+                footBox.addView(footer(0));
+            }
+        }
         final Handler h = new Handler(Looper.getMainLooper());
         new Thread(new Runnable() { @Override public void run() {
             Cleaner.closeSync(SwitcherActivity.this, pkg);
@@ -192,10 +220,12 @@ public class SwitcherActivity extends Activity {
         } }, "VeraSwitchClose").start();
     }
 
-    /** 全部关闭：锁着的（保持后台）留下，其余的关掉，然后回桌面，关完报一句关了几个、多出多少内存。 */
+    /** 全部关闭：锁着的（保持后台）和正在运行前台服务的留下，其余的关掉，然后回桌面，关完报一句关了几个、多出多少内存。 */
     private void closeAll() {
         final ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
         final java.util.List<String> pkgs = new java.util.ArrayList<String>();
+        final java.util.Set<String> fgSvcs = Cleaner.foregroundServicePackages(this);
+        final java.util.Set<String> fgPkgs = new java.util.HashSet<String>();
         try {
             @SuppressWarnings("deprecation")
             List<ActivityManager.RecentTaskInfo> tasks = am.getRecentTasks(24, ActivityManager.RECENT_IGNORE_UNAVAILABLE);
@@ -203,22 +233,36 @@ public class SwitcherActivity extends Activity {
                 if (t.baseIntent == null || t.baseIntent.getComponent() == null) continue;
                 String pkg = t.baseIntent.getComponent().getPackageName();
                 if (!closable(pkg) || Cleaner.keepAlive(this, pkg)) continue;
+                if (fgSvcs.contains(pkg)) { fgPkgs.add(pkg); continue; }
                 removeTask(t.persistentId);   // 恢复出来的任务 t.id 是 -1
                 if (!pkgs.contains(pkg)) pkgs.add(pkg);
             }
         } catch (Throwable ignored) { }
+        final int fgKept = fgPkgs.size();
         final android.content.Context app = getApplicationContext();
         startActivity(HomeActivity.homeIntent(this));   // MAIN / HOME: the existing home task (perf/general a357cf1)
         finish();
         final Handler h = new Handler(Looper.getMainLooper());
         new Thread(new Runnable() { @Override public void run() {
             long before = Cleaner.memAvailableMb();
-            int n = 0;
-            for (String p : pkgs) if (Cleaner.closeSync(app, p)) n++;
-            final int closed = pkgs.size();
+            java.util.Set<String> running = Cleaner.runningPackages(app);
+            int n = 0, stillKept = 0;
+            for (String p : pkgs) {
+                if (!running.contains(p)) continue;
+                if (Cleaner.closeSync(app, p)) n++;
+                else stillKept++;
+            }
+            final int closed = n;
+            final int kept = fgKept + stillKept;
             final long freed = Math.max(0, Cleaner.memAvailableMb() - before);
             h.post(new Runnable() { @Override public void run() {
-                VeraToast.show(app, closed == 0 ? "没有可以关闭的应用（锁着的不关）" : "已关闭 " + closed + " 个应用，多出约 " + freed + " MB 内存");
+                String msg;
+                if (pkgs.isEmpty() && kept == 0) msg = "没有可以关闭的应用（锁着的不关）";
+                else if (closed == 0 && kept > 0) msg = kept + " 个应用正在运行前台服务，未强制关闭";
+                else if (closed == 0) msg = "已清理 " + pkgs.size() + " 条最近任务记录";
+                else if (kept > 0) msg = "已关闭 " + closed + " 个应用（" + kept + " 个有前台服务未关），多出约 " + freed + " MB 内存";
+                else msg = "已关闭 " + closed + " 个应用，多出约 " + freed + " MB 内存";
+                VeraToast.show(app, msg);
             } });
         } }, "VeraSwitchCloseAll").start();
     }
@@ -239,6 +283,7 @@ public class SwitcherActivity extends Activity {
 
     @Override protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
+        if (blk != Blocks.on(this)) { recreate(); return; }
         Perf.measure(root, "switcher (reused)");
         fill();
     }

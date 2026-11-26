@@ -16,7 +16,9 @@ diag_save() {
         echo "cmdline=$(cat /proc/cmdline 2>/dev/null)"
         echo "soc=$(cat /proc/device-tree/compatible 2>/dev/null | tr '\0' ' ')"
         echo "fb=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)"
-        echo "battery=$(cat /sys/class/power_supply/bd71827_bat/capacity 2>/dev/null)"
+        _dbat=; for _bp in /sys/class/power_supply/*; do [ "$(cat "$_bp/type" 2>/dev/null)" = Battery ] && _dbat=$(cat "$_bp/capacity" 2>/dev/null) && [ -n "$_dbat" ] && break; done
+        [ -n "$_dbat" ] || _dbat=$(lipc-get-prop com.lab126.powerd battLevel 2>/dev/null)
+        echo "battery=$_dbat"
     } > $d/README.txt 2>/dev/null
     cp $LOG $d/veradroid.log 2>/dev/null
     cp $W/epd.log $d/epd.log 2>/dev/null
@@ -92,8 +94,10 @@ diag_save() {
             adb_sh 'export PATH=/system/bin:/system/xbin; settings list secure' > $d/android-settings-secure.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; ip addr' > $d/android-ip.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; netstat -tunlp' > $d/android-netstat.txt 2>&1
-            adb_sh 'export PATH=/system/bin:/system/xbin; top -n 1 -d 1 -m 40' > $d/android-top.txt 2>&1
-            adb_sh 'export PATH=/system/bin:/system/xbin; top -H -n 1 -d 1 -m 60' > $d/android-top-threads.txt 2>&1
+            # AOSP 7.1 toolbox top -n 1 compares two back-to-back /proc/stat reads without sleeping first,
+            # dividing by total_delta_time==0 (SIGFPE) and dropping bogus tombstones. Use host BusyBox top + Android ps -t.
+            top -b -n 1 > $d/android-top.txt 2>&1 || true
+            adb_sh 'export PATH=/system/bin:/system/xbin; ps -t' > $d/android-top-threads.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; ps -A -o USER,PID,PPID,VSZ,RSS,STAT,NAME' > $d/android-ps-all.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; dumpsys -l' > $d/android-dumpsys-list.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; dumpsys cpuinfo' > $d/android-cpuinfo.txt 2>&1
@@ -248,10 +252,12 @@ wd_guard() {
 # 并广播；不用定时器、不挂唤醒源，冻结时不发（休眠不受影响）。
 bat_poke_tick() {
     bp_now=$(cut -d. -f1 ${BAT_UPTIME:-/proc/uptime})
-    [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-60} ] || return 0
+    [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-180} ] || return 0
     BAT_POKE_T=$bp_now
     for bp_d in ${BAT_PS_DIR:-/sys/class/power_supply}/*; do
-        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] && echo change > $bp_d/uevent 2>/dev/null
+        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] || continue
+        [ "$(wc -l < $bp_d/uevent 2>/dev/null || echo 0)" -ge 28 ] && continue
+        echo change > $bp_d/uevent 2>/dev/null
     done
     return 0
 }
@@ -293,6 +299,7 @@ watchdog() {
         if [ $((wd_tick % 3)) -eq 1 ] || [ $sleep_for -ge 60 ]; then
             host_oom_protect
             log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
+            var_guard; pm_pending_guard
         fi
         # 空闲冻结（idle.sh，IDLE_FREEZE）：冻 / 定时唤醒 / 放回 watchdog 线程。屏保冻结、返回 Kindle 时不管
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { type idle_tick >/dev/null 2>&1 && idle_tick; }
@@ -310,11 +317,11 @@ watchdog() {
             # 512 MB 机型上前台的微信读书又会被反复杀掉（用户诊断）。pid 变了就重新设一次。
             ss=$(pidof system_server 2>/dev/null | cut -d' ' -f1)
             if [ -n "$ss" ] && [ "$ss" != "$(cat $W/ss.pid 2>/dev/null)" ]; then
-                [ -f $W/ss.pid ] && [ -f $W/booted ] && { t "system_server restarted ($(cat $W/ss.pid) -> $ss): re-tuning lmkd"; ( sleep 20; lmk_tune; i=0; while [ $i -lt 30 ] && [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" != 1 ]; do sleep 5; i=$((i+1)); done; trust_unlock ) & }
+                [ -f $W/ss.pid ] && [ -f $W/booted ] && { t "system_server restarted ($(cat $W/ss.pid) -> $ss): re-tuning lmkd"; ( sleep 20; lmk_tune; i=0; while [ $i -lt 30 ] && [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" != 1 ]; do sleep 5; i=$((i+1)); done; trust_unlock ) </dev/null >>$LOG 2>&1 & }
                 echo "$ss" > $W/ss.pid
             fi
         fi
-        [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ] || { [ -f $X/ctl/settings.new ] && settings_apply; }
+        [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ] || { { [ -f $X/home/settings.new ] || [ -f $X/ctl/settings.new ]; } && settings_apply; }
         # Wi-Fi 省电（network.sh）、新装 / 更新的应用排队预编译（compile.sh）、电量记录（energy.sh）
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ] && [ ! -f $W/idlefz ]; then
             type wifi_ps_tick >/dev/null 2>&1 && wifi_ps_tick
@@ -322,12 +329,12 @@ watchdog() {
             [ -f $W/booted ] && type compile_watch >/dev/null 2>&1 && compile_watch
         fi
         type bat_log >/dev/null 2>&1 && bat_log
-        if [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ]; then BAT_POKE_T=0; else bat_poke_tick; fi
+        if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then BAT_POKE_T=0
+        elif [ ! -f $W/idlefz ]; then bat_poke_tick; fi
         type wa_adb_tick >/dev/null 2>&1 && wa_adb_tick     # 无线调试到时间自动关（webadmin.sh）
-        var_guard; pm_pending_guard
         # 系统盘快满了就自动扩（storage.sh）。冻结时不做。
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || [ -f $W/idlefz ] || { type st_auto_tick >/dev/null 2>&1 && st_auto_tick; }
-        if [ -f $X/ctl/diag ]; then rm -f $X/ctl/diag; ( diag_save; touch $X/ctl/diag.done ) & fi
+        if [ -f $X/ctl/diag ]; then rm -f $X/ctl/diag; ( diag_save; touch $X/ctl/diag.done && chmod 644 $X/ctl/diag.done 2>/dev/null ) </dev/null >>$LOG 2>&1 & fi
         [ -f $X/ctl/stop ] && { rm -f $X/ctl/stop; do_stop; }
         [ -f $X/ctl/restart ] && { rm -f $X/ctl/restart; do_restart; }
         [ -f $X/ctl/exit ] && { rm -f $X/ctl/exit; do_exit; }

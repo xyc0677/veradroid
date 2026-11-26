@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.veradroid.ime"
-    android:versionCode="61"
-    android:versionName="0.25.1">
+    android:versionCode="67"
+    android:versionName="0.25.7">
     <uses-sdk android:minSdkVersion="25" android:targetSdkVersion="25" />
     <application
         android:label="Vera 输入法"
@@ -22,7 +22,7 @@
         <activity
             android:name=".TestActivity"
             android:label="输入法测试"
-            android:exported="true"
+            android:exported="false"
             android:screenOrientation="nosensor"
             android:windowSoftInputMode="stateVisible|adjustResize" />
     </application>

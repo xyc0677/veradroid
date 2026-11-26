@@ -119,25 +119,71 @@ public class HostSettingsActivity extends Activity {
         LinearLayout line = new LinearLayout(this);
         line.setGravity(Gravity.CENTER_VERTICAL);
         View.OnClickListener step = null;
+        final int[] committed = { idx[0] >= 0 ? idx[0] : 0 };
         for (int dir = -1; dir <= 1; dir += 2) {
             final int d = dir;
             View.OnClickListener l = new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     int n = idx[0] < 0 ? (d > 0 ? 0 : values.length - 1) : idx[0] + d;
+                    if (key.equals("KFB_ROTATE")) n = (n + values.length) % values.length;
                     if (n < 0 || n >= values.length) return;   // 到头了：不绕回去，免得一下跳到另一端
+                    final String line = key + "=" + values[n] + "\n";
+                    if (key.equals("KFB_ROTATE")) {
+                        int curDeg = Integer.parseInt(values[committed[0]]);
+                        int newDeg = Integer.parseInt(values[n]);
+                        if (newDeg % 180 != curDeg % 180) {
+                            handler.removeCallbacks(pendingRotate);
+                            rotatePending = false;
+                            final int target = n;
+                            idx[0] = target;
+                            val.setText(labels[target]);
+                            android.app.Dialog dlg = new VeraDialog.Builder(HostSettingsActivity.this)
+                                .title("切换屏幕方向")
+                                .message("切换为「" + labels[target] + "」将重启 Android，后台未保存的内容会丢失。确定继续吗？")
+                                .negative("取消", new Runnable() {
+                                    @Override public void run() {
+                                        idx[0] = committed[0];
+                                        val.setText(labels[committed[0]]);
+                                        host.put(key, values[committed[0]]);
+                                    }
+                                })
+                                .positive("确认切换", new Runnable() {
+                                    @Override public void run() {
+                                        committed[0] = target;
+                                        idx[0] = target;
+                                        val.setText(labels[target]);
+                                        host.put(key, values[target]);
+                                        if (after != null) after.set(values[target]);
+                                        UiMode.guide(HostSettingsActivity.this, UiMode.keyEffect(key, values[target], labels[target]));
+                                        HostLink.settings(line);
+                                    }
+                                }).show();
+                            dlg.setOnCancelListener(new android.content.DialogInterface.OnCancelListener() {
+                                @Override public void onCancel(android.content.DialogInterface di) {
+                                    idx[0] = committed[0];
+                                    val.setText(labels[committed[0]]);
+                                    host.put(key, values[committed[0]]);
+                                }
+                            });
+                            return;
+                        }
+                        committed[0] = n;
+                        idx[0] = n;
+                        val.setText(labels[n]);
+                        host.put(key, values[n]);
+                        if (after != null) after.set(values[n]);
+                        UiMode.guide(HostSettingsActivity.this, UiMode.keyEffect(key, values[n], labels[n]));
+                        handler.removeCallbacks(pendingRotate);
+                        rotatePending = false;
+                        HostLink.settings(line);
+                        return;
+                    }
                     idx[0] = n;
                     val.setText(labels[n]);
                     host.put(key, values[n]);
                     if (after != null) after.set(values[n]);
                     UiMode.guide(HostSettingsActivity.this, UiMode.keyEffect(key, values[n], labels[n]));
-                    final String line = key + "=" + values[n] + "\n";
-                    // 旋转：横屏要重启 Android，连点几下“›”路过的档位不能每个都生效——停手 2.5 秒后才发最后选的那个
-                    if (key.equals("KFB_ROTATE")) {
-                        handler.removeCallbacks(pendingRotate);
-                        rotatePending = true;
-                        pendingRotate = new Runnable() { @Override public void run() { rotatePending = false; HostLink.settings(line); } };
-                        handler.postDelayed(pendingRotate, 2500);
-                    } else HostLink.settings(line);
+                    HostLink.settings(line);
                 }
             };
             if (dir < 0) {
@@ -157,7 +203,7 @@ public class HostSettingsActivity extends Activity {
 
     private void buildDisplay() {
         section("方向");
-        stepper("屏幕旋转", "画面顺时针转。倒过来（180°）立即生效；横屏（90° / 270°）要重启 Android（约 20 秒，自动进行）。停手 2.5 秒后才生效。",
+        stepper("屏幕旋转", "画面顺时针转。同向翻转（0°↔180° / 90°↔270°）立即生效；横竖互换会弹窗确认后重启 Android（约 20 秒）。",
             "KFB_ROTATE", new String[] { "竖屏（0°）", "倒过来（180°）", "横屏（90°，会重启）", "横屏（270°，会重启）" },
             new String[] { "0", "180", "90", "270" }, "0", null);
         section("刷新模式（与单应用优化统一，全部自带去残影）");
@@ -240,6 +286,12 @@ public class HostSettingsActivity extends Activity {
 
     private void buildWebviewOnly() {
         section("网页内核（实验）");
+        if (!"1".equals(host.get("WEBVIEW_ALT_OK"))) {
+            TextView note = Ui.text(this, "当前机型不支持实验性新网页内核（需 1 GB 内存机型及支持的宿主版本），将继续使用自带内核（Chromium 52）。", 17, false);
+            note.setPadding(0, dp(8), 0, dp(8));
+            list.addView(note);
+            return;
+        }
         stepper("网页内核", "新内核（Chromium 119）能打开更多现代网页（晋江验证码、新版登录页、网页书源）。打开后自动下载约 45 MB（占约 80 MB 空间），"
             + "重启 Android 后生效。每个用网页的应用多占几十到一百多 MB 内存。切回自带内核后重启即可恢复并清理下载包。",
             "WEBVIEW", new String[] { "自带（Chromium 52，省内存）", "新内核（Chromium 119）" }, new String[] { "stock", "alt" }, "stock",
@@ -273,20 +325,25 @@ public class HostSettingsActivity extends Activity {
             "WIFI_PS", new String[] { "自动（推荐）", "始终省电", "运行时关闭" }, new String[] { "auto", "on", "off" }, "auto", null);
         section("省电与待机");
         if (host.containsKey("IDLE_FREEZE")) {
-            stepper("看书空闲自动省电冻结", "看书不动屏幕且画面不变超过此时间，自动冻住安卓省电（CPU 0 唤醒）；一碰屏幕瞬间恢复，正在下载时自动跳过。默认已开 30 秒。",
-                "IDLE_FREEZE", new String[] { "关", "20 秒", "30 秒（推荐）", "60 秒", "120 秒" }, new String[] { "0", "20", "30", "60", "120" }, "30", null);
+            stepper("看书空闲自动省电冻结", "看书不动屏幕且画面不变超过此时间，自动冻住安卓；一碰屏幕恢复，下载中自动跳过。默认关闭（日常翻页时频繁冻解冻反而增加唤醒，长停顿阅读可按需开启）。",
+                "IDLE_FREEZE", new String[] { "关（推荐）", "20 秒", "30 秒", "60 秒", "120 秒" }, new String[] { "0", "20", "30", "60", "120" }, "0", null);
         }
         if (host.containsKey("SAVER_EXIT_H")) {
             stepper("长时间锁屏自动回 Kindle", "在安卓里锁屏放置超过此时间，下次唤醒时直接退回 Kindle 释放内存，避免隔夜耗电。默认已开 8 小时。",
                 "SAVER_EXIT_H", new String[] { "不自动退出", "4 小时", "8 小时（推荐）", "24 小时" }, new String[] { "0", "4", "8", "24" }, "8", null);
         }
         section("内存");
-        stepper("切应用自动冻结后台", "打开或切换应用时，立即冻结其他后台第三方应用（0% CPU、停止占内存，防止抢前台资源）；切回去时瞬间解冻恢复原页。在“应用优化”里设了“保持后台”的应用不受影响。",
-            "BG_FREEZE", new String[] { "开（推荐）", "关" }, new String[] { "1", "0" }, "1", null);
+        stepper("切应用自动冻结后台", "默认关闭：避免微信读书等阅读应用切到后台后因系统广播超时被强杀、下载中断或丢失缓存。仅在极度缺内存且不需要后台下载时按需开启（切走 15 秒后冻结，在“应用优化”里设了“保持后台”的应用不受影响）。",
+            "BG_FREEZE", new String[] { "关（推荐）", "开（实验）" }, new String[] { "0", "1" }, "0", null);
         stepper("小内存模式", "自动：内存不到约 700 MB 的机型（PW5、KT5、KT6）自动开。开着时 Kindle 的书库程序停掉腾内存、回 Kindle 完全退出（再进要重新开机）。下次启动 Android 生效。",
             "LOWMEM", new String[] { "自动", "开", "关" }, new String[] { "auto", "on", "off" }, "auto", null);
         stepper("Android 运行时 Kindle 界面", "只暂停：回 Kindle 最快；冻结：再把 Kindle 的后台程序冻住；停掉：腾出最多内存，回 Kindle 约一分钟。自动：小内存模式用“停掉”，否则“冻结”。下次启动 Android 生效。",
             "KINDLE_UI", new String[] { "自动", "只暂停", "冻结", "停掉" }, new String[] { "auto", "keep", "freeze", "stop" }, "auto", null);
+        if (host.containsKey("KLIB_BIND") && "emulator-only".equals(HostLink.kv(HostLink.KFB + "ctl/status").get("tested"))) {
+            section("Kindle 书库");
+            stepper("挂载 Kindle 原机书库（实验机型）", "实验机型默认不挂载原机 documents 以保护书籍；选“只读挂载”可在 VeraHome 和 KOReader 里浏览和阅读原机书籍，且内核级只读绝不改动原文件。修改后重启 Android 生效。",
+                "KLIB_BIND", new String[] { "不挂载（默认）", "只读挂载（安全推荐）", "读写挂载" }, new String[] { "0", "ro", "1" }, "0", null);
+        }
         section("应用预编译");
         stepper("自动优化新装的应用", "装好后在后台把应用编译成机器码，打开更快（微信读书冷启动约快一倍）。自动优化等你 5 分钟不碰屏幕才开始；"
             + "点下面的“立即优化”马上开始。电量低、内存不够、应用在前台、Android 冻结时都会先等。",
@@ -316,12 +373,25 @@ public class HostSettingsActivity extends Activity {
         list.addView(ir);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+    }
+
     @Override protected void onPause() {
         super.onPause();
-        if (rotatePending) { handler.removeCallbacks(pendingRotate); pendingRotate.run(); }
+        if (rotatePending) { handler.removeCallbacks(pendingRotate); rotatePending = false; }
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
     }
 
     @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
         if (compileWatch != null) CtlWatch.remove(compileWatch);
         if (webviewWatch != null) CtlWatch.remove(webviewWatch);
         handler.removeCallbacksAndMessages(null);

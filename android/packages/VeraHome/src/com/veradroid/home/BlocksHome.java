@@ -403,9 +403,25 @@ final class BlocksHome {
         } };
         pager.setVisibility(View.GONE);
         sv.setOnPage(new Runnable() { @Override public void run() { label.run(); a.changed(); } });
-        // 每次排版完核对一次页数（翻页条出现 / 消失会再排一次版，在同一帧里完成）
-        sv.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
-            @Override public void onGlobalLayout() { if (sv.getHeight() > 0) label.run(); }
+        // 每次排版完核对一次页数（翻页条出现 / 消失会再排一次版，在同一帧里完成），稳定后或 View detach 时及时移除避免泄漏
+        final android.view.ViewTreeObserver.OnGlobalLayoutListener gl = new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override public void onGlobalLayout() {
+                if (sv.getHeight() <= 0) return;
+                int before = pager.getVisibility();
+                label.run();
+                if (pager.getVisibility() == before) {
+                    android.view.ViewTreeObserver vto = sv.getViewTreeObserver();
+                    if (vto.isAlive()) vto.removeOnGlobalLayoutListener(this);
+                }
+            }
+        };
+        sv.getViewTreeObserver().addOnGlobalLayoutListener(gl);
+        sv.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View v) { }
+            @Override public void onViewDetachedFromWindow(View v) {
+                android.view.ViewTreeObserver vto = sv.getViewTreeObserver();
+                if (vto.isAlive()) vto.removeOnGlobalLayoutListener(gl);
+            }
         });
         return box;
     }

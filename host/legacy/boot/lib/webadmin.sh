@@ -40,8 +40,11 @@ wa_request() { # 编号
     verb=${l1%% *}; arg=
     [ "$verb" = "$l1" ] || arg=${l1#* }
     mkdir -p $WA_OUT && chown 0:0 $WA_OUT && chmod 711 $WA_OUT || return 1
-    # 只留最近的 12 个结果（截屏一张两兆，放在内存盘里）
-    ls -t $WA_OUT 2>/dev/null | tail -n +13 | while read -r o; do case "$o" in *[!0-9a-f.outmp]*) ;; *) rm -f "$WA_OUT/$o" ;; esac; done
+    # 只留最近的 12 个已完成结果（只清理 *.out，不碰正在写的 .tmp；截屏一张两兆，放在内存盘里）
+    ls -t "$WA_OUT"/*.out 2>/dev/null | tail -n +13 | while read -r o; do
+        b=${o##*/}
+        case "${b%.out}" in ''|*[!0-9a-f]*) ;; *) [ "${b%.out}.out" = "$b" ] && rm -f "$WA_OUT/$b" ;; esac
+    done
     ( exec 3>&- 3<&- 2>&1; wa_do "$n" "$u" "$verb" "$arg" "$l2" ) </dev/null &
 }
 
@@ -63,15 +66,21 @@ wa_do() { # 编号 uid 动词 参数 数据
     sshstop)  { wa_sshstop; wa_sshstate; } | wa_put "$n" "$u" ;;
     sshkeyadd) { wa_sshkeyadd "$data"; wa_sshstate; } | wa_put "$n" "$u" ;;
     sshkeydel) { wa_sshkeydel "$arg"; wa_sshstate; } | wa_put "$n" "$u" ;;
+    adbstate) wa_adbstate | wa_put "$n" "$u" ;;
+    adbstart) { wa_adbstart "$arg"; wa_adbstate; } | wa_put "$n" "$u" ;;
+    adbstop)  { wa_adbstop web; wa_adbstate; } | wa_put "$n" "$u" ;;
+    adbkeyadd) { wa_adbkeyadd "$data"; wa_adbstate; } | wa_put "$n" "$u" ;;
+    adbkeydel) { wa_adbkeydel "$arg"; wa_adbstate; } | wa_put "$n" "$u" ;;
     autoupdate) wa_autoupdate "$arg" | wa_put "$n" "$u" ;;
     # 更新前备份 / 已备份的数据（backup.sh）：改设置、列出、删除。删除只认 backup.sh 自己拼出来的路径
     updatebackup) { if type vb_setmode >/dev/null 2>&1; then vb_setmode "$arg"; settings_load >/dev/null 2>&1; settings_publish >/dev/null 2>&1; else echo "error=unknown"; fi; } | wa_put "$n" "$u" ;;
     backups)  { if type vb_info >/dev/null 2>&1; then echo "ok=1"; vb_info; else echo "error=unknown"; fi; } | wa_put "$n" "$u" ;;
     backupdel) { if type vb_del >/dev/null 2>&1; then echo "ok=1"; vb_del "$arg"; vb_info; else echo "error=unknown"; fi; } | wa_put "$n" "$u" ;;
     storage)  { echo "ok=1"; st_info; } | wa_put "$n" "$u" ;;
-    storageresize) case "$arg" in ''|*[!0-9]*) echo "error=nan" ;; *) st_request "$arg" ;; esac | wa_put "$n" "$u" ;;
+    storageresize) case "$arg" in ''|*[!0-9]*) echo "error=nan" ;; *) st_request "$arg"; st_cmd info >/dev/null 2>&1 ;; esac | wa_put "$n" "$u" ;;
     storageauto) case "$arg" in 0|1) st_cmd auto "$arg" >/dev/null 2>&1; echo "ok=1"; st_info ;; *) echo "error=bad value" ;; esac | wa_put "$n" "$u" ;;
     libput)   wa_libput "$arg" "$u" "$data" | wa_put "$n" "$u" ;;
+    wifipsk)  { type wifi_psk_put >/dev/null 2>&1 && wifi_psk_put "$arg" "$data" || echo "error=unknown"; } | wa_put "$n" "$u" ;;   # 新 Wi-Fi 的密码（cmd.sh wifi_connect）
     *) wa_log "wa: unknown request '$verb'"; echo "error=unknown" | wa_put "$n" "$u" ;;
     esac
 }
@@ -100,16 +109,22 @@ wa_libput() { # 编号 uid 文件名
     sz=$(stat -c %s "$src" 2>/dev/null); free=$(df -kP "$WA_LIBDIR" 2>/dev/null | awk 'NR==2 { print $4 }')
     if [ -n "$free" ] && [ $(( (${sz:-0} / 1024) + 1024 )) -gt "$free" ]; then echo "error=space"; rm -f "$src"; return 0; fi
     tmp=$WA_LIBDIR/.vd-$id.part
-    if ! cat "$src" > "$tmp" 2>/dev/null; then
-        e=$(cat "$src" 2>&1 > "$tmp" | head -1)
-        rm -f "$tmp"; rm -f "$src"
+    errf=$W/.libput-$id.err
+    if ! cat "$src" > "$tmp" 2>"$errf"; then
+        e=$(head -1 "$errf" 2>/dev/null)
+        rm -f "$errf" "$tmp" "$src"
         wa_log "wa: libput $id: write failed: $e ($(grep -c fscrypt /proc/keys 2>/dev/null) fscrypt keys visible)"
         echo "error=write"; return 0
     fi
+    rm -f "$errf"
     sync
     final=$name; base=${name%.*}; ext=; [ "$base" != "$name" ] && ext=.${name##*.}; k=2
     while ! ln "$tmp" "$WA_LIBDIR/$final" 2>/dev/null; do
-        [ -e "$WA_LIBDIR/$final" ] || { rm -f "$tmp" "$src"; wa_log "wa: libput $id: link failed"; echo "error=link"; return 0; }
+        if [ ! -e "$WA_LIBDIR/$final" ]; then
+            # vfat/FAT32 does not support hardlinks (EPERM): fall back to mv only after verifying destination does not exist
+            mv "$tmp" "$WA_LIBDIR/$final" 2>/dev/null && break
+            rm -f "$tmp" "$src"; wa_log "wa: libput $id: link/mv failed"; echo "error=link"; return 0
+        fi
         [ $k -gt 99 ] && { rm -f "$tmp" "$src"; echo "error=exists"; return 0; }
         final="$base ($k)$ext"; k=$((k + 1))
     done
@@ -175,6 +190,7 @@ wa_sysinfo() {
 # 占用：慢（几秒到几十秒），按需算，结果留在 $W/wa.du 里给 sysinfo 用
 wa_dusum() { du -sk "$@" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
 wa_du() {
+    _dp=$$; read -r _dp _ < /proc/self/stat 2>/dev/null || true
     {
         echo "du.system=$(wa_dusum $R/system)"
         echo "du.apps=$(wa_dusum $SYS/data/app $SYS/data/app-lib $SYS/data/dalvik-cache)"
@@ -190,7 +206,7 @@ wa_du() {
         echo "du.program=$(wa_dusum $VD)"
         echo "du.kindledocs=$(wa_dusum /mnt/base-us/documents)"
         echo "du.time=$(date +%s)"
-    } > $W/wa.du.tmp && mv -f $W/wa.du.tmp $W/wa.du
+    } > "$W/wa.du.tmp.$_dp" && mv -f "$W/wa.du.tmp.$_dp" $W/wa.du
     echo "ok=1"; cat $W/wa.du
 }
 
@@ -313,7 +329,7 @@ wa_sshstop() {
         if [ -n "$ps" ]; then
             kill $ps 2>/dev/null; sleep 1; ps=$(wa_ssh_pids); [ -z "$ps" ] || kill -9 $ps 2>/dev/null
             [ -f $WA_SSHRUN/iptables-rule ] && iptables -D INPUT -i wlan0 -p tcp --dport 2222 -j ACCEPT 2>/dev/null
-            [ -f $WA_SSHRUN/keep-awake ] && { lipc-set-prop com.lab126.powerd preventScreenSaver 0 2>/dev/null; iwconfig wlan0 power on 2>/dev/null; }
+            [ -f $WA_SSHRUN/keep-awake ] && { lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 2>/dev/null; iwconfig wlan0 power on 2>/dev/null; }
             rm -rf $WA_SSHRUN
         fi
     fi
@@ -346,4 +362,125 @@ wa_sshkeydel() { # 第几把（ssh.key= 的编号）
     tr -d '\r' < "$kf" | sed '1s/^\xef\xbb\xbf//' | awk -v drop="$ln" 'NR != drop' > "$kf.tmp" && mv -f "$kf.tmp" "$kf" || { rm -f "$kf.tmp"; echo "ssh.error=write"; return 1; }
     sync
     echo "ssh.msg=deleted"; wa_log "web ssh: key $1 deleted"
+}
+
+# ---------------------------------------------------------------- 无线调试（adb over Wi-Fi，docs/adb-wifi.md）
+# 默认关。只认用户自己电脑的 adb 公钥（~/.android/adbkey.pub），没有“在 Kindle 上点允许”这一步（没有那个界面），
+# 公钥不对的电脑永远是 unauthorized。打开时把公钥装进 Android 的 /data/misc/adb/adb_keys，关掉时删掉；
+# 到时间（默认 30 分钟，最多 4 小时）由看门狗自动关（wa_adb_tick）。端口 5555 只在开着时放行。
+# 没有 IPv6 的内核（老机型 3.0 / 4.1）上 Android 7.1 的 adbd 只会建 AF_INET6 监听 socket，开不了：直接说不支持。
+WA_ADBB=/mnt/us/veradroid/adb                       # 用户的公钥（也可以插 USB 把 adbkey.pub 拷成 adb/adb_keys）
+WA_ADBPORT=5555
+wa_adb_validkeys() {   # “行号<TAB>原行”：一行一把，base64 正好 700 个字符（524 字节的 RSA 公钥），后面可带注释
+    [ -f "$WA_ADBB/adb_keys" ] && [ ! -L "$WA_ADBB/adb_keys" ] || return 0
+    tr -d '\r' < "$WA_ADBB/adb_keys" | sed '1s/^\xef\xbb\xbf//' | awk '
+        $1 ~ /^QAAAA[A-Za-z0-9+\/]+=*$/ && length($1) == 700 && NF <= 2 { print NR "\t" $0 }'
+}
+wa_adb_ipv6() { [ -e /proc/net/if_inet6 ] || [ -e /proc/net/tcp6 ]; }
+wa_adb_on() { [ "$(adb_sh_t 8 'getprop init.svc.adbd; getprop service.adb.tcp.port' 2>/dev/null | tr -d '\r' | tr '\n' ' ')" = "running $WA_ADBPORT " ]; }
+wa_adb_fwd_off() {
+    if [ -f $W/adbfwd.ipt ]; then iptables -D INPUT -i "$(cut -d: -f2 $W/adbfwd.ipt)" -p tcp --dport "$(cut -d: -f1 $W/adbfwd.ipt)" -j ACCEPT 2>/dev/null; rm -f $W/adbfwd.ipt; fi
+    if [ -f $W/adbfwd.id ]; then
+        [ -S $W/slirp.sock ] && $VD/bin/slirpctl $W/slirp.sock "{\"execute\":\"remove_hostfwd\",\"arguments\":{\"id\":$(cat $W/adbfwd.id)}}" >/dev/null 2>&1
+        rm -f $W/adbfwd.id
+    fi
+}
+wa_adb_fwd_on() {   # 和传书的 fwd_on 一样，但用自己的记录文件（两个可以同时开）
+    wa_adb_fwd_off
+    if [ "$(cat $W/mode 2>/dev/null)" != chroot ] && ! hostns; then
+        [ -x $VD/bin/slirpctl ] && [ -S $W/slirp.sock ] || { echo "adb.error=noslirp"; return 1; }
+        r=$($VD/bin/slirpctl $W/slirp.sock "{\"execute\":\"add_hostfwd\",\"arguments\":{\"proto\":\"tcp\",\"host_addr\":\"0.0.0.0\",\"host_port\":$WA_ADBPORT,\"guest_addr\":\"$NET.15\",\"guest_port\":$WA_ADBPORT}}" 2>&1)
+        id=$(echo "$r" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+        [ -n "$id" ] || { echo "adb.error=fwd"; wa_log "adb: forward failed: $r"; return 1; }
+        echo $id > $W/adbfwd.id
+    fi
+    fdev=$(type wifi_dev >/dev/null 2>&1 && wifi_dev); [ -n "$fdev" ] || fdev=wlan0
+    iptables -C INPUT -i $fdev -p tcp --dport $WA_ADBPORT -j ACCEPT 2>/dev/null || iptables -I INPUT -i $fdev -p tcp --dport $WA_ADBPORT -j ACCEPT 2>/dev/null
+    iptables -C INPUT -i $fdev -p tcp --dport $WA_ADBPORT -j ACCEPT 2>/dev/null && echo "$WA_ADBPORT:$fdev" > $W/adbfwd.ipt
+    return 0
+}
+wa_adbstate() {
+    wa_adb_on && echo "adb.running=1" || echo "adb.running=0"
+    echo "adb.port=$WA_ADBPORT"
+    wa_adb_ipv6 && echo "adb.supported=1" || echo "adb.supported=0"
+    ip=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p' | head -1)
+    [ -n "$ip" ] || ip=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p' | head -1)
+    echo "adb.ip=$ip"
+    u=$(cat $W/adb.until 2>/dev/null); now=$(cut -d. -f1 /proc/uptime)
+    case "$u" in ''|*[!0-9]*) ;; *) [ "$u" -gt "$now" ] && echo "adb.left=$(( (u - now + 59) / 60 ))" ;; esac
+    wa_adb_validkeys | awk -F'\t' '{ split($2, a, " "); c = a[2]; gsub(/[^A-Za-z0-9@._+:=-]/, "", c)
+        printf "adb.key=%d|%s|%s\n", ++k, substr(a[1], 689, 12), substr(c, 1, 60) }'
+}
+wa_adbstart() { # 分钟（5..240，默认 30）
+    m=$1; case "$m" in ''|*[!0-9]*) m=30 ;; esac; [ "$m" -ge 5 ] || m=5; [ "$m" -le 240 ] || m=240
+    wa_adb_ipv6 || { echo "adb.error=noipv6"; return 1; }
+    [ -n "$(wa_adb_validkeys)" ] || { echo "adb.error=nokey"; return 1; }
+    [ -f $W/booted ] || { echo "adb.error=notbooted"; return 1; }
+    d=$SYS/data/misc/adb
+    mkdir -p $d && chown 1000:2000 $d && chmod 2750 $d || { echo "adb.error=dir"; return 1; }
+    [ -L $d/adb_keys ] && rm -f $d/adb_keys
+    wa_adb_validkeys | cut -f2 > $d/adb_keys.tmp && chown 1000:2000 $d/adb_keys.tmp && chmod 640 $d/adb_keys.tmp && mv -f $d/adb_keys.tmp $d/adb_keys \
+        || { rm -f $d/adb_keys.tmp; echo "adb.error=write"; return 1; }
+    echo $(( $(cut -d. -f1 /proc/uptime) + m * 60 )) > $W/adb.until
+    # 只有 adb_keys 里的电脑能连，靠的是 ro.adb.secure=1。legacy 镜像里有；PW6 / k49 的镜像里没设（测试机实测：空的时候
+    # 任何电脑 adb connect 都直接是 device，不认公钥）。ro.* 没设过时 root 可以设一次（之后谁也改不回去），adbd 启动时读它。
+    # 设不上、或者读回来不是 1，就绝不打开。
+    sec=$(adb_sh_t 8 'getprop ro.adb.secure' 2>/dev/null | tr -d '\r\n')
+    [ "$sec" = 1 ] || { adb_sh_t 8 'setprop ro.adb.secure 1' >/dev/null 2>&1; sec=$(adb_sh_t 8 'getprop ro.adb.secure' 2>/dev/null | tr -d '\r\n'); }
+    [ "$sec" = 1 ] || { echo "adb.error=insecure"; wa_log "adb: ro.adb.secure is '$sec', not starting"; wa_adbstop fail >/dev/null; return 1; }
+    wa_adb_fwd_on || { wa_adbstop fail >/dev/null; return 1; }
+    # 重启 adbd 让它读新的端口、公钥和 ro.adb.secure
+    adb_sh_t 10 "setprop ctl.stop adbd; setprop service.adb.tcp.port $WA_ADBPORT; setprop ctl.start adbd" >/dev/null 2>&1
+    i=0; while [ $i -lt 10 ] && ! wa_adb_on; do sleep 1; i=$((i+1)); done
+    wa_adb_on || { echo "adb.error=start"; wa_adbstop fail >/dev/null; return 1; }
+    echo "$(cat $W/adb.until) $m" > $X/ctl/adb.on 2>/dev/null   # 桌面的设置开关读它（只是显示，不当凭据）
+    echo "adb.msg=started"; wa_log "adb: on for $m min (port $WA_ADBPORT, $(wa_adb_validkeys | wc -l) key(s))"
+}
+wa_adbstop() { # 原因（web / timeout / stop）
+    adb_sh_t 10 "setprop ctl.stop adbd; setprop service.adb.tcp.port ''" >/dev/null 2>&1
+    rm -f $SYS/data/misc/adb/adb_keys $W/adb.until $X/ctl/adb.on
+    wa_adb_fwd_off
+    echo "adb.msg=stopped"; wa_log "adb: off (${1:-web})"
+}
+wa_adb_tick() {   # 看门狗每轮：到时间就关
+    [ -f $W/adb.until ] || return 0
+    u=$(cat $W/adb.until 2>/dev/null)
+    case "$u" in ''|*[!0-9]*) wa_adbstop bad >/dev/null 2>&1; return 0 ;; esac
+    [ "$(cut -d. -f1 /proc/uptime)" -ge "$u" ] && wa_adbstop timeout >/dev/null 2>&1
+    return 0
+}
+wa_adbkeyadd() { # adbkey.pub 那一行
+    k=$(printf '%s' "$1" | tr -d '\r' | sed 's/^\xef\xbb\xbf//; s/[ \t]*$//')
+    printf '%s\n' "$k" | grep -qE '^QAAAA[A-Za-z0-9+/]+=*( [A-Za-z0-9@._+:=-]+)?$' || { echo "adb.error=badkey"; wa_log "adb: rejected a key line"; return 1; }
+    blob=${k%% *}
+    [ ${#blob} -eq 700 ] || { echo "adb.error=badkey"; return 1; }
+    mkdir -p "$WA_ADBB" || { echo "adb.error=dir"; return 1; }
+    kf=$WA_ADBB/adb_keys
+    [ -L "$kf" ] && { echo "adb.error=symlink"; return 1; }
+    if [ -f "$kf" ] && grep -qF "$blob" "$kf"; then echo "adb.msg=exists"; return 0; fi
+    [ "$(wa_adb_validkeys | wc -l)" -lt 10 ] || { echo "adb.error=toomany"; return 1; }
+    printf '%s\n' "$k" >> "$kf" || { echo "adb.error=write"; return 1; }
+    sync
+    echo "adb.msg=added"; wa_log "adb: key added"
+}
+wa_adbkeydel() { # 第几把（adb.key= 的编号）
+    case "$1" in ''|*[!0-9]*) echo "adb.error=bad index"; return 1 ;; esac
+    kf=$WA_ADBB/adb_keys
+    [ -f "$kf" ] && [ ! -L "$kf" ] || { echo "adb.error=nofile"; return 1; }
+    ln=$(wa_adb_validkeys | sed -n "${1}p" | cut -f1)
+    [ -n "$ln" ] || { echo "adb.error=nokey"; return 1; }
+    awk -v n="$ln" 'NR != n' "$kf" > "$kf.tmp" && mv -f "$kf.tmp" "$kf" && sync
+    # 开着时马上生效：删光最后一把公钥直接停掉 ADB；还有剩余公钥则原子写回并重启 adbd 吊销内存态公钥
+    if [ -z "$(wa_adb_validkeys)" ]; then
+        wa_adbstop keydel >/dev/null
+    elif [ -f $SYS/data/misc/adb/adb_keys ] || wa_adb_on; then
+        d=$SYS/data/misc/adb
+        [ -L $d/adb_keys ] && rm -f $d/adb_keys
+        if wa_adb_validkeys | cut -f2 > $d/adb_keys.tmp && chown 1000:2000 $d/adb_keys.tmp && chmod 640 $d/adb_keys.tmp && mv -f $d/adb_keys.tmp $d/adb_keys; then
+            adb_sh_t 10 "setprop ctl.stop adbd; setprop service.adb.tcp.port $WA_ADBPORT; setprop ctl.start adbd" >/dev/null 2>&1
+        else
+            rm -f $d/adb_keys.tmp; wa_adbstop fail >/dev/null
+        fi
+    fi
+    echo "adb.msg=deleted"; wa_log "adb: key $1 deleted"
 }

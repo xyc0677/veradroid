@@ -80,7 +80,13 @@ public final class EpdHint {
         Rect r = null;
         if (v != null && v.isAttachedToWindow()) {
             v.getLocationOnScreen(sLoc);
-            r = local != null ? new Rect(local) : new Rect(0, 0, v.getWidth(), v.getHeight());
+            if (local != null) {
+                r = new Rect(local);
+                r.offset(-v.getScrollX(), -v.getScrollY());
+                if (!r.intersect(0, 0, v.getWidth(), v.getHeight())) return;
+            } else {
+                r = new Rect(0, 0, v.getWidth(), v.getHeight());
+            }
             r.offset(sLoc[0], sLoc[1]);
         }
         request(c, r);

@@ -13,7 +13,6 @@ import android.graphics.PixelFormat;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.os.Handler;
-import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
 import android.view.Gravity;
 import android.view.View;
@@ -51,6 +50,7 @@ final class Panel {
     }
 
     static void open(Context c) {
+        if (LockScreen.showing()) return;
         // 当场查一次前台：HostService.fgAct 要等它下一次前台检查才更新（刚从统计页、设置页回到桌面时还是旧页面），
         // 拿旧值当“打开时在前台的页面”，下一次检查一看前台“变了”就把刚打开的面板收起（Voyage 模拟器：打开 2.5 秒自己收起）
         String top = HostService.topActivity(c);
@@ -58,12 +58,24 @@ final class Panel {
         if (Blocks.on(c)) { if (instance != null && instance.showing) instance.finish(); BlocksPanel.open(c); return; }
         BlocksPanel.close();
         Context app = c.getApplicationContext();
-        String conf = QUICK_DEFAULT, name = "";
-        try { android.content.SharedPreferences sp = Store.prefs(app, "home"); conf = sp.getString("quick", QUICK_DEFAULT); name = sp.getString("panelname", ""); } catch (Throwable ignored) { }
-        // 设置里改了快捷按钮 / 面板名称：常驻的那份是按旧配置搭的，丢掉重搭
-        if (instance != null && !(conf + "|" + name).equals(instance.builtConf)) { instance.destroy(); instance = null; }
-        if (instance == null) instance = new Panel(new android.view.ContextThemeWrapper(app, android.R.style.Theme_Holo_Light_NoActionBar));
+        String sig = conf(app);
+        // 设置或显示配置变化（快捷按钮 / 面板名称 / 蓝牙能力 / 密度 / 字号 / 屏幕尺寸）：常驻的那份是按旧配置搭的，丢掉重搭
+        if (instance != null && !sig.equals(instance.builtConf)) { instance.destroy(); instance = null; }
+        if (instance == null) instance = new Panel(new android.view.ContextThemeWrapper(app, android.R.style.Theme_Holo_Light_NoActionBar), sig);
         instance.open();
+    }
+
+    private static String conf(Context app) {
+        String quick = QUICK_DEFAULT, name = "";
+        try {
+            android.content.SharedPreferences sp = Store.prefs(app, "home");
+            quick = sp.getString("quick", QUICK_DEFAULT);
+            name = sp.getString("panelname", "");
+        } catch (Throwable ignored) { }
+        android.content.res.Configuration cfg = app.getResources().getConfiguration();
+        android.util.DisplayMetrics dm = app.getResources().getDisplayMetrics();
+        return quick + "|" + name + "|" + BluetoothActivity.supported() + "|"
+            + dm.densityDpi + "|" + cfg.fontScale + "|" + dm.widthPixels + "x" + dm.heightPixels;
     }
 
     static void close() { openedOver = null; if (instance != null) instance.finish(); BlocksPanel.close(); }
@@ -95,7 +107,7 @@ final class Panel {
     private final Handler handler = new Handler();
     private LinearLayout root, notes;
     private TextView clock, info, title, contrastValue, xferLine, cleanLabel, offLabel;
-    private View backBtn, bellBtn;
+    private View backBtn, bellBtn, clearNotesBtn;
     private LevelBar light, warm;
     private View lightRow, warmRow, sleepRow;
     private Check autoLight;
@@ -130,16 +142,18 @@ final class Panel {
     private int animOn = 0;          // 宿主的 KFB_ANIM_MODE：0 = 关，1–5 = 开（跟随手势 / 左右上下滑）
     private int animLast = 1;        // 上次打开时用的模式，重新打开时恢复它（不再一律改成 1）
     private String seenStatus = null;  // 上次画面板时 status + settings 的原文：没变就不再画一遍（墨水屏）
+    private long lastLightSetAt = 0, lastWarmSetAt = 0, lastBtSetAt = 0;
     private boolean offArmed;
 
     private static final String[] CONTRAST = { "1.0", "1.3", "1.6", "1.9", "2.2" };
     private static final String[] MODE_V = { "0", "1", "2" };
     private static final String[] FLASH_V = { "0", "1", "3", "6", "8" };   // 8 是宿主默认值，必须在表里
     private static final int[] SLEEP_S = { 300, 600, 1800, 3600 };
-    private static final float[] FONT_S = { 0.85f, 1.0f, 1.15f, 1.3f };
+    private static final float[] FONT_S = { AppFont.VALUES[1], AppFont.VALUES[2], AppFont.VALUES[3], AppFont.VALUES[4] };
 
-    private Panel(Context c) {
+    private Panel(Context c, String sig) {
         ctx = c;
+        builtConf = sig;
         wm = (WindowManager) c.getSystemService(Context.WINDOW_SERVICE);
         btOk = BluetoothActivity.supported();
 
@@ -361,17 +375,31 @@ final class Panel {
         LinearLayout r = row();
         final LevelBar bar = new LevelBar(ctx);
         bar.setListener(new LevelBar.Listener() {
-            @Override public void onCommit(int v) { HostLink.cmd(cmd + " " + v); }
+            @Override public void onCommit(int v) {
+                long now = android.os.SystemClock.uptimeMillis();
+                if ("light".equals(cmd)) lastLightSetAt = now; else if ("warmth".equals(cmd)) lastWarmSetAt = now;
+                HostLink.cmd(cmd + " " + v);
+            }
         });
         // 两端的小 / 大图标就是 − / +：点一下走一格
         r.addView(Icons.bar(ctx, lo, 26, new View.OnClickListener() {
-            @Override public void onClick(View v) { bar.setValue(bar.getValue() - 1); HostLink.cmd(cmd + " " + bar.getValue()); }
+            @Override public void onClick(View v) {
+                bar.setValue(bar.getValue() - 1);
+                long now = android.os.SystemClock.uptimeMillis();
+                if ("light".equals(cmd)) lastLightSetAt = now; else if ("warmth".equals(cmd)) lastWarmSetAt = now;
+                HostLink.cmd(cmd + " " + bar.getValue());
+            }
         }));
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, dp(34), 1);
         bp.leftMargin = dp(4); bp.rightMargin = dp(4);
         r.addView(bar, bp);
         r.addView(Icons.bar(ctx, hi, 30, new View.OnClickListener() {
-            @Override public void onClick(View v) { bar.setValue(bar.getValue() + 1); HostLink.cmd(cmd + " " + bar.getValue()); }
+            @Override public void onClick(View v) {
+                bar.setValue(bar.getValue() + 1);
+                long now = android.os.SystemClock.uptimeMillis();
+                if ("light".equals(cmd)) lastLightSetAt = now; else if ("warmth".equals(cmd)) lastWarmSetAt = now;
+                HostLink.cmd(cmd + " " + bar.getValue());
+            }
         }));
         parent.addView(r);
         return bar;
@@ -438,7 +466,6 @@ final class Panel {
             conf = sp.getString("quick", QUICK_DEFAULT);
             panelName = sp.getString("panelname", "");
         } catch (Throwable ignored) { }
-        builtConf = conf + "|" + panelName;
         LinearLayout r = new LinearLayout(ctx);
         r.setOrientation(LinearLayout.HORIZONTAL);
         r.setPadding(0, dp(10), 0, dp(8));
@@ -569,6 +596,7 @@ final class Panel {
      *  命令经宿主开关 Kindle 的蓝牙（bt.sh 的 enable / disable，打开最多约 15 秒）；配对、按键映射在长按打开的“蓝牙翻页器”页里。 */
     private void toggleBt() {
         btOn = btOn == 1 ? 0 : 1;
+        lastBtSetAt = android.os.SystemClock.uptimeMillis();
         HostLink.cmd(btOn == 1 ? "bt enable" : "bt disable");
         paintToggles();
         VeraToast.show(ctx, btOn == 1 ? "正在打开蓝牙…（长按进入配对）" : "正在关闭蓝牙…");
@@ -591,13 +619,13 @@ final class Panel {
     private void screenshot() {
         // 先收起面板再截，不然截到的是面板自己
         finish();
-        handler.postDelayed(new Runnable() { @Override public void run() { HostLink.cmd("screenshot"); } }, 1200);
+        handler.postDelayed(new Runnable() { @Override public void run() { WebAdmin.saveScreenshot(ctx, true); } }, 800);
     }
 
     /** “显示”：墨水屏相关的显示设置。全部即时生效。 */
     private void buildDisplay(LinearLayout p) {
         mode = new Seg(ctx, new String[] { "均衡", "灰度最准", "最快" }, 15, new Seg.Listener() {
-            @Override public void onPick(int i) { HostLink.settings("KFB_MODE=" + MODE_V[i] + "\n"); }
+            @Override public void onPick(int i) { HostLink.settings("KFB_SMOOTH=0\nKFB_MODE=" + MODE_V[i] + "\n"); }
         });
         p.addView(labeled("刷新方式", mode, 76));
         flash = new Seg(ctx, new String[] { "不全刷", "每页", "3 页", "6 页", "8 页" }, 15, new Seg.Listener() {
@@ -719,7 +747,7 @@ final class Panel {
         PageScrollView sv = new PageScrollView(ctx);
         sv.addView(notes);
         p.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-        p.addView(bigButton("全部清除", new View.OnClickListener() {
+        clearNotesBtn = bigButton("全部清除", new View.OnClickListener() {
             @Override public void onClick(View v) {
                 for (StatusBarNotification n : NotifService.active()) {
                     NotifService s = NotifService.instance;
@@ -727,7 +755,8 @@ final class Panel {
                 }
                 loadNotes();
             }
-        }));
+        });
+        p.addView(clearNotesBtn);
     }
 
     // ------------------------------------------------------------------ state
@@ -745,29 +774,26 @@ final class Panel {
 
     private void paintClock() { set(clock, Ui.clock(ctx)); }
 
-    /** 应用字号是 Android 这边的设置，进“显示”页时才读。 */
+    /** 应用字号是 Android 这边的设置，进“显示”页时才读（读用户全局字号，不把单应用临时 FONT_SCALE 错当全局值）。 */
     private void readLocal() {
         if (font == null) return;
-        float fs = 1.0f;
-        try { fs = Settings.System.getFloat(ctx.getContentResolver(), Settings.System.FONT_SCALE, 1.0f); } catch (Throwable ignored) { }
+        float fs = AppFont.user(ctx);
         int best = 0;
         for (int i = 0; i < FONT_S.length; i++) if (Math.abs(FONT_S[i] - fs) < Math.abs(FONT_S[best] - fs)) best = i;
         font.select(best);
     }
 
-    /** 按宿主的状态文件和设置文件核对控件。只读不写；和上次看到的一样就直接返回。 */
-    private long seenStamp = -1;
+    /** 按宿主的状态文件和设置文件核对控件。只读不写；内容没变且不在防回跳窗口内就直接返回。 */
     private void readStatus() {
-        // 两个文件都没被改写过（看修改时间和长度）：连读都不用读。打开面板的路上只做这一步检查。
-        java.io.File f1 = new java.io.File(HostLink.CTL + "status"), f2 = new java.io.File(HostLink.KFB + "settings");
-        long stamp = f1.lastModified() * 31 + f1.length() * 7 + f2.lastModified() * 17 + f2.length() + System.currentTimeMillis() / 86400000L;
-        if (stamp == seenStamp && seenStatus != null) return;
-        seenStamp = stamp;
         Map<String, String> st = HostLink.status(ctx);
         Map<String, String> cfg = HostLink.kv(HostLink.KFB + "settings");
-        String key = new java.util.TreeMap<String, String>(st).toString() + new java.util.TreeMap<String, String>(cfg).toString();
-        if (key.equals(seenStatus)) return;
-        seenStatus = key;
+        long nowMs = android.os.SystemClock.uptimeMillis();
+        boolean guarded = (nowMs - lastLightSetAt <= 1500L) || (nowMs - lastWarmSetAt <= 1500L) || (nowMs - lastBtSetAt <= 5000L);
+        Transfer xfer = Transfer.get(ctx);
+        String key = new java.util.TreeMap<String, String>(st).toString() + new java.util.TreeMap<String, String>(cfg).toString()
+            + "|" + xfer.running() + ":" + xfer.port() + ":" + xfer.pin();
+        if (!guarded && key.equals(seenStatus)) return;
+        seenStatus = guarded ? null : key;
         StringBuilder sb = new StringBuilder(new SimpleDateFormat("M月d日 EEE", Locale.CHINA).format(new Date()));
         if (st.get("battery") != null) {
             sb.append("  电量 ").append(st.get("battery")).append("%");
@@ -781,12 +807,12 @@ final class Panel {
         vis((View) autoLight.getTag(), HostLink.num(st, "haslightauto", 0) == 1);
         autoLight.set(HostLink.num(st, "lightauto", 0) == 1);
         if (light.getMax() != max) light.setMax(max);
-        if (light.getValue() != HostLink.num(st, "light", 0)) light.setValue(HostLink.num(st, "light", 0));
+        if (nowMs - lastLightSetAt > 1500L && light.getValue() != HostLink.num(st, "light", 0)) light.setValue(HostLink.num(st, "light", 0));
         if (warm.getMax() != max) warm.setMax(max);
-        if (warm.getValue() != HostLink.num(st, "warmth", 0)) warm.setValue(HostLink.num(st, "warmth", 0));
+        if (nowMs - lastWarmSetAt > 1500L && warm.getValue() != HostLink.num(st, "warmth", 0)) warm.setValue(HostLink.num(st, "warmth", 0));
         wifiOn = HostLink.num(st, "wifi", 1);
         invertOn = HostLink.num(st, "invert", 0);
-        btOn = HostLink.num(st, "bton", 0);
+        if (nowMs - lastBtSetAt > 5000L) btOn = HostLink.num(st, "bton", 0);
         try { animOn = Integer.parseInt(cfg.get("KFB_ANIM_MODE")); } catch (Throwable ignored) { animOn = 0; }
         if (animOn > 0) animLast = animOn;
         lightfOn = Math.max(0, Math.min(3, HostLink.num(cfg, "KFB_LIGHTF", 0)));
@@ -849,10 +875,10 @@ final class Panel {
         if (notes == null) return;
         notes.removeAllViews();
         StatusBarNotification[] list = NotifService.active();
-        int shown = 0;
+        int shown = 0, clearable = 0;
         for (final StatusBarNotification sbn : list) {
             Notification n = sbn.getNotification();
-            if (n == null || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) continue;
+            if (n == null || n.extras == null || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) continue;
             CharSequence nt = n.extras.getCharSequence(Notification.EXTRA_TITLE);
             CharSequence body = n.extras.getCharSequence(Notification.EXTRA_TEXT);
             if (nt == null && body == null) continue;
@@ -879,17 +905,21 @@ final class Panel {
                 }
             });
             r.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            r.addView(Icons.bar(ctx, Icons.Kind.CLOSE, 22, new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    NotifService s = NotifService.instance;
-                    if (s != null) s.cancelNotification(sbn.getKey());
-                    loadNotes();
-                }
-            }));
+            if (sbn.isClearable()) {
+                clearable++;
+                r.addView(Icons.bar(ctx, Icons.Kind.CLOSE, 22, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        NotifService s = NotifService.instance;
+                        if (s != null) s.cancelNotification(sbn.getKey());
+                        loadNotes();
+                    }
+                }));
+            }
             notes.addView(r);
             notes.addView(Ui.rule(ctx, 1, Color.BLACK));
             shown++;
         }
+        if (clearNotesBtn != null) clearNotesBtn.setVisibility(clearable > 0 ? View.VISIBLE : View.GONE);
         if (shown == 0) {
             TextView none = Ui.text(ctx, NotifService.instance == null ? "通知功能还没有就绪" : "没有通知", 16, false);
             none.setPadding(0, dp(14), 0, dp(10));

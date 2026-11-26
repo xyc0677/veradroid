@@ -80,21 +80,32 @@ while :; do
     # Old installs may not have a version file at all. Treat them as 0 so
     # auto-update can still bring them forward instead of silently skipping.
     [ -n "$cur" ] || cur=0
-    # 与 bootstrap.sh 一致：4.9 内核机型（PW5/KT5/KT6）跟随 k49 包的版本，不跟 PW6 的 /api/bootstrap
+    # 与 bootstrap.sh 一致：4.9 内核机型（PW5/KT5/KT6）跟随 k49 包的版本，3.x / 4.1 跟随 legacy，其余跟 PW6 的 /api/bootstrap
     case "$(uname -r)" in
-        4.*) meta="$BASE/static/bootstrap-k49.json?t=$(date +%s)" ;;
+        3.*|4.1.*) meta="$BASE/static/bootstrap-legacy.json?t=$(date +%s)" ;;
+        4.9.*) meta="$BASE/static/bootstrap-k49.json?t=$(date +%s)" ;;
         *) meta="$BASE/api/bootstrap" ;;
     esac
-    # 装的是按类别编的系统（bootstrap 记在 $VD/image-class）：先看那个类别的版本，服务器上没有再看通用的
+    # 装的是按类别编的系统（bootstrap 记在 $VD/image-class）：同时看类别清单和通用清单，哪个版本更新就按哪个，避免类别清单滞后卡住更新
     ic=$(cat "$VD/image-class" 2>/dev/null)
-    json=
+    json=; fam_json=
     [ -n "$ic" ] && json=$(au_meta "$BASE/static/bootstrap-$ic.json?t=$(date +%s)" 2>/dev/null)
-    [ -n "$json" ] || json=$(au_meta "$meta" 2>/dev/null) || { sleep 3600; continue; }
+    fam_json=$(au_meta "$meta" 2>/dev/null) || fam_json=
+    if [ -n "$json" ] && [ -n "$fam_json" ]; then
+        ic_v=$(printf '%s' "$json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
+        fam_v=$(printf '%s' "$fam_json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
+        if [ -z "$ic_v" ] || { [ -n "$fam_v" ] && ver_gt "$fam_v" "$ic_v"; }; then json=$fam_json; fi
+    elif [ -z "$json" ]; then
+        json=$fam_json
+    fi
+    [ -n "$json" ] || { sleep 3600; continue; }
     # 版本号有 "version":"x" 和 "version": "x" 两种写法
     new=$(printf '%s' "$json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
     # 安装时记录的实验机型：更新时沿用，否则 bootstrap 会拒绝（要求 VD_EXPERIMENTAL=1）
-    m=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null)
+    # loop 镜像机型停机时系统盘已卸载，回退读镜像外的 $VD/model；4.9.* 内核一律置 VD_EXPERIMENTAL=1
+    m=$(cat /mnt/base-us/system/veradroid/model 2>/dev/null || cat "$VD/model" 2>/dev/null)
     case "$m" in ''|pw6|cs) ;; *) export VD_MODEL="$m" VD_EXPERIMENTAL=1 ;; esac
+    case "$(uname -r)" in 4.9.*) export VD_EXPERIMENTAL=1 ;; esac
     [ -n "$new" ] || { sleep 3600; continue; }
     # 只往新版本更新：本地版本更新（比如用离线包装了新版）时绝不降级（KT6 模拟器实测 0.25 被拉回 0.24）
     if ! ver_gt "$new" "$cur"; then

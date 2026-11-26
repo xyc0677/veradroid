@@ -36,7 +36,7 @@ final class Optimizer {
         boolean hostOk;
         int compilePending; boolean compileKicked;
         String wifiPs = "";
-        boolean xferStopped;
+        boolean xferStopped, xferBusy;
         final List<Suggestion> tips = new ArrayList<Suggestion>();
 
         /** 一行总结：“已清理 2 个应用 · 可用内存 +120 MB · 省电已开”。 */
@@ -57,7 +57,8 @@ final class Optimizer {
             if (compileKicked) l.add("正在优化 " + compilePending + " 个应用（充电中）");
             else if (compilePending > 0) l.add(compilePending + " 个应用待优化（充电时自动进行）");
             if (xferStopped) l.add("传书网页 5 分钟没人用，已关掉");
-            if ("off".equals(wifiPs)) l.add("Wi-Fi 省电暂时关着（正在传书或大量下载）");
+            if ("busy".equals(wifiPs) || ("off".equals(wifiPs) && xferBusy)) l.add("Wi-Fi 省电暂时关着（正在传书或大量下载）");
+            else if ("off".equals(wifiPs)) l.add("Wi-Fi 省电当前未开启");
             return l;
         }
     }
@@ -89,6 +90,7 @@ final class Optimizer {
             // 3. 省电：传书网页没人用就关
             Transfer t = Transfer.get(c);
             if (t.running() && t.idleMs() >= 5 * 60 * 1000L) { t.stop(); r.xferStopped = true; HostLink.cmd("status"); }
+            r.xferBusy = t.running();
             try { Thread.sleep(300); } catch (InterruptedException ignored) { }
             r.after = Cleaner.memAvailableMb();
             suggest(c, r);
@@ -122,7 +124,26 @@ final class Optimizer {
         }
     }
 
-    /** 请前台以外的应用进程释放缓存（TRIM_MEMORY_MODERATE）。只请，不杀；返回请了几个。 */
+    /** 宿主 BG_FREEZE 对后台进程发 SIGSTOP 后处于内核 T 态，无法响应异步 trimMemory。 */
+    private static boolean isStoppedProcess(int pid) {
+        if (pid <= 0) return false;
+        java.io.BufferedReader r = null;
+        try {
+            r = new java.io.BufferedReader(new java.io.FileReader("/proc/" + pid + "/stat"));
+            String line = r.readLine();
+            if (line == null) return false;
+            int rp = line.lastIndexOf(')');
+            if (rp < 0 || rp + 2 >= line.length()) return false;
+            char st = line.charAt(rp + 2);
+            return st == 'T' || st == 't';
+        } catch (Throwable ignored) {
+            return false;
+        } finally {
+            if (r != null) try { r.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 请前台以外的应用进程释放缓存（TRIM_MEMORY_MODERATE）。只请，不杀；跳过 BG_FREEZE 停止态进程，返回实际请了几个。 */
     private static int trimBackground(Context c, String front) {
         int n = 0;
         try {
@@ -134,6 +155,7 @@ final class Optimizer {
                 if (p.uid < Process.FIRST_APPLICATION_UID || p.processName == null || p.processName.startsWith(c.getPackageName())) continue;
                 if (front != null && p.pkgList != null && java.util.Arrays.asList(p.pkgList).contains(front)) continue;
                 if (p.importance <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE) continue;
+                if (isStoppedProcess(p.pid)) continue;
                 try { if ((Boolean) m.invoke(am, p.processName, 0, 60)) n++; } catch (Throwable ignored) { }
             }
         } catch (Throwable t) { Log.w("VeraHome", "optimize trim: " + t); }

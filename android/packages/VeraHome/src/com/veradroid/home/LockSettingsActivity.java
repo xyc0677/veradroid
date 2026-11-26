@@ -3,6 +3,8 @@ package com.veradroid.home;
 import android.app.Activity;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -21,6 +23,8 @@ public class LockSettingsActivity extends Activity {
     private final StringBuilder typed = new StringBuilder();
     private LinearLayout page;
     private TextView prompt, dots, msg;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable waitTick = new Runnable() { @Override public void run() { waitMsg(); } };
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -37,6 +41,7 @@ public class LockSettingsActivity extends Activity {
     private int dp(int v) { return Ui.dp(this, v); }
 
     private void render() {
+        handler.removeCallbacks(waitTick);
         page.removeAllViews();
         TextView title = Ui.text(this, "锁屏密码", 30, true);
         title.setPadding(0, dp(8), 0, dp(8));
@@ -100,7 +105,9 @@ public class LockSettingsActivity extends Activity {
         msg.setPadding(0, 0, 0, dp(10));
         page.addView(msg, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         int sh = getResources().getDisplayMetrics().heightPixels, sw = getResources().getDisplayMetrics().widthPixels;
-        int keyH = Math.max(dp(60), sh / 11), keyW = Math.min((sw - dp(32)) / 3 - dp(12), dp(200));
+        int availH = Math.max(dp(200), sh - dp(250));
+        int keyH = Math.max(dp(44), Math.min(Math.max(dp(60), sh / 11), availH / 4 - dp(12)));
+        int keyW = Math.min((sw - dp(32)) / 3 - dp(12), dp(200));
         String[] keys = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "删除", "0", "确定" };
         for (int r = 0; r < 4; r++) {
             LinearLayout row = new LinearLayout(this);
@@ -123,7 +130,17 @@ public class LockSettingsActivity extends Activity {
         if ((step == OLD_FOR_CHANGE || step == OLD_FOR_OFF) && LockScreen.waitMs(this) > 0) waitMsg();
     }
 
-    private void waitMsg() { msg.setText("已连续输错 " + LockScreen.fails(this) + " 次，请 " + ((LockScreen.waitMs(this) + 999) / 1000) + " 秒后再试"); }
+    private void waitMsg() {
+        handler.removeCallbacks(waitTick);
+        if (msg == null || (step != OLD_FOR_CHANGE && step != OLD_FOR_OFF)) return;
+        long w = LockScreen.waitMs(this);
+        if (w > 0) {
+            msg.setText("已连续输错 " + LockScreen.fails(this) + " 次，请 " + ((w + 999) / 1000) + " 秒后再试");
+            handler.postDelayed(waitTick, w + 100);
+        } else {
+            msg.setText(" ");
+        }
+    }
 
     private void showDots() {
         StringBuilder d = new StringBuilder();
@@ -154,6 +171,25 @@ public class LockSettingsActivity extends Activity {
             if (LockScreen.set(this, pin)) VeraToast.show(this, "锁屏密码已设置"); else VeraToast.show(this, "没能保存密码");
             step = IDLE; render();
         }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+        if ((step == OLD_FOR_CHANGE || step == OLD_FOR_OFF) && LockScreen.waitMs(this) > 0) waitMsg();
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
+    }
+
+    @Override protected void onDestroy() {
+        handler.removeCallbacks(waitTick);
+        StatusBarService.suppress(this, false);
+        super.onDestroy();
     }
 
     @Override public void onBackPressed() {

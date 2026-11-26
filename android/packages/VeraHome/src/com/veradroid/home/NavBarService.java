@@ -35,6 +35,7 @@ import java.lang.reflect.Method;
 public class NavBarService extends Service {
     private static final String TAG = "VeraNavBar";
     static final int HEIGHT_DP = 28;   // 24 → 28：三个键按得更准（用户反馈“有点小”）
+    private static NavBarService instance;
     private WindowManager wm;
     private View bar;
 
@@ -49,6 +50,7 @@ public class NavBarService extends Service {
     private int builtDpi;
     private int retries;
     private boolean destroyed;
+    private final android.os.Handler retryHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     /** 显示密度变了（appprof.sh 的每应用密度）：按新密度重搭，三个图标跟着系统给的那一格缩放。 */
     @Override public void onConfigurationChanged(android.content.res.Configuration c) {
@@ -59,15 +61,28 @@ public class NavBarService extends Service {
             android.widget.FrameLayout f = (android.widget.FrameLayout) bar;
             f.removeAllViews();
             f.addView(build(LinearLayout.LayoutParams.MATCH_PARENT));
+            syncLockVisibility();
         }
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        instance = this;
         if (mode(this) == 0) { stopSelf(); return START_NOT_STICKY; }
+        retries = 0;
         show();
+        syncLockVisibility();
         return START_STICKY;
+    }
+
+    static void updateLockState() {
+        NavBarService s = instance;
+        if (s != null) s.syncLockVisibility();
+    }
+
+    private void syncLockVisibility() {
+        if (bar != null) bar.setVisibility(LockScreen.showing() ? View.GONE : View.VISIBLE);
     }
 
     private void show() {
@@ -92,12 +107,13 @@ public class NavBarService extends Service {
         try {
             wm.addView(sys, sl);
             bar = sys;
+            syncLockVisibility();
             return;
         } catch (Throwable t) {
             // 另一个导航栏窗口还在（上一个服务实例刚撤、还没撤完）：过一会儿再试，不退回 overscan
-            if (String.valueOf(t.getMessage()).contains("already exists") && retries++ < 3) {
+            if (String.valueOf(t.getMessage()).contains("already exists") && retries++ < 6) {
                 Log.w(TAG, "nav bar window still there, retrying: " + t);
-                new android.os.Handler().postDelayed(new Runnable() { @Override public void run() { show(); } }, 700);
+                retryHandler.postDelayed(new Runnable() { @Override public void run() { show(); } }, 700);
                 return;
             }
             Log.w(TAG, "TYPE_NAVIGATION_BAR not allowed, falling back to overscan: " + t);
@@ -141,11 +157,14 @@ public class NavBarService extends Service {
         wm.getDefaultDisplay().getRealMetrics(real);
         lp.gravity = Gravity.TOP | Gravity.LEFT;
         lp.y = real.heightPixels - h;
+        lp.windowAnimations = 0;
+        lp.setTitle("VeraNavBar");
         try {
             setOverscanBottom(h);
             overscanUsed = true;
             wm.addView(wrap, lp);
             bar = wrap;
+            syncLockVisibility();
         } catch (Throwable t) {
             Log.w(TAG, "cannot add nav bar: " + t);
             setOverscanBottom(0);
@@ -161,11 +180,12 @@ public class NavBarService extends Service {
         b.setBackground(bg);
         b.addView(new Icons.IconView(this, k), new LinearLayout.LayoutParams(Ui.dp(this, 19), Ui.dp(this, 19)));
         b.setClickable(true);
-        b.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { r.run(); } });
+        b.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (!LockScreen.showing()) r.run(); } });
         return b;
     }
 
     private void key(int code) {
+        if (LockScreen.showing()) return;
         try {
             InputManager im = (InputManager) getSystemService(Context.INPUT_SERVICE);
             Method m = InputManager.class.getMethod("injectInputEvent", InputEvent.class, int.class);
@@ -179,13 +199,18 @@ public class NavBarService extends Service {
     }
 
     private void home() {
-        startActivity(HomeActivity.homeIntent(this));
+        if (LockScreen.showing()) return;
+        try { startActivity(HomeActivity.homeIntent(this)); }
+        catch (Throwable t) { Log.w(TAG, "home failed: " + t); }
     }
 
     private void recents() {
-        Intent i = new Intent(this, SwitcherActivity.class);
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-        startActivity(i);
+        if (LockScreen.showing()) return;
+        try {
+            Intent i = new Intent(this, SwitcherActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            startActivity(i);
+        } catch (Throwable t) { Log.w(TAG, "recents failed: " + t); }
     }
 
     /**
@@ -220,7 +245,9 @@ public class NavBarService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (instance == this) instance = null;
         destroyed = true;
+        retryHandler.removeCallbacksAndMessages(null);
         if (bar != null) {
             try { wm.removeViewImmediate(bar); } catch (Throwable ignored) { }
             bar = null;

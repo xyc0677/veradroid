@@ -42,6 +42,10 @@ final class BindGate {
 
     private BindGate() { }
 
+    private static boolean gone(Activity a) {
+        return a == null || a.isFinishing() || (android.os.Build.VERSION.SDK_INT >= 17 && a.isDestroyed());
+    }
+
     /** 已绑定返回 true；未绑定弹出墨水屏友好引导框并返回 false，绑定成功后自动执行 onBound。 */
     static boolean ensureBound(final Activity a, final String itemName, final Runnable onBound) {
         return ensureBound(a, itemName, REASON_TEXT, onBound);
@@ -79,11 +83,14 @@ final class BindGate {
         JSONObject j = null;
         try { j = new JSONObject(raw); } catch (Exception ignored) { }
         if (code == 401 || code == 403) {
-            if (j != null && "bind_required".equals(j.optString("code"))) {
+            String errCode = j != null ? j.optString("code", "") : "";
+            String errMsg = j != null ? j.optString("error", REASON_TEXT) : REASON_TEXT;
+            if ("bind_required".equals(errCode) || "token_invalid".equals(errCode) || (code == 401 && j != null)) {
                 Token.clear(ctx);
-                throw new BindRequiredException(j.optString("error", REASON_TEXT));
+                throw new BindRequiredException(errMsg);
             }
-            throw new BindRequiredException(j != null ? j.optString("error", REASON_TEXT) : REASON_TEXT);
+            // e.g. ip_blocked / account disabled / CDN 403: surface the real error without wiping a valid token or showing a bind dialog
+            throw new Exception(errMsg);
         }
         if (code == 429) {
             throw new Exception(j != null ? j.optString("error", "下载请求过于频繁，请稍后再试") : "下载请求过于频繁，请稍后再试");
@@ -102,7 +109,7 @@ final class BindGate {
     }
 
     static void showBindDialog(final Activity a, final String itemName, final String customReason, final Runnable onBound) {
-        if (a == null || a.isFinishing()) return;
+        if (gone(a)) return;
         final Handler ui = new Handler(Looper.getMainLooper());
         final boolean[] alive = { true };
         final String[] activeSid = { null };
@@ -150,7 +157,7 @@ final class BindGate {
         mTitle.setPadding(0, Ui.dp(a, 12), 0, Ui.dp(a, 6));
         box.addView(mTitle);
 
-        final EditText codeInput = new EditText(a);
+        final EditText codeInput = Ui.editText(a);
         codeInput.setHint("输入 6 位数字绑定码");
         codeInput.setSingleLine(true);
         codeInput.setInputType(InputType.TYPE_CLASS_NUMBER);
@@ -168,19 +175,21 @@ final class BindGate {
             .negative("暂不绑定", new Runnable() {
                 @Override public void run() { alive[0] = false; }
             })
-            .positive("使用绑定码绑定", new Runnable() {
+            .positive("使用绑定码绑定", true, new Runnable() {
                 @Override public void run() {
+                    if (gone(a)) return;
                     String code = codeInput.getText().toString().trim();
                     if (!code.matches("\\d{6}")) {
                         VeraToast.show(a, "请输入 6 位数字绑定码，或直接手机扫码绑定");
-                        showBindDialog(a, itemName, rText, onBound);
                         return;
                     }
                     alive[0] = false;
+                    if (dlgRef[0] != null) try { dlgRef[0].dismiss(); } catch (Throwable ignored) { }
                     VeraToast.show(a, "正在验证绑定码…");
                     Update.bind(a, code, new Update.BindResult() {
                         @Override public void done(final boolean ok, final String msg) {
                             ui.post(new Runnable() { @Override public void run() {
+                                if (gone(a)) return;
                                 if (ok) {
                                     VeraToast.show(a, "绑定成功，正在继续下载…");
                                     if (onBound != null) onBound.run();
@@ -220,16 +229,20 @@ final class BindGate {
                     JSONObject init = postJson(StoreNet.base() + "/api/device/qr-init", body.toString());
                     if (!init.optBoolean("ok", false)) {
                         final String em = init.optString("error", "无法生成二维码");
-                        ui.post(new Runnable() { @Override public void run() { qrStatus.setText(em + "（可使用下方 6 位绑定码）"); } });
+                        ui.post(new Runnable() { @Override public void run() {
+                            if (!alive[0] || gone(a)) return;
+                            qrStatus.setText(em + "（可使用下方 6 位绑定码）");
+                        } });
                         return;
                     }
                     final String sid = init.optString("sid", "");
                     final String qrUrl = init.optString("url", "");
                     final String imgUrl = init.optString("qr_image", "");
                     activeSid[0] = sid;
-                    final Bitmap bm = imgUrl.length() > 0 ? StoreNet.image(imgUrl, "qr-" + sid) : null;
+                    StoreNet.evictPrefix("qr-");
+                    final Bitmap bm = imgUrl.length() > 0 ? StoreNet.image(imgUrl, "qr-" + sid, 512) : null;
                     ui.post(new Runnable() { @Override public void run() {
-                        if (!alive[0]) return;
+                        if (!alive[0] || gone(a)) return;
                         if (bm != null) {
                             qrImg.setImageBitmap(bm);
                             qrImg.setVisibility(View.VISIBLE);
@@ -240,9 +253,9 @@ final class BindGate {
                     } });
 
                     // 每 2 秒轮询一次，最长 5 分钟
-                    for (int i = 0; i < 150 && alive[0] && !a.isFinishing(); i++) {
+                    for (int i = 0; i < 150 && alive[0] && !gone(a); i++) {
                         Thread.sleep(2000);
-                        if (!alive[0]) break;
+                        if (!alive[0] || gone(a)) break;
                         try {
                             JSONObject pr = StoreNet.json(StoreNet.base() + "/api/device/qr-poll?sid=" + StoreNet.enc(sid) + "&device_id=" + StoreNet.enc(did));
                             String st = pr.optString("status", "");
@@ -253,6 +266,7 @@ final class BindGate {
                                     Token.put(a, tok);
                                     alive[0] = false;
                                     ui.post(new Runnable() { @Override public void run() {
+                                        if (gone(a)) return;
                                         if (dlgRef[0] != null) try { dlgRef[0].dismiss(); } catch (Throwable ignored) { }
                                         VeraToast.show(a, "已绑定账号" + (uname.length() > 0 ? "「" + uname + "」" : "") + "，正在继续下载…");
                                         if (onBound != null) onBound.run();
@@ -260,14 +274,18 @@ final class BindGate {
                                     return;
                                 }
                             } else if ("expired".equals(st)) {
-                                ui.post(new Runnable() { @Override public void run() { qrStatus.setText("二维码已过期，请关闭后重新点下载刷新"); } });
+                                ui.post(new Runnable() { @Override public void run() {
+                                    if (!alive[0] || gone(a)) return;
+                                    qrStatus.setText("二维码已过期，请关闭后重新点下载刷新");
+                                } });
                                 return;
                             }
                         } catch (Throwable ignored) { }
                     }
                 } catch (final Throwable e) {
                     ui.post(new Runnable() { @Override public void run() {
-                        if (alive[0]) qrStatus.setText("二维码获取失败，请直接用下方 6 位绑定码");
+                        if (!alive[0] || gone(a)) return;
+                        qrStatus.setText("二维码获取失败，请直接用下方 6 位绑定码");
                     } });
                 }
             }
@@ -276,6 +294,7 @@ final class BindGate {
 
     private static JSONObject postJson(String url, String jsonBody) throws Exception {
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
+        OutputStream os = null;
         InputStream in = null;
         try {
             h.setConnectTimeout(15000);
@@ -285,9 +304,9 @@ final class BindGate {
             h.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             h.setRequestProperty("User-Agent", "VeraDroid/Store");
             byte[] data = jsonBody.getBytes("UTF-8");
-            OutputStream os = h.getOutputStream();
+            os = h.getOutputStream();
             os.write(data);
-            os.close();
+            os.close(); os = null;
             int code = h.getResponseCode();
             in = code >= 400 ? h.getErrorStream() : h.getInputStream();
             ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -295,6 +314,7 @@ final class BindGate {
             while (in != null && (n = in.read(b)) > 0) bo.write(b, 0, n);
             return new JSONObject(bo.toString("UTF-8"));
         } finally {
+            if (os != null) try { os.close(); } catch (Exception ignored) { }
             if (in != null) try { in.close(); } catch (Exception ignored) { }
             h.disconnect();
         }

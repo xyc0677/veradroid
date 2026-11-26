@@ -59,15 +59,41 @@ final class Dl {
 
     interface Progress { void on(long done, long total, boolean mirror); }
 
+    private static boolean sameRootDomain(String a, String b) {
+        String ha = host(a).toLowerCase(java.util.Locale.US);
+        String hb = host(b).toLowerCase(java.util.Locale.US);
+        if (ha.isEmpty() || hb.isEmpty()) return false;
+        if (ha.equals(hb)) return true;
+        String[] pa = ha.split("\\."), pb = hb.split("\\.");
+        if (pa.length < 2 || pb.length < 2) return false;
+        String ta = pa[pa.length - 1], tb = pb[pb.length - 1];
+        if (ta.matches("\\d+") || tb.matches("\\d+")) return false;
+        return ta.equals(tb) && pa[pa.length - 2].equals(pb[pb.length - 2]);
+    }
+
     /** Candidate URLs: mirrors in order, the main site (with its query) last. */
     static List<String> candidates(String origin, String query, List<String> mirrors) {
         List<String> c = new ArrayList<String>();
         String path = origin.replaceFirst("^https?://[^/]+/", "");
-        int q = path.indexOf('?'); if (q >= 0) path = path.substring(0, q);
+        String signedQ = null;
+        int q = path.indexOf('?');
+        if (q >= 0) {
+            String qs = path.substring(q);
+            // Same-domain direct origin (e.g. dl.wenjin.jp for veradroid.wenjin.jp) validates the same short-lived
+            // HMAC signature; never forward raw token= or send queries to third-party mirror domains.
+            if (qs.contains("sig=") && !qs.contains("token=")) signedQ = qs;
+            path = path.substring(0, q);
+        }
         if (mirrors != null) for (String m : mirrors) {
             if (m == null || !m.startsWith("https://")) continue;
             String name = path.substring(path.lastIndexOf('/') + 1);
-            c.add(m.contains("{name}") ? m.replace("{name}", name) : m.replaceAll("/+$", "") + "/" + path);
+            if (m.contains("{name}")) {
+                c.add(m.replace("{name}", name));
+            } else {
+                String u = m.replaceAll("/+$", "") + "/" + path;
+                if (signedQ != null && sameRootDomain(origin, m)) u += signedQ;
+                c.add(u);
+            }
         }
         c.add(origin + (query == null || query.isEmpty() ? "" : (origin.contains("?") ? "&" : "?") + query));
         return c;
@@ -76,18 +102,19 @@ final class Dl {
     /** {url, segments}: segments is SEGS (Range works), 1 (no Range) or 0 (nothing answered: try the main site anyway). */
     static Object[] pick(List<String> cands) { return pick(cands, null); }
 
-    /** Candidates not in slow (all of them when every one is in slow). */
+    /** Candidates not in slow (all of them when every one is in slow; never mutates caller's slow set). */
     static List<String> usable(List<String> cands, java.util.Set<String> slow) {
         List<String> u = new ArrayList<String>();
         for (String c : cands) if (slow == null || !slow.contains(c)) u.add(c);
-        if (u.isEmpty()) { if (slow != null) slow.clear(); u.addAll(cands); }
+        if (u.isEmpty()) u.addAll(cands);
         return u;
     }
 
     static Object[] pick(List<String> all, java.util.Set<String> slow) {
-        String best = null; long bestSpeed = -1; int segs = 0;
+        String best = null; long bestSpeed = -1; int segs = 0; int reachable = 0;
         String main = all.get(all.size() - 1);
         List<String> cands = usable(all, slow);
+        List<String> failed = new ArrayList<String>();
         for (String u : cands) {
             HttpURLConnection h = null;
             try {
@@ -97,20 +124,29 @@ final class Dl {
                 h.setRequestProperty("User-Agent", "VeraDroid/Store");
                 h.setRequestProperty("Range", "bytes=0-262143");
                 int code = h.getResponseCode();
-                if (code != 206 && !(code == 200 && u.equals(main))) { android.util.Log.i("VeraStore", "probe " + host(u) + " HTTP " + code); continue; }
+                if (code != 206 && !(code == 200 && u.equals(main))) {
+                    android.util.Log.i("VeraStore", "probe " + host(u) + " HTTP " + code);
+                    failed.add(u);
+                    continue;
+                }
                 InputStream in = h.getInputStream();
                 byte[] b = new byte[65536]; long n = 0; int r;
                 while (n < 262144 && (r = in.read(b)) > 0) n += r;
                 in.close();
                 long sp = n * 1000000000L / Math.max(1, System.nanoTime() - t0);
                 android.util.Log.i("VeraStore", "probe " + host(u) + " HTTP " + code + " " + (sp >> 10) + " KB/s");
+                reachable++;
                 if (sp > bestSpeed) { bestSpeed = sp; best = u; segs = code == 206 ? SEGS : 1; }
             } catch (Exception e) {
                 android.util.Log.i("VeraStore", "probe " + host(u) + " failed: " + e);
+                failed.add(u);
             } finally { if (h != null) h.disconnect(); }
         }
-        if (best == null) return new Object[] {main, 0};
-        return new Object[] {best, segs};
+        if (slow != null && best != null) {
+            for (String u : failed) slow.add(u);
+        }
+        if (best == null) return new Object[] {main, 0, 0};
+        return new Object[] {best, segs, reachable};
     }
 
     static String host(String u) { try { return new URL(u).getHost(); } catch (Exception e) { return u; } }
@@ -142,9 +178,10 @@ final class Dl {
         Object[] pk = pick(cands, slow);
         final String src = (String) pk[0];
         int segs = (Integer) pk[1];
+        int reachable = pk.length > 2 ? (Integer) pk[2] : usable(cands, slow).size();
         final boolean mirror = !src.equals(cands.get(cands.size() - 1));
-        // another source left to switch to? Only then a slow source is given up.
-        final Meter meter = usable(cands, slow).size() > 1 ? new Meter() : null;
+        // another reachable source left to switch to? Only then a slow source is given up.
+        final Meter meter = (reachable > 1 && usable(cands, slow).size() > 1) ? new Meter() : null;
         try { fetchFrom(src, segs, mirror, out, size, p, meter); }
         catch (Slow e) { if (slow != null) slow.add(src); throw e; }
     }
@@ -153,9 +190,19 @@ final class Dl {
         File dir = new File(out.getPath() + ".seg");
         File plan = new File(dir, "plan");
         int planned = 0;
-        if (plan.isFile()) try { planned = Integer.parseInt(new String(read(plan), "UTF-8").trim().split(" ")[1]); } catch (Exception e) { }
-        if (planned > 1 && segs == 1) { clear(out); planned = 0; }          // the source stopped doing Range: start again whole
-        int n = planned > 1 ? planned : (segs > 1 && size >= SEG_MIN && !(out.isFile() && out.length() > 0)) ? segs : 1;
+        if (plan.isFile()) {
+            boolean valid = false;
+            if (size > 0) try {
+                String[] parts = new String(read(plan), "UTF-8").trim().split(" ");
+                if (parts.length >= 2 && Long.parseLong(parts[0]) == size) {
+                    int pn = Integer.parseInt(parts[1]);
+                    if (pn > 1) { planned = pn; valid = true; }
+                }
+            } catch (Exception e) { }
+            if (!valid) clear(out);
+        }
+        if (planned > 1 && segs <= 1) { clear(out); planned = 0; }          // the source stopped doing Range (or all probes failed): start again whole
+        int n = (size > 0 && planned > 1) ? planned : (segs > 1 && size >= SEG_MIN && !(out.isFile() && out.length() > 0)) ? segs : 1;
         if (n <= 1) { single(src, out, size, p, mirror, meter); return; }
 
         if (!dir.isDirectory() && !dir.mkdirs()) throw new Exception("无法创建下载目录");
@@ -171,7 +218,7 @@ final class Dl {
             if (f.length() > b - a + 1) f.delete();
             if (a + f.length() > b) continue;
             Thread t = new Thread(new Runnable() { @Override public void run() {
-                try { range(src, f, a + f.length(), b, meter, activeConns, idx); }
+                try { range(src, f, a + f.length(), b, mirror, meter, activeConns, idx); }
                 catch (Exception e) { synchronized (err) { if (err[0] == null) err[0] = e; } }
             }}, "StoreSeg" + i);
             t.start(); ts.add(t);
@@ -204,6 +251,8 @@ final class Dl {
         }
         // join: append the others to piece 0, deleting each after it is appended
         File first = new File(dir, "0");
+        long firstLen = first.length();
+        int deleted = 0;
         FileOutputStream fo = new FileOutputStream(first, true);
         try {
             byte[] buf = new byte[65536]; int r;
@@ -211,7 +260,15 @@ final class Dl {
                 File f = new File(dir, String.valueOf(i));
                 InputStream in = new java.io.FileInputStream(f);
                 try { while ((r = in.read(buf)) > 0) fo.write(buf, 0, r); } finally { in.close(); }
+                fo.flush();
+                f.delete();
+                deleted++;
             }
+        } catch (Exception e) {
+            if (deleted == 0) {
+                try { fo.getChannel().truncate(firstLen); } catch (Throwable ignored) { }
+            }
+            throw e;
         } finally { fo.close(); }
         if (first.length() != size) { clear(out); throw new Exception("文件大小不对"); }
         out.delete();
@@ -234,7 +291,7 @@ final class Dl {
     }
 
     /** Bytes from..to (inclusive) of url appended to f. */
-    private static void range(String url, File f, long from, long to, Meter meter, HttpURLConnection[] activeConns, int idx) throws Exception {
+    private static void range(String url, File f, long from, long to, boolean mirror, Meter meter, HttpURLConnection[] activeConns, int idx) throws Exception {
         if (meter != null && meter.cancel) return;
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
         synchronized (activeConns) {
@@ -249,7 +306,7 @@ final class Dl {
             h.setRequestProperty("User-Agent", "VeraDroid/Store");
             h.setRequestProperty("Range", "bytes=" + from + "-" + to);
             int code = h.getResponseCode();
-            if (code != 206) throw new java.io.IOException("HTTP " + code);
+            if (code != 206) throw new HttpError(code, h, mirror);
             InputStream in = h.getInputStream();
             FileOutputStream fo = new FileOutputStream(f, true);
             long left = to - from + 1;
@@ -273,6 +330,7 @@ final class Dl {
     /** One connection, resuming after what out already holds. */
     private static void single(String url, File out, long size, Progress p, boolean mirror, Meter meter) throws Exception {
         long have = out.isFile() ? out.length() : 0;
+        if (size > 0 && have > size) { out.delete(); have = 0; }
         if (size > 0 && have == size) return;
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
         try {
@@ -280,7 +338,8 @@ final class Dl {
             h.setRequestProperty("User-Agent", "VeraDroid/Store");
             if (have > 0) h.setRequestProperty("Range", "bytes=" + have + "-");
             int code = h.getResponseCode();
-            if (code != 200 && code != 206) throw new HttpError(code, h);
+            if (code == 416 && have > 0) { out.delete(); throw new java.io.IOException("HTTP 416，正在重新下载"); }
+            if (code != 200 && code != 206) throw new HttpError(code, h, mirror);
             boolean append = have > 0 && code == 206;
             if (!append) have = 0;   // server ignored the Range: start again from zero
             InputStream in = new java.io.BufferedInputStream(h.getInputStream(), 65536);
@@ -310,23 +369,45 @@ final class Dl {
         } finally { h.disconnect(); }
     }
 
-    /** An HTTP error status from the server; the message is its JSON "error" when it sent one. */
+    /** An HTTP error status from the server; carries both its JSON "error" message and optional JSON "code" (e.g. sig_expired / bind_required / rate_limited). */
     static final class HttpError extends Exception {
         final int code;
-        HttpError(int code, HttpURLConnection h) { super(message(code, h)); this.code = code; }
-        private static String message(int code, HttpURLConnection h) {
+        final String errCode;
+        final boolean fromMirror;
+        HttpError(int code, HttpURLConnection h) { this(code, h, false); }
+        HttpError(int code, HttpURLConnection h, boolean fromMirror) { this(code, parse(code, h), fromMirror); }
+        private HttpError(int code, String[] parsed, boolean fromMirror) { super(parsed[0]); this.code = code; this.errCode = parsed[1]; this.fromMirror = fromMirror; }
+        private static String[] parse(int code, HttpURLConnection h) {
+            String msg = "HTTP " + code, ec = "";
+            InputStream in = null;
             try {
-                InputStream in = h.getErrorStream();
-                if (in == null) return "HTTP " + code;
-                byte[] b = readAll(in);
-                return new org.json.JSONObject(new String(b, "UTF-8")).optString("error", "HTTP " + code);
-            } catch (Exception e) { return "HTTP " + code; }
+                in = h.getErrorStream();
+                if (in == null) return new String[] { msg, ec };
+                byte[] b = readLimited(in, 8192);
+                org.json.JSONObject j = new org.json.JSONObject(new String(b, "UTF-8"));
+                msg = j.optString("error", msg);
+                ec = j.optString("code", "");
+            } catch (Exception ignored) {
+            } finally {
+                if (in != null) try { in.close(); } catch (Exception ignored) { }
+            }
+            return new String[] { msg, ec };
         }
     }
 
     static byte[] read(File f) throws Exception {
         InputStream in = new java.io.FileInputStream(f);
         try { return readAll(in); } finally { in.close(); }
+    }
+    static byte[] readLimited(InputStream in, int maxBytes) throws Exception {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        byte[] b = new byte[Math.min(4096, Math.max(1, maxBytes))];
+        int left = maxBytes, n;
+        while (left > 0 && (n = in.read(b, 0, Math.min(b.length, left))) > 0) {
+            bo.write(b, 0, n);
+            left -= n;
+        }
+        return bo.toByteArray();
     }
     static byte[] readAll(InputStream in) throws Exception {
         java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();

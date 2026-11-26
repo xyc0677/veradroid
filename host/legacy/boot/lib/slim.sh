@@ -128,16 +128,20 @@ slim_apply() {
     return 0
 }
 
-# 开机后只做一次的部分（写进 PackageManager 的状态，之后一直有效）；afterboot.sh 的 AB_ONCE 段里调。
+# 开机后写入 PackageManager 的状态（首次开机、升级或 SLIM 开关变化时执行，避免每次开机重复起 JVM）。
 #   MediaScannerReceiver：每次开机和每次“存储已挂载”都把整个 /sdcard（含绑进来的 Kindle 书库）扫进媒体库，开机后白烧 CPU。
 #       关的是这个广播接收器，MediaScannerConnection（应用主动请求扫描某个文件）走服务，不受影响。
 slim_after_boot() {
-    if [ "${SLIM:-1}" = 1 ]; then
-        adb_sh 'pm disable com.android.providers.media/com.android.providers.media.MediaScannerReceiver' >/dev/null 2>&1
+    _sl=${SLIM:-1}; _sm=$SYS/data/.vd-slim-pm
+    [ -z "${AB_ONCE:-}" ] && [ "$(cat "$_sm" 2>/dev/null)" = "$_sl" ] && return 0
+    if [ "$_sl" = 1 ]; then
+        adb_sh 'pm disable com.android.providers.media/com.android.providers.media.MediaScannerReceiver' >/dev/null 2>&1 || return 1
         t "slim: boot media scan disabled"
     else
-        adb_sh 'pm enable com.android.providers.media/com.android.providers.media.MediaScannerReceiver' >/dev/null 2>&1
+        adb_sh 'pm enable com.android.providers.media/com.android.providers.media.MediaScannerReceiver' >/dev/null 2>&1 || return 1
+        t "slim: boot media scan restored"
     fi
+    echo "$_sl" > "$_sm" 2>/dev/null || true
 }
 
 # su 对应用藏起来（HIDE_SU=1，默认）。userdebug 镜像带 /system/xbin/su（AOSP 的 su 只认 root / shell，应用本来就用不了它），

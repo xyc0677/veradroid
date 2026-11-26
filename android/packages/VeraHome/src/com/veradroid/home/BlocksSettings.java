@@ -44,9 +44,11 @@ final class BlocksSettings {
     static final String[] REAGL_L = { "三成", "翻页默认", "一半", "七成", "近整屏" };
     static final String[] REAGL_V = { "30", "35", "50", "70", "85" };
     static final String[] DNS_L = { "自动（路由器）", "阿里 223", "腾讯 119", "Google 8.8" };
-    static final String[] DNS_V = { "auto", "ali", "dnspod", "google" };
+    static final String[] DNS_V = { "auto", "aliyun", "tencent", "google" };
     static final String[] FONT_L = { "小", "标准", "大", "特大" };
-    static final float[] FONT_S = { 0.85f, 1.0f, 1.15f, 1.3f };
+    static final float[] FONT_S = { AppFont.VALUES[1], AppFont.VALUES[2], AppFont.VALUES[3], AppFont.VALUES[4] };
+    private int pendingSmooth = -1;
+    private long pendingSmoothAt = 0;
 
     BlocksSettings(BlocksHome home) { h = home; a = home.a; prefs = home.prefs; }
 
@@ -64,9 +66,12 @@ final class BlocksSettings {
         String cfg = new java.util.TreeMap<String, String>(HostLink.kv(HostLink.KFB + "settings")).toString();
         String em = UiMode.isExpert(a) ? "E|" : "S|";
         switch (key) {
-        case BlocksHome.S_DISPLAY: return em + cfg + prefs.getString("quick", "") + prefs.getString("panelname", "") + AppFont.user(a) + st.get("light") + st.get("warmth") + st.get("lightmax") + st.get("haslight") + st.get("haswarmth") + Blocks.on(a);
+        case BlocksHome.S_DISPLAY: {
+            String ps = (pendingSmooth >= 0 && android.os.SystemClock.uptimeMillis() - pendingSmoothAt <= 3000L) ? "|ps=" + pendingSmooth : "";
+            return em + cfg + ps + prefs.getString("quick", "") + prefs.getString("panelname", "") + AppFont.user(a) + st.get("light") + st.get("warmth") + st.get("lightmax") + st.get("haslight") + st.get("haswarmth") + st.get("hascolor") + Blocks.on(a);
+        }
         case BlocksHome.S_POWER: return em + cfg + st.get("sleep") + prefs.getBoolean("clock12", false) + "|" + java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR);
-        case BlocksHome.S_STORAGE: return em + st.get("wifi") + "|" + Transfer.get(a).running() + "|" + AdbWifi.on() + "|" + BlocksHome.storageUsed();
+        case BlocksHome.S_STORAGE: return em + cfg + "|" + st.get("wifi") + "|" + st.get("lanip") + "|" + st.get("ip") + "|" + Transfer.get(a).running() + "|" + AdbWifi.on() + "|" + BlocksHome.storageUsed();
         case BlocksHome.S_CARDS: return em + prefs.getString(BlocksCards.KEY, BlocksCards.DEFAULT) + prefs.getString("blk_quick", "") + prefs.getString("wx_city", "") + prefs.getString("blk_readers", "") + a.appsVersion();
         default: return em;
         }
@@ -152,15 +157,18 @@ final class BlocksSettings {
         final Map<String, String> st = HostLink.kv(HostLink.CTL + "status");
         final Map<String, String> cfg = HostLink.kv(HostLink.KFB + "settings");
         int max = HostLink.num(st, "lightmax", 24);
+        int segs = Math.max(1, Math.min(24, max));
         if (HostLink.num(st, "haslight", 1) == 1) {
             LinearLayout g = group(c, "屏幕光");
-            Blocks.BlockBar cool = new Blocks.BlockBar(a, 12);
+            Blocks.BlockBar cool = new Blocks.BlockBar(a, segs);
+            cool.showValue();
             cool.setMax(max);
             cool.setValue(HostLink.num(st, "light", 0));
             cool.setListener(new Blocks.BlockBar.Listener() { @Override public void onCommit(int v) { HostLink.cmd("light " + v); } });
             add(g, wideRow("亮度", "Front light", cool));
             if (HostLink.num(st, "haswarmth", 0) == 1) {
-                Blocks.BlockBar warm = new Blocks.BlockBar(a, 12);
+                Blocks.BlockBar warm = new Blocks.BlockBar(a, segs);
+                warm.showValue();
                 warm.setMax(max);
                 warm.setValue(HostLink.num(st, "warmth", 0));
                 warm.setListener(new Blocks.BlockBar.Listener() { @Override public void onCommit(int v) { HostLink.cmd("warmth " + v); } });
@@ -170,6 +178,11 @@ final class BlocksSettings {
         final boolean expert = UiMode.isExpert(a);
         LinearLayout g = group(c, expert ? "刷新与画质" : "一键阅读场景");
         int sm = Math.max(0, Math.min(4, HostLink.num(cfg, "KFB_SMOOTH", 2)));
+        if (pendingSmooth >= 0) {
+            if (sm == pendingSmooth || android.os.SystemClock.uptimeMillis() - pendingSmoothAt > 3000L) pendingSmooth = -1;
+            else sm = pendingSmooth;
+        }
+        final int curSm = sm;
         LinearLayout smRow = new LinearLayout(a);
         smRow.setOrientation(LinearLayout.VERTICAL);
         smRow.setPadding(dp(12), dp(8), dp(10), dp(10));
@@ -196,10 +209,18 @@ final class BlocksSettings {
             smHint.setPadding(0, dp(2), 0, dp(6));
             smRow.addView(smHint);
             smRow.addView(new Blocks.SegBar(a, SMOOTH_L, sm, new Blocks.SegBar.Listener() {
-                @Override public void onPick(int i) {
+                @Override public void onPick(final int i) {
+                    boolean wasCustom = (curSm == 0);
+                    pendingSmooth = i;
+                    pendingSmoothAt = android.os.SystemClock.uptimeMillis();
                     host("KFB_SMOOTH=" + i);
                     UiMode.guide(a, UiMode.smoothEffect(i));
-                    h.show(BlocksHome.S_DISPLAY);
+                    // 切入或切出“自定义”时绕过旧缓存签名立刻重搭，使下方 5 个自定义刷新细项立即展开/收起
+                    if (wasCustom != (i == 0)) {
+                        h.invalidate(BlocksHome.S_DISPLAY);
+                        h.show(BlocksHome.S_DISPLAY);
+                        a.changed();
+                    }
                 }
             }), Blocks.match());
             add(g, smRow);
@@ -218,6 +239,12 @@ final class BlocksSettings {
             add(g, Blocks.row(a, "全刷周期", "每翻几页全屏闪刷彻底清残影", new Blocks.Stepper(a, FLASH_L, idx(FLASH_V, cfg.get("KFB_FLASH"), 4), new Blocks.Stepper.Listener() {
                 @Override public void onStep(int i) { host("KFB_FLASH=" + FLASH_V[i]); UiMode.guide(a, UiMode.keyEffect("KFB_FLASH", FLASH_V[i], FLASH_L[i])); } })));
         }
+        if (HostLink.num(st, "hascolor", 0) == 1) {
+            final String[] colorL = { "黑白", "标准彩色", "鲜艳彩色" };
+            final String[] colorV = { "0", "1", "2" };
+            add(g, Blocks.row(a, "彩色显示", "Kaleido 3 原生 4096 色（纯看文字可切黑白提速）", new Blocks.Stepper(a, colorL, idx(colorV, cfg.get("KFB_COLOR"), 1), new Blocks.Stepper.Listener() {
+                @Override public void onStep(int i) { host("KFB_COLOR=" + colorV[i]); UiMode.guide(a, UiMode.keyEffect("KFB_COLOR", colorV[i], colorL[i])); } })));
+        }
         add(g, Blocks.row(a, "对比度", "让浅字更黑", new Blocks.Stepper(a, CONTRAST_L, idx(CONTRAST_V, cfg.get("KFB_CONTRAST"), 1), new Blocks.Stepper.Listener() {
             @Override public void onStep(int i) { host("KFB_CONTRAST=" + CONTRAST_V[i]); UiMode.guide(a, UiMode.keyEffect("KFB_CONTRAST", CONTRAST_V[i], CONTRAST_L[i])); } })));
         add(g, Blocks.row(a, "浅色过滤", "把浅灰底漂白", new Blocks.Stepper(a, Panel.LIGHTF_L, idx(Panel.LIGHTF_V, cfg.get("KFB_LIGHTF"), 0), new Blocks.Stepper.Listener() {
@@ -228,10 +255,10 @@ final class BlocksSettings {
             @Override public void onToggle(boolean on) { host("KFB_INVERT=" + (on ? 1 : 0)); UiMode.guide(a, UiMode.keyEffect("KFB_INVERT", on ? "1" : "0", on ? "开" : "关")); } })));
         add(g, Blocks.row(a, "立即整屏去残影", "全屏黑白闪刷一次彻底干净", Blocks.button(a, "去残影", false, new View.OnClickListener() {
             @Override public void onClick(View v) { HostLink.cmd("clear"); UiMode.guide(a, "已执行整屏刷新，残影已清除"); } })));
-        if (expert) {
+        if (expert && !"0".equals(HostLink.status(a).get("hasanim"))) {
             int am = HostLink.num(cfg, "KFB_ANIM_MODE", 1);
             final int[] animLast = { am > 0 ? am : 1 };
-            add(g, Blocks.row(a, "翻页动画", "阅读翻页滑动动画", toggle(am > 0, new Icons.Toggle.Listener() {
+            add(g, Blocks.row(a, "翻页动画", "阅读翻页滑动动画（仅 MTK 新机型硬件支持）", toggle(am > 0, new Icons.Toggle.Listener() {
                 @Override public void onToggle(boolean on) { host("KFB_ANIM_MODE=" + (on ? animLast[0] : 0)); UiMode.guide(a, UiMode.keyEffect("KFB_ANIM_MODE", on ? "1" : "0", on ? "开" : "关")); } })));
         }
         LinearLayout fg = group(c, "字体与单应用优化");
@@ -244,8 +271,64 @@ final class BlocksSettings {
             @Override public void onClick(View v) { appDisplayPicker(); } }));
         if (expert) {
             LinearLayout hw = group(c, "屏幕方向与硬件");
-            add(hw, Blocks.row(a, "屏幕旋转", "横屏 (90°/270°) 会自动重启安卓", new Blocks.Stepper(a, ROTATE_L, idx(ROTATE_V, cfg.get("KFB_ROTATE"), 0), new Blocks.Stepper.Listener() {
-                @Override public void onStep(int i) { host("KFB_ROTATE=" + ROTATE_V[i]); UiMode.guide(a, UiMode.keyEffect("KFB_ROTATE", ROTATE_V[i], ROTATE_L[i])); } })));
+            final int[] curRot = { idx(ROTATE_V, cfg.get("KFB_ROTATE"), 0) };
+            final Blocks.Stepper[] rotStep = new Blocks.Stepper[1];
+            rotStep[0] = new Blocks.Stepper(a, ROTATE_L, curRot[0], new Blocks.Stepper.Listener() {
+                @Override public void onStep(final int i) {
+                    int curDeg = Integer.parseInt(ROTATE_V[curRot[0]]);
+                    int newDeg = Integer.parseInt(ROTATE_V[i]);
+                    if (newDeg % 180 != curDeg % 180) {
+                        android.app.Dialog dlg = new VeraDialog.Builder(a)
+                            .title("切换屏幕方向")
+                            .message("切换为「" + ROTATE_L[i] + "」将重启 Android，后台未保存的内容会丢失。确定继续吗？")
+                            .negative("取消", new Runnable() { @Override public void run() { rotStep[0].set(curRot[0]); } })
+                            .positive("确认切换", new Runnable() { @Override public void run() {
+                                curRot[0] = i;
+                                host("KFB_ROTATE=" + ROTATE_V[i]);
+                                UiMode.guide(a, UiMode.keyEffect("KFB_ROTATE", ROTATE_V[i], ROTATE_L[i]));
+                            } }).show();
+                        dlg.setOnCancelListener(new android.content.DialogInterface.OnCancelListener() {
+                            @Override public void onCancel(android.content.DialogInterface d) { rotStep[0].set(curRot[0]); }
+                        });
+                    } else {
+                        curRot[0] = i;
+                        host("KFB_ROTATE=" + ROTATE_V[i]);
+                        UiMode.guide(a, UiMode.keyEffect("KFB_ROTATE", ROTATE_V[i], ROTATE_L[i]));
+                    }
+                }
+            }).wrap();
+            rotStep[0].onValueTap(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    new VeraDialog.Builder(a).title("屏幕旋转").items(ROTATE_L, new VeraDialog.OnPick() {
+                        @Override public void onPick(int which) {
+                            if (which == curRot[0]) return;
+                            rotStep[0].set(which);
+                            int curDeg = Integer.parseInt(ROTATE_V[curRot[0]]);
+                            int newDeg = Integer.parseInt(ROTATE_V[which]);
+                            if (newDeg % 180 != curDeg % 180) {
+                                final int target = which;
+                                android.app.Dialog dlg = new VeraDialog.Builder(a)
+                                    .title("切换屏幕方向")
+                                    .message("切换为「" + ROTATE_L[target] + "」将重启 Android，后台未保存的内容会丢失。确定继续吗？")
+                                    .negative("取消", new Runnable() { @Override public void run() { rotStep[0].set(curRot[0]); } })
+                                    .positive("确认切换", new Runnable() { @Override public void run() {
+                                        curRot[0] = target;
+                                        host("KFB_ROTATE=" + ROTATE_V[target]);
+                                        UiMode.guide(a, UiMode.keyEffect("KFB_ROTATE", ROTATE_V[target], ROTATE_L[target]));
+                                    } }).show();
+                                dlg.setOnCancelListener(new android.content.DialogInterface.OnCancelListener() {
+                                    @Override public void onCancel(android.content.DialogInterface d) { rotStep[0].set(curRot[0]); }
+                                });
+                            } else {
+                                curRot[0] = which;
+                                host("KFB_ROTATE=" + ROTATE_V[which]);
+                                UiMode.guide(a, UiMode.keyEffect("KFB_ROTATE", ROTATE_V[which], ROTATE_L[which]));
+                            }
+                        }
+                    }).selected(curRot[0]).negative("取消", null).show();
+                }
+            });
+            add(hw, Blocks.row(a, "屏幕旋转", "横竖互换会弹窗确认后重启安卓（点中间值可直选）", rotStep[0]));
             add(hw, Blocks.row(a, "界面刷新节奏", "30 Hz 省电，60 Hz 更跟手（重启生效）", new Blocks.Stepper(a, HZ_L, idx(HZ_V, cfg.get("KFB_HZ"), 0), new Blocks.Stepper.Listener() {
                 @Override public void onStep(int i) { host("KFB_HZ=" + HZ_V[i]); UiMode.guide(a, UiMode.keyEffect("KFB_HZ", HZ_V[i], HZ_L[i])); } })));
             if ("1".equals(cfg.get("WEBVIEW_ALT_OK"))) {
@@ -293,8 +376,12 @@ final class BlocksSettings {
         View s3 = new View(a); tools.addView(s3, Blocks.lp(dp(8), 1));
         final TextView clean = Blocks.button(a, "清理后台", false, null);
         clean.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (!clean.isEnabled()) return;
+            clean.setEnabled(false);
             clean.setText("清理中…");
             Cleaner.run(a, null, new Cleaner.Done() { @Override public void done(int stopped, long freedMb) {
+                if (a.isFinishing()) return;
+                clean.setEnabled(true);
                 String msg = stopped == 0 ? "没有后台应用" : "已清理 " + stopped + " 个 · 约 " + freedMb + " MB";
                 clean.setText(msg);
                 UiMode.guide(a, stopped == 0 ? "当前没有多余后台应用" : "已释放 " + freedMb + " MB 内存，系统更流畅");
@@ -330,7 +417,7 @@ final class BlocksSettings {
             c.addView(new TaskCards.Update(a, false), Blocks.gap(a, 10));
             add(op, Blocks.navRow(a, "检查系统更新", "有新版本优先下载增量补丁", new View.OnClickListener() {
                 @Override public void onClick(View v) { a.fullUpdateDialog(); } }));
-            add(op, Blocks.navRow(a, "阅读统计", "查看电量与阅读时长（仅存本机）", new View.OnClickListener() {
+            add(op, Blocks.navRow(a, "阅读统计", "查看电量、阅读时长与多设备同步", new View.OnClickListener() {
                 @Override public void onClick(View v) { a.startActivity(new Intent(a, StatsActivity.class)); a.overridePendingTransition(0, 0); } }));
             add(op, Blocks.navRow(a, "问题反馈", "遇到卡顿或报错可一键附日志反馈", new View.OnClickListener() {
                 @Override public void onClick(View v) { a.feedbackDialog(); } }));
@@ -376,7 +463,10 @@ final class BlocksSettings {
         if (BluetoothActivity.supported()) add(n, Blocks.navRow(a, "蓝牙翻页器", "扫描、配对、连接蓝牙翻页器", new View.OnClickListener() {
             @Override public void onClick(View v) { BluetoothActivity.open(a); } }));
         if (expert) {
-            add(n, Blocks.row(a, "DNS 解析", "国内推荐自动或阿里 223", new Blocks.Stepper(a, DNS_L, idx(DNS_V, cfg.get("DNS_MODE"), 0), new Blocks.Stepper.Listener() {
+            String curDns = cfg.get("DNS_MODE");
+            if ("ali".equals(curDns)) curDns = "aliyun";
+            else if ("dnspod".equals(curDns)) curDns = "tencent";
+            add(n, Blocks.row(a, "DNS 解析", "国内推荐自动或阿里 223", new Blocks.Stepper(a, DNS_L, idx(DNS_V, curDns, 0), new Blocks.Stepper.Listener() {
                 @Override public void onStep(int i) {
                     host("DNS_MODE=" + DNS_V[i]);
                     UiMode.guide(a, "DNS 已设为「" + DNS_L[i] + "」并立即生效");
@@ -399,6 +489,7 @@ final class BlocksSettings {
                 a.handler().postDelayed(new Runnable() { @Override public void run() { if (h.current() == BlocksHome.S_STORAGE) { h.show(BlocksHome.S_STORAGE); a.changed(); } } }, 900);
             } })));
         String ip = st.get("lanip");
+        if (ip == null || ip.length() == 0) ip = st.get("ip");
         TextView addr = Ui.text(a, t.running() ? (ip == null || ip.length() == 0 ? "正在获取地址…" : "http://" + ip + ":" + t.port()) + "\nPIN  " + t.pin()
             : "打开后，手机和 Kindle 连同一个 Wi-Fi，在浏览器里输入这里显示的地址和 PIN。", t.running() ? 20 : 13, t.running());
         addr.setPadding(dp(12), dp(8), dp(12), dp(10));
@@ -515,7 +606,7 @@ final class BlocksSettings {
         String[][] rows = {
             { "系统与性能", "Wi-Fi 省电 · 低内存策略 · Kindle 界面 · 应用预编译" },
             { "检查系统更新", "有新版本优先下载增量补丁" },
-            { "阅读统计", "电量和阅读时长（仅存本机）" },
+            { "阅读统计", "电量、阅读时长与多设备同步" },
             { "问题反馈", "连同系统日志一起上传" },
             { "备份、日志与恢复/卸载", "绑定账号 · 导出日志 · 恢复默认 · 卸载 VeraDroid" } };
         for (int i = 0; i < rows.length; i++) {
@@ -577,8 +668,8 @@ final class BlocksSettings {
             @Override public void onClick(View v) { BlocksCards.pickWidget(a, new Runnable() { @Override public void run() { refresh(); } }); } }));
         add(more, Blocks.navRow(a, "继续阅读认哪些应用", "已认 " + installedReaders() + " 个已安装的阅读应用（浏览器默认不算）", new View.OnClickListener() {
             @Override public void onClick(View v) { readersDialog(); } }));
-        String q = prefs.getString("blk_quick", "");
-        add(more, Blocks.navRow(a, "快捷应用", q.length() == 0 ? "还没挑" : "已挑 " + q.split(",").length + " 个", new View.OnClickListener() {
+        List<String> q = installedQuick();
+        add(more, Blocks.navRow(a, "快捷应用", q.isEmpty() ? "还没挑" : "已挑 " + q.size() + " 个", new View.OnClickListener() {
             @Override public void onClick(View v) { quickApps(); } }));
         String city = prefs.getString("wx_city", "");
         add(more, Blocks.navRow(a, "天气城市", city.length() == 0 ? "还没设" : city, new View.OnClickListener() {
@@ -661,12 +752,24 @@ final class BlocksSettings {
             .positive("保存", new Runnable() { @Override public void run() { prefs.edit().putString("blk_readers", android.text.TextUtils.join(",", chosen)).apply(); refresh(); } }).show();
     }
 
+    private List<String> installedQuick() {
+        String raw = prefs.getString("blk_quick", "");
+        List<String> valid = new ArrayList<String>();
+        boolean dirty = false;
+        for (String s : raw.split(",")) {
+            if (s.length() == 0) continue;
+            if (a.findApp(s) != null && !valid.contains(s)) valid.add(s);
+            else dirty = true;
+        }
+        if (dirty) prefs.edit().putString("blk_quick", android.text.TextUtils.join(",", valid)).apply();
+        return valid;
+    }
+
     /** 快捷应用：点一下加入（按点的先后排），再点一下拿掉；最多 5 个。 */
     private void quickApps() {
         final List<ResolveInfo> apps = a.appList();
         if (apps.isEmpty()) { VeraToast.show(a, "还没有安装应用"); return; }
-        final List<String> chosen = new ArrayList<String>();
-        for (String s : prefs.getString("blk_quick", "").split(",")) if (s.length() > 0) chosen.add(s);
+        final List<String> chosen = installedQuick();
         final LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
         final TextView[] rows = new TextView[apps.size()];

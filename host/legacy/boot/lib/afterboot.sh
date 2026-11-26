@@ -163,6 +163,8 @@ boot_data_check() {
     fi
     return 0
 }
+# stop.sh 正在跑（它把自己的 pid 写在 /tmp/veradroid-stop.pid）：after_boot 不再往后台分新的子 shell
+ab_stopping() { ab_sp=$(cat /tmp/veradroid-stop.pid 2>/dev/null); [ -n "$ab_sp" ] && kill -0 "$ab_sp" 2>/dev/null; }
 after_boot() {
     # Re-assert binder before waiting — covers init races that hide the node.
     binder_repair 2>/dev/null || true
@@ -216,15 +218,16 @@ after_boot() {
         adb_sh 'settings put global device_provisioned 1; settings put secure user_setup_complete 1' >/dev/null 2>&1
         # 用不到的后台服务：通知排序助手常驻约 37 MB；并关闭云备份与后台扫描省电（参考文石 Go 6 Gen 2）
         adb_sh 'pm disable-user --user 0 android.ext.services; settings put secure backup_enabled 0; settings put global wifi_scan_always_enabled 0' >/dev/null 2>&1
-        slim_after_boot
         if lowmem; then
             set -- $(heap_values); hg=$1; hs=$2   # 和 heap_fix 一致（memory.sh）
             adb_sh 'for p in com.android.printspooler com.android.managedprovisioning com.android.companiondevicesupport com.android.bookmarkprovider com.android.providers.calendar com.android.calendar com.android.sharedstoragebackup com.android.camera2 com.android.gallery3d; do pm disable-user --user 0 $p >/dev/null 2>&1; done; settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0; settings put global wifi_scan_always_enabled 0; setprop dalvik.vm.heapgrowthlimit '"$hg"'; setprop dalvik.vm.heapsize '"$hs" >/dev/null 2>&1 || true
             t "low-ram: disabled extra pkgs + zero anim"
         fi
     fi
+    slim_after_boot
     unknown_sources_allow
     lmk_tune          # 运行时参数，不持久：每次开机都要做
+    type boot_block_apply >/dev/null 2>&1 && ! ab_stopping && ( boot_block_apply ) &      # 第三方应用的开机自启（memkeep.sh，BOOT_BLOCK）
     proc_limit_apply  # 机型文件的 PROC_LIMIT（memory.sh）：同样不持久
     trust_unlock      # 剪贴板可读（见 trust_unlock）
     # 默认桌面固定为 VeraHome（装了自带“桌面”入口的应用后，系统会让用户重新选）。cmd 走 binder，不起 JVM，约 0.1 秒。
@@ -258,6 +261,7 @@ RDME
     # /sdcard/VeraDroid（壁纸图库、自定义图标）也是 VeraHome 建的 0700 目录，同样要跟着换属主：rc089 矩阵 kt6-5192 上重装后
     # VeraHome 从 10006 变成 10001，这个目录还属于 10006，网页传壁纸报“空间不够：剩余 0 MB”、VeraDroid/icons 里的图标不生效。
     case "$hu" in ''|*[!0-9]*) ;; *) for hd in .vdhome VeraDroid; do [ -d $SYS/data/media/0/$hd ] && chown -R "$hu" $SYS/data/media/0/$hd 2>/dev/null; done ;; esac
+    type kfb_home_chown >/dev/null 2>&1 && kfb_home_chown
     # WeRead and other readers keep downloads under /sdcard/Android/data and
     # /sdcard/WeRead.  The parents are often 0770 root:root after a clean
     # install, so the app's DownloadService never finishes.
@@ -266,6 +270,8 @@ RDME
     chmod 777 $SYS/data/media/0/Android $SYS/data/media/0/Android/data \
               $SYS/data/media/0/Android/obb $SYS/data/media/0/WeRead \
               $SYS/data/media/0/Download 2>/dev/null
+    # 内部存储/Screensaver：屏保图片放这里（saver.sh）
+    type saver_dir_fix >/dev/null 2>&1 && saver_dir_fix
     # Books pushed by the host are root:root 0600; KOReader runs as an app uid
     # and cannot read them. Make the book directory readable on every boot.
     mkdir -p $SYS/data/media/0/Books 2>/dev/null
@@ -368,29 +374,46 @@ RDME
         fi
         rm -f $SYS/data/local/tmp/vdinst.apk
     done
-    # 输入法：VeraIME 装好后设为默认（它是数据应用，重装/升级后 secure setting 不会被自动改回来）
+    # 输入法：VeraIME 装好后确保在已启用列表中；仅当默认输入法为空或所属包已卸载时才设为默认，保留用户第三方输入法
     if [ -n "$AB_ONCE" ] && pkg_installed com.veradroid.ime; then
-        adb_sh 'settings put secure enabled_input_methods com.veradroid.ime/.VeraImeService' >/dev/null 2>&1
-        adb_sh 'settings put secure default_input_method com.veradroid.ime/.VeraImeService' >/dev/null 2>&1
-        t "after_boot: VeraIME enabled"
+        ime='com.veradroid.ime/.VeraImeService'
+        cur_en=$(adb_sh 'settings get secure enabled_input_methods' 2>/dev/null | tr -d "\r\n'\"\\\`\$")
+        case "$cur_en" in
+            ''|null) adb_sh "settings put secure enabled_input_methods '$ime'" >/dev/null 2>&1 ;;
+            *"$ime"*) ;;
+            *) adb_sh "settings put secure enabled_input_methods '${cur_en}:${ime}'" >/dev/null 2>&1 ;;
+        esac
+        cur_def=$(adb_sh 'settings get secure default_input_method' 2>/dev/null | tr -d '\r\n')
+        def_pkg=${cur_def%%/*}
+        if [ -z "$cur_def" ] || [ "$cur_def" = null ] || [ -z "$def_pkg" ] || ! pkg_installed "$def_pkg"; then
+            adb_sh "settings put secure default_input_method '$ime'" >/dev/null 2>&1
+            t "after_boot: VeraIME enabled (default)"
+        else
+            t "after_boot: VeraIME enabled (kept default $cur_def)"
+        fi
     fi
     [ -n "$AB_ONCE" ] && [ -n "$ABV" ] && echo "$ABV" > $ABM
-    ( sleep 90; home_aot ) </dev/null >>$LOG 2>&1 &
+    ab_stopping || ( sleep 90 </dev/null >/dev/null 2>&1; ab_stopping && exit 0; [ -s $W/pid ] || exit 0
+                     { [ ! -f "$SYSTEM_IMG" ] || grep -q " $SYS " /proc/mounts; } || exit 0
+                     exec >>$LOG 2>&1; home_aot ) </dev/null >/dev/null 2>&1 &
     # 可选 DNS：settings.conf 里的 DNS_MODE 在开机后重新应用到 netd（DHCP 会把它改回自动）
     dns_apply
     # 12 / 24 小时制跟 Kindle（tz.sh；值没变就不写）
     type time_format_apply >/dev/null 2>&1 && time_format_apply
     type tz_sync_live >/dev/null 2>&1 && tz_sync_live       # 开机前按偏移猜的时区，后台已经查到准确名字时换掉
+    type boot_block_apply >/dev/null 2>&1 && ! ab_stopping && ( boot_block_apply ) </dev/null >>$LOG 2>&1 &
+    type appslim_all >/dev/null 2>&1 && ! ab_stopping && ( appslim_all boot ) </dev/null >>$LOG 2>&1 &
 }
 
 # 小内存机型（< 700 MB：PW5 / KT5 / KT6 / 老机型）：ActivityManager 按“内存 + 屏幕尺寸”给 lmkd 选杀进程的门槛，
 # Kindle 的大屏让它选了大屏手机那一档：文件缓存低于 72 MB 就连前台应用也杀。512 MB 的 Kindle 上微信读书（墨水屏版）
 # 每 12 秒被杀一次、无限重启（KT5 模拟器实测）。开机后用 vdlmk 把门槛降下来（单位：页 = 4 KB）：
-# 前台 8 MB、可见 12 MB、可感知 16 MB、备份 20 MB、缓存 24–32 MB。957 MB 的 PW6 不改。
+# 前台 8 MB、可见 12 MB、可感知 16 MB、备份 20 MB、缓存 24–32 MB。1 GB 机型的门槛见 memkeep.sh（LMK_MINFREE）。
 lmk_tune() {
+    lmk_kernel_tune 2>/dev/null || true
+    if type lmk_send >/dev/null 2>&1; then lmk_send; return 0; fi
     mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
     [ -n "$mt" ] && [ "$mt" -lt 700000 ] || return 0
-    lmk_kernel_tune 2>/dev/null || true
     [ -x "$VD/bin/vdlmk" ] || { t "lmk: vdlmk missing"; return 0; }
     s=/proc/$P/root/dev/socket/lmkd
     i=0; while [ ! -S "$s" ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done

@@ -119,7 +119,9 @@ final class CandidateBar extends View {
         }
     }
 
-    private int hit(float x) {
+    private int hit(float x, float y) {
+        float slop = dp(12);
+        if (y < -slop || y > getHeight() + slop) return NONE;
         if (x < arrowW()) return hasPrev ? PREV : NONE;
         if (x > getWidth() - arrowW()) return hasNext ? NEXT : NONE;
         for (int k = 0; k < rects.size(); k++) {
@@ -132,14 +134,20 @@ final class CandidateBar extends View {
     @Override public boolean onTouchEvent(MotionEvent e) {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                pressed = hit(e.getX());
+                pressed = hit(e.getX(), e.getY());
                 if (pressed != NONE) invalidate();
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                if (pressed != NONE && hit(e.getX(), e.getY()) != pressed) {
+                    pressed = NONE;
+                    invalidate();
+                }
                 return true;
             case MotionEvent.ACTION_UP: {
                 int p = pressed;
                 pressed = NONE;
                 if (p == NONE) return true;
-                if (p != hit(e.getX())) { invalidate(); return true; }
+                if (p != hit(e.getX(), e.getY())) { invalidate(); return true; }
                 if (p == PREV) { page--; layoutPage(); invalidate(); }
                 else if (p == NEXT) {
                     if (pageStarts.size() <= page + 1) pageStarts.add(first + items.size());

@@ -62,11 +62,14 @@ final class Cleaner {
     }
 
     static boolean keepAlive(Context c, String pkg) {
-        try { return Store.prefs(c, "home").getBoolean("bgkeep_" + pkg, false); } catch (Throwable t) { return false; }
+        boolean local = false;
+        try { local = Store.prefs(c, "home").getBoolean("bgkeep_" + pkg, false); } catch (Throwable ignored) { }
+        return local || Boolean.TRUE.equals(AppProf.keepAliveOverride(pkg));
     }
 
     static void setKeepAlive(Context c, String pkg, boolean on) {
-        Store.prefs(c, "home").edit().putBoolean("bgkeep_" + pkg, on).apply();
+        try { Store.prefs(c, "home").edit().putBoolean("bgkeep_" + pkg, on).apply(); } catch (Throwable ignored) { }
+        AppProf.setKeepAlive(pkg, on);
     }
 
     /** 用户自己装的应用（不是系统应用、不是我们自己的）。 */
@@ -211,6 +214,18 @@ final class Cleaner {
         return out;
     }
 
+    /** 当前正在运行前台服务的应用包名集合（听书、音乐、朗读、下载等）。 */
+    static Set<String> foregroundServicePackages(Context c) {
+        Set<String> out = new HashSet<String>();
+        try {
+            ActivityManager am = (ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+            List<ActivityManager.RunningServiceInfo> svcs = am.getRunningServices(200);
+            if (svcs != null) for (ActivityManager.RunningServiceInfo si : svcs)
+                if (si.foreground && si.service != null) out.add(si.service.getPackageName());
+        } catch (Throwable ignored) { }
+        return out;
+    }
+
     static Set<String> runningPackages(Context c) {
         Set<String> out = new HashSet<String>();
         try {
@@ -252,16 +267,22 @@ final class Cleaner {
         } catch (Throwable t) { Log.w(TAG, "bgclean killUid " + pkg + ": " + t); }
     }
 
-    /** /proc/meminfo 的 MemAvailable（MB）。 */
+    /** /proc/meminfo 的可用内存（MB）；3.0 老内核没有 MemAvailable 时回退 MemFree + Buffers + Cached。 */
     static long memAvailableMb() {
+        long avail = -1, free = 0, buffers = 0, cached = 0;
         try {
             BufferedReader r = new BufferedReader(new FileReader("/proc/meminfo"));
             try {
                 String l;
-                while ((l = r.readLine()) != null) if (l.startsWith("MemAvailable:")) return Long.parseLong(l.replaceAll("[^0-9]", "")) / 1024;
+                while ((l = r.readLine()) != null) {
+                    if (l.startsWith("MemAvailable:")) { avail = Long.parseLong(l.replaceAll("[^0-9]", "")) / 1024; break; }
+                    else if (l.startsWith("MemFree:")) free = Long.parseLong(l.replaceAll("[^0-9]", ""));
+                    else if (l.startsWith("Buffers:")) buffers = Long.parseLong(l.replaceAll("[^0-9]", ""));
+                    else if (l.startsWith("Cached:")) cached = Long.parseLong(l.replaceAll("[^0-9]", ""));
+                }
             } finally { r.close(); }
         } catch (Throwable ignored) { }
-        return 0;
+        return avail >= 0 ? avail : (free + buffers + cached) / 1024;
     }
 
     /** The app the user was in before opening the panel (the task under the panel). */

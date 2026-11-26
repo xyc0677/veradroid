@@ -16,7 +16,7 @@
 # SLIM 不是显示参数：后台瘦身（appslim.sh，停用 / 恢复应用的后台组件），不发给显示桥
 # KEEPALIVE / BGSTOP 不是显示参数：保持后台 / 离开后几分钟自动停止（memkeep.sh 读合并表 $X/appprof），不发给显示桥
 # OEC_* 不是显示桥的参数：系统镜像（feat/fw-oec，ro.vd.oec=1）里每个应用进程自己读 $X/appoec（见下面 appprof_oec_publish）
-APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^SLIM=[01]$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
+APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|SCROLLWFM|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN|COLOR)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^SLIM=[01]$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
 
 appprof_valid_pkg() { case "$1" in ''|*[!A-Za-z0-9._]*) return 1 ;; esac; [ ${#1} -le 200 ]; }
 
@@ -121,8 +121,9 @@ NEWWIN"
 appprof_send() {
     settings_load 2>/dev/null || true
     [ -p $X/epd.fifo ] && alive $W/epd.pid || return 0
-    ap_msg=$({ echo "SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}"
-      echo "ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN"
+    ap_msg=$({ echo "ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN"
+      echo "SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}"
+      echo "COLOR ${KFB_COLOR:-1}"
       echo "HOLD ${KFB_HOLD:-70}"
       # 桌面在前台时不数页（桌面换页、切标签不是读书翻页，用不着按页数全刷）
       [ -n "$ap_pkg" ] && { [ "$ap_pkg" = home ] && echo "FLIPCOUNT 0" || echo "FLIPCOUNT 1"; }
@@ -132,7 +133,9 @@ appprof_send() {
       if type epd_send_smooth >/dev/null 2>&1; then
           echo "PACE ${KFB_PACE:-0}"; echo "CLEAN ${KFB_CLEAN:-0}"; echo "REAGL ${KFB_REAGL_MIN:-35}"
           echo "SETTLE2 ${KFB_SETTLE2:-40}"; echo "SCROLLDU ${KFB_SCROLLDU:-0}"; echo "IMG ${KFB_IMG:-0}"
-          echo "SCROLLDELAY ${KFB_SCROLLDELAY:-500}"; echo "SCROLLSTYLE ${KFB_SCROLLSTYLE:-1}"; echo "GCN ${KFB_GCN:-0}"; echo "MONO ${KFB_MONO:-0}"; echo "MAXDEFER ${KFB_MAXDEFER:-1200}"; echo "FLIPINPUT ${KFB_FLIPINPUT:-1000}"; echo "TURNHOLD ${KFB_TURNHOLD:-0}"
+          echo "SCROLLDELAY ${KFB_SCROLLDELAY:-500}"; echo "SCROLLSTYLE ${KFB_SCROLLSTYLE:-1}"; echo "SCROLLWFM ${KFB_SCROLLWFM:-0}"; echo "GCN ${KFB_GCN:-0}"; echo "MONO ${KFB_MONO:-0}"; echo "MAXDEFER ${KFB_MAXDEFER:-1200}"; echo "FLIPINPUT ${KFB_FLIPINPUT:-1000}"; echo "TURNHOLD ${KFB_TURNHOLD:-0}"
+      elif type epd_scroll_lines >/dev/null 2>&1; then
+          epd_scroll_lines
       fi; })
     # 显示桥在上面的检查和这次写之间退出时，打开 FIFO 写会一直等读者：和 epd_send 一样限 3 秒（vd_timeout，common.sh），
     # 不让命令监听（fg / appset）卡死。没有 vd_timeout 的老宿主照旧直接写。
@@ -146,29 +149,44 @@ appprof_slimval() { awk -v p="$1" '$1 == p { print $3 }' $X/appprof 2>/dev/null 
 appprof_set() {
     ap_p=${1%%|*}; ap_s=${1#*|}; [ "$ap_s" = "$1" ] && ap_s=
     touch $SYS/settings.apps
-    if [ "$ap_p" = '*' ]; then : > $SYS/settings.apps.tmp
+    _ap=$$; [ -r /proc/self/stat ] && read -r _ap _ < /proc/self/stat 2>/dev/null || true
+    if [ "$ap_p" = '*' ]; then : > "$SYS/settings.apps.tmp.$_ap"
     else
         appprof_valid_pkg "$ap_p" || return 0
-        awk -v p="$ap_p" '$1 != p' $SYS/settings.apps > $SYS/settings.apps.tmp 2>/dev/null
-        if [ "$ap_s" = - ]; then echo "$ap_p -" >> $SYS/settings.apps.tmp
+        awk -v p="$ap_p" '$1 != p' $SYS/settings.apps > "$SYS/settings.apps.tmp.$_ap" 2>/dev/null
+        if [ "$ap_s" = - ]; then echo "$ap_p -" >> "$SYS/settings.apps.tmp.$_ap"
         elif [ -n "$ap_s" ]; then
             ap_c=$(appprof_lines "$ap_s" | tr '\n' ';'); ap_c=${ap_c%;}
-            echo "$ap_p ${ap_c:--}" >> $SYS/settings.apps.tmp
+            echo "$ap_p ${ap_c:--}" >> "$SYS/settings.apps.tmp.$_ap"
         fi
     fi
-    mv -f $SYS/settings.apps.tmp $SYS/settings.apps
+    mv -f "$SYS/settings.apps.tmp.$_ap" $SYS/settings.apps
     ap_dpi0=$(appprof_oec_dpi "$ap_p")
+    ap_dpi_all0=; [ "$ap_p" = '*' ] && appprof_oec && ap_dpi_all0=$(appprof_oec_dpi_all)
     ap_slim0=; [ "$ap_p" != '*' ] && ap_slim0=$(appprof_slimval "$ap_p")
     appprof_publish
     # 后台瘦身的选择变了（appslim.sh）：后台按新的选择停用 / 恢复这个应用的组件（"*" = 全部清掉：清单里的应用都按默认再做一遍）
     if type appslim_apply >/dev/null 2>&1; then
-        if [ "$ap_p" = '*' ]; then ( appslim_all appset ) &
-        elif [ "$ap_slim0" != "$(appprof_slimval "$ap_p")" ]; then ( appslim_apply "$ap_p" appset ) &
+        if [ "$ap_p" = '*' ]; then ( appslim_all appset ) </dev/null >>$LOG 2>&1 &
+        elif [ "$ap_slim0" != "$(appprof_slimval "$ap_p")" ]; then ( appslim_apply "$ap_p" appset ) </dev/null >>$LOG 2>&1 &
         fi
     fi
-    # 应用进程只在启动时取密度：这个应用的密度变了，停掉它（下次打开按新的密度；设置页是桌面的，应用这时不在前台）
-    if [ "$ap_p" != '*' ] && appprof_oec && [ "$ap_dpi0" != "$(appprof_oec_dpi "$ap_p")" ] && type adb_sh >/dev/null 2>&1; then
-        adb_sh "am force-stop $ap_p" >/dev/null 2>&1; t "app density changed: $ap_p stopped"
+    # 应用进程只在启动时取密度：密度变了就停掉它（下次打开按新的密度；"*" 全部恢复默认时也对比曾改过 OEC_DPI / DENSITY 的包）
+    if [ "$ap_p" = '*' ] && appprof_oec && type adb_sh >/dev/null 2>&1; then
+        ap_dpi_all1=$(appprof_oec_dpi_all)
+        ap_dpis=$( { printf '%s\n' "$ap_dpi_all0"; printf '%s\n' "$ap_dpi_all1"; } | awk 'NF >= 1 { print $1 }' | sort -u )
+        for ap_dp in $ap_dpis; do
+            appprof_valid_pkg "$ap_dp" || continue
+            ap_d0=$(printf '%s\n' "$ap_dpi_all0" | awk -v p="$ap_dp" '$1 == p { print $2; exit }')
+            ap_d1=$(printf '%s\n' "$ap_dpi_all1" | awk -v p="$ap_dp" '$1 == p { print $2; exit }')
+            if [ "$ap_d0" != "$ap_d1" ]; then
+                if type adb_sh_t >/dev/null 2>&1; then adb_sh_t 15 "am force-stop $ap_dp"; else adb_sh "am force-stop $ap_dp"; fi >/dev/null 2>&1
+                t "app density changed: $ap_dp stopped"
+            fi
+        done
+    elif [ "$ap_p" != '*' ] && appprof_oec && [ "$ap_dpi0" != "$(appprof_oec_dpi "$ap_p")" ] && type adb_sh >/dev/null 2>&1; then
+        if type adb_sh_t >/dev/null 2>&1; then adb_sh_t 15 "am force-stop $ap_p"; else adb_sh "am force-stop $ap_p"; fi >/dev/null 2>&1
+        t "app density changed: $ap_p stopped"
     fi
     # 正在前台的就是它：马上换上（不用等下次切换）
     ap_cur=$(cat $W/appprof.pkg 2>/dev/null); rm -f $W/appprof.pkg
@@ -300,6 +318,7 @@ appprof_oec_density() {
 
 # 合并后的表里这个包的 OEC_DPI / DENSITY（精确的包名行；比较前后用）
 appprof_oec_dpi() { awk -v p="$1" '$1 == p { n = split($2, a, ";"); for (i = 1; i <= n; i++) if (a[i] ~ /^(OEC_DPI|DENSITY)=/) printf "%s;", a[i] }' $X/appoec 2>/dev/null; }
+appprof_oec_dpi_all() { awk '$1 !~ /\*/ { d = ""; n = split($2, a, ";"); for (i = 1; i <= n; i++) if (a[i] ~ /^(OEC_DPI|DENSITY)=/) d = d a[i] ";"; if (d != "") print $1, d }' $X/appoec 2>/dev/null; }
 
 appprof_oec_publish() {
     if ! appprof_oec; then rm -f $X/appoec $X/appknobs.d/oec; appknobs_join; return 0; fi
@@ -308,15 +327,27 @@ appprof_oec_publish() {
       ap_nod=1; appprof_oec_density && ap_nod=0
       [ $# -gt 0 ] && awk -v nod=$ap_nod 'FNR == 1 { src = (FILENAME ~ /settings\.apps$/) ? "u" : "b" }
          /^[ \t]*(#|$)/ { next }
-         { sub(/[ \t]*#.*/, ""); p = $1; if (!(p in seen)) { seen[p] = 1; ord[++n] = p }
-           m = split($2, a, ";")
+         { sub(/[ \t]*#.*/, ""); p = $1; s = $2; if (!(p in seen)) { seen[p] = 1; ord[++n] = p }
+           if (src == "u") {
+               dens = (s != "-" && !nod && ((p, "DENSITY") in has)) ? val[p, "DENSITY"] : ""
+               if (keys[p] != "") {
+                   c = split(substr(keys[p], 2), ks, " ")
+                   for (j = 1; j <= c; j++) { delete val[p, ks[j]]; delete has[p, ks[j]] }
+                   keys[p] = ""
+               }
+               if (dens != "") { val[p, "DENSITY"] = dens; has[p, "DENSITY"] = 1; keys[p] = " DENSITY" }
+               u_set[p] = 1
+               if (s == "-" || s == "") { u_dash[p] = 1; next }
+           }
+           m = split(s, a, ";")
            for (i = 1; i <= m; i++) if (a[i] ~ /^(OEC_[A-Z]+=[0-9]+|DENSITY=[0-9a-z]+)$/) {
                k = a[i]; sub(/=.*/, "", k); v = substr(a[i], length(k) + 2)
                if (k == "DENSITY" && (src == "u" || nod)) continue
                val[p, k] = v; if (!((p, k) in has)) { has[p, k] = 1; keys[p] = keys[p] " " k } } }
-         END { for (i = 1; i <= n; i++) { p = ord[i]; if (keys[p] == "") continue
+         END { for (i = 1; i <= n; i++) { p = ord[i]
+               if (keys[p] == "") { if (u_set[p] || u_dash[p]) print p, "-"; continue }
                c = split(substr(keys[p], 2), ks, " "); out = ""
-               for (j = 1; j <= c; j++) out = out (out == "" ? "" : ";") ks[j] "=" val[p, ks[j]]
+               for (j = 1; j <= c; j++) { sep = (out == "" ? "" : ";"); out = out sep ks[j] "=" val[p, ks[j]] }
                print p, out } }' "$@" 2>/dev/null; } | grep -v '^$' > $X/appoec.tmp
     chmod 644 $X/appoec.tmp 2>/dev/null; mv -f $X/appoec.tmp $X/appoec
     # 自定义 CSS：内置的先放，用户的同名盖掉

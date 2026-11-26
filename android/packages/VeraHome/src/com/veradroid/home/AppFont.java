@@ -20,7 +20,14 @@ final class AppFont {
     static final float[] VALUES = { 0f, 0.85f, 1.0f, 1.4f, 2.0f };
 
     /** 我们自己盖在别的应用上面的页面：它们到前台时不动字号（否则一开面板应用就要重排一次）。 */
-    private static final String[] OVERLAYS = { ".PanelActivity", ".SwitcherActivity", ".WifiActivity", ".BluetoothActivity", ".SettingsActivity", ".HostSettingsActivity", ".AppDisplayActivity" };
+    private static final String[] OVERLAYS = {
+        ".PanelActivity", ".SwitcherActivity", ".WifiActivity", ".BluetoothActivity",
+        ".SettingsActivity", ".HostSettingsActivity", ".AppDisplayActivity",
+        ".ImeSettingsActivity", ".UnknownSourcesActivity", ".FilePickerActivity",
+        ".StorageActivity", ".BackupActivity", ".TransferActivity",
+        ".ScreensaverActivity", ".LockSettingsActivity", ".FontStoreActivity",
+        ".StoreActivity", ".StatsActivity", ".InboxActivity", ".TouchTestActivity"
+    };
 
     private AppFont() { }
 
@@ -73,7 +80,7 @@ final class AppFont {
     static synchronized void forForeground(Context c, String pkg, String cls) {
         if (pkg == null || pkg.length() == 0) return;
         if (pkg.equals(c.getPackageName())) {
-            if (cls != null) for (String o : OVERLAYS) if (cls.endsWith(o)) return;
+            if (overlay(cls)) return;
             restore(c);
             return;
         }

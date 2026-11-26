@@ -201,6 +201,7 @@ final class Transfer {
         lastUse = System.currentTimeMillis();
         pool.execute(new Runnable() { @Override public void run() { acceptLoop(); } });
         HostLink.cmd("fwd " + port);
+        HostLink.cmd("status");
         main.postDelayed(idleCheck, 30000);
         return true;
     }
@@ -420,7 +421,7 @@ final class Transfer {
         if (r.path.equals("/api/tasks")) { json(out, 200, tasksJson()); return; }
         if (r.path.equals("/api/icon")) { icon(r.q.get("pkg"), out); return; }
         if (r.method.equals("POST") && r.path.equals("/api/upload")) { upload(r, in, out); return; }
-        if (r.method.equals("POST") && r.path.equals("/api/theme/reset")) { Theme.reset(); json(out, 200, obj("ok", true)); return; }
+        if (r.method.equals("POST") && r.path.equals("/api/theme/reset")) { Theme.reset(); StatusBarService.refresh(ctx); json(out, 200, obj("ok", true)); return; }
         if (r.method.equals("POST") && r.path.equals("/api/delete")) {
             JSONObject b = new JSONObject(new String(body(r, in, 4096), "UTF-8"));
             json(out, 200, delete(b.optString("dir"), b.optString("name")));
@@ -525,7 +526,10 @@ final class Transfer {
         if (name.contains("/") || name.contains("..") || name.isEmpty()) return obj("ok", false, "msg", "文件名不对");
         if (isScript(name)) return obj("ok", false, "msg", "这个文件不能在这里删除");
         File f = new File(dirFor(which), name);
-        return obj("ok", f.isFile() && f.delete());
+        if (!f.isFile()) return obj("ok", false, "msg", "文件不存在");
+        if (!f.delete()) return obj("ok", false, "msg", "删除失败（文件受保护或书库为只读挂载）");
+        if (Lib.isBook(name)) Lib.scan(ctx, 0);
+        return obj("ok", true);
     }
 
     private JSONObject apps() {
@@ -565,10 +569,18 @@ final class Transfer {
     }
 
     private JSONObject openApp(final String pkg) {
+        if (LockScreen.showing()) return obj("ok", false, "msg", "设备已锁屏，请先在 Kindle 上解锁");
+        if (pkg == null || pkg.length() == 0) return obj("ok", false, "msg", "参数无效");
         final Intent i = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
         if (i == null) return obj("ok", false, "msg", "这个应用不能打开");
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        main.post(new Runnable() { @Override public void run() { try { ctx.startActivity(i); } catch (Exception ignored) { } } });
+        main.post(new Runnable() { @Override public void run() {
+            if (LockScreen.showing()) return;
+            try {
+                AppProf.prepareLaunch(ctx, pkg);
+                ctx.startActivity(i);
+            } catch (Exception ignored) { }
+        } });
         return obj("ok", true);
     }
 
@@ -617,7 +629,7 @@ final class Transfer {
         received++;
         if (isApk(f.getName())) install(f, t);
         else if (isFont(f.getName())) { t.state = "done"; t.msg = "字体已导入，去设置→显示选择"; }
-        else { t.state = "done"; t.msg = "已保存"; }
+        else { t.state = "done"; t.msg = "已保存"; if (Lib.isBook(f.getName())) Lib.scan(ctx, 0); }
         f.setReadable(true, false);
     }
 
@@ -641,21 +653,27 @@ final class Transfer {
      */
     static String hostInstall(File staged, InstallProgress p) {
         File res = new File(HostLink.CTL + "inst." + staged.getName());
-        res.delete();
+        boolean hadOld = res.isFile();
+        long oldMod = hadOld ? res.lastModified() : 0L;
+        long oldLen = hadOld ? res.length() : -1L;
+        boolean sawGone = !hadOld || res.delete();
         HostLink.cmd("install " + staged.getAbsolutePath());   // absolute: the host accepts the shared and our own staging folder
         long start = System.currentTimeMillis(), until = start + INSTALL_WAIT_MS;
         int shown = 0;
         while (System.currentTimeMillis() < until) {
             try { Thread.sleep(1500); } catch (InterruptedException e) { return null; }
-            if (res.exists()) {
+            if (!res.isFile()) {
+                sawGone = true;
+            } else if (sawGone || res.lastModified() != oldMod || res.length() != oldLen) {
                 String out = "";
+                java.io.BufferedReader r = null;
                 try {
-                    java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(res));
+                    r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(res), "UTF-8"));
                     String line; StringBuilder sb = new StringBuilder();
                     while ((line = r.readLine()) != null) sb.append(line).append(' ');
-                    r.close();
                     out = sb.toString().trim();
                 } catch (Exception ignored) { }
+                finally { if (r != null) try { r.close(); } catch (Exception ignored) { } }
                 res.delete();
                 return out.length() == 0 ? "宿主没有给出结果" : out;
             }
@@ -681,7 +699,7 @@ final class Transfer {
             @Override public void run() {
                 synchronized (installLock) {
                     t.kind = "install"; t.state = "running"; t.msg = "正在安装…（大应用可能要好几分钟）";
-                    String safe = "up" + t.id + ".apk";
+                    String safe = "up" + t.id + "-" + (System.currentTimeMillis() % 100000L) + ".apk";
                     File staged = new File(tmpDir(), safe);
                     if (!apk.renameTo(staged)) { t.state = "error"; t.msg = "安装失败：不能整理安装包"; return; }
                     staged.setReadable(true, false);
@@ -718,9 +736,9 @@ final class Transfer {
 
     private void upload(Req r, InputStream in, OutputStream out) throws Exception {
         String ct = r.h.get("content-type");
-        if (ct == null || !ct.toLowerCase(Locale.US).startsWith("multipart/form-data") || ct.indexOf("boundary=") < 0) { json(out, 200, obj("ok", false, "msg", "需要 multipart 上传")); return; }
-        String boundary = ct.substring(ct.indexOf("boundary=") + 9).trim();
-        if (boundary.startsWith("\"")) boundary = boundary.substring(1, boundary.lastIndexOf('"'));
+        if (ct == null || !ct.toLowerCase(Locale.US).startsWith("multipart/form-data")) { json(out, 200, obj("ok", false, "msg", "需要 multipart 上传")); return; }
+        String boundary = parseBoundary(ct);
+        if (boundary == null || boundary.isEmpty()) { json(out, 200, obj("ok", false, "msg", "需要 multipart 上传")); return; }
         String to = r.q.containsKey("to") ? r.q.get("to") : "books";
         // 文件管理里的“上传到当前文件夹”：原样放进那个文件夹（APK 也只是保存，不安装）
         File folder = null;
@@ -737,7 +755,9 @@ final class Transfer {
         // 先看空间：不能把 Kindle 写满（Android 和 Kindle 共用这块存储，写满了两边都会出问题）
         if (r.length < 0) { json(out, 411, obj("ok", false, "msg", "需要 Content-Length")); return; }
         File space = folder != null ? folder : "kindle".equals(to) ? new File(KINDLE) : new File("/data");
-        if (r.length > space.getUsableSpace() - 64L * 1024 * 1024) { json(out, 413, obj("ok", false, "msg", "空间不够：剩余 " + (space.getUsableSpace() >> 20) + " MB（至少要留 64 MB）")); return; }
+        if (!space.exists()) space = new File("/data");
+        long usable = space.getUsableSpace();
+        if (usable < 64L * 1024 * 1024 || r.length > usable - 64L * 1024 * 1024) { drain(in, r.length); json(out, 413, obj("ok", false, "msg", "空间不够：剩余 " + (usable >> 20) + " MB（至少要留 64 MB）")); return; }
         JSONArray results = new JSONArray();
         Multipart mp = new Multipart(in, boundary, r.length);
         Multipart.Part part;
@@ -753,9 +773,18 @@ final class Transfer {
                 results.put(obj("ok", false, "name", part.filename, "msg", "壁纸图库只收 jpg / png / webp 图片"));
                 continue;
             }
-            Task t = newTask("upload", part.filename);
             // 主题文件（壁纸 / 图标 / statusbar.json / .zip 主题包）先放到暂存目录，再交给 Theme 导入
-            File dest = uniqueFile(folder != null ? folder : "theme".equals(to) ? tmpDir() : targetDir(part.filename, to), part.filename);
+            File destDir = folder != null ? folder : "theme".equals(to) ? tmpDir() : targetDir(part.filename, to);
+            File destSpace = destDir.exists() ? destDir : new File("/data");
+            long destUsable = destSpace.getUsableSpace();
+            long rem = Math.max(0L, mp.remaining) + (mp.lim - mp.pos);
+            if (destUsable < 64L * 1024 * 1024 || rem > destUsable - 64L * 1024 * 1024) {
+                mp.skip();
+                results.put(obj("ok", false, "name", part.filename, "msg", "空间不够：剩余 " + (destUsable >> 20) + " MB（至少要留 64 MB）"));
+                continue;
+            }
+            Task t = newTask("upload", part.filename);
+            File dest = uniqueFile(destDir, part.filename);
             t.total = -1;
             // 放进文件夹的先写成隐藏的临时文件、写完再改名：桌面按目录修改时间发现新图片，不能让它读到半个文件
             final File part0 = folder != null ? new File(folder, ".vdpart-" + t.id + "-" + System.currentTimeMillis()) : dest;
@@ -798,7 +827,7 @@ final class Transfer {
             if (lib != null) {
                 java.util.Map<String, String> kv = HostReq.kv(HostReq.run(ctx, "libput", libId, dest.getName(), 600000));
                 lib.delete();
-                if ("1".equals(kv.get("ok"))) { received++; t.state = "done"; t.msg = "已由宿主写进加密的 Kindle 书库：" + kv.get("name"); }
+                if ("1".equals(kv.get("ok"))) { received++; t.state = "done"; t.msg = "已由宿主写进加密的 Kindle 书库：" + kv.get("name"); Lib.scan(ctx, 0); }
                 else { t.state = "error"; t.msg = "写进加密的 Kindle 书库失败（" + (kv.isEmpty() ? "宿主没有回应" : kv.get("error")) + "）"; }
                 results.put(obj("ok", "done".equals(t.state), "name", kv.containsKey("name") ? kv.get("name") : dest.getName(), "task", t.id, "state", t.state, "msg", t.msg));
                 continue;
@@ -806,9 +835,9 @@ final class Transfer {
             if (part0 != dest && !part0.renameTo(dest)) { part0.delete(); t.state = "error"; t.msg = "保存失败"; results.put(obj("ok", false, "name", dest.getName(), "msg", t.msg)); continue; }
             if ("theme".equals(to)) {
                 received++;
-                t.msg = Theme.importFile(dest);
+                t.msg = Theme.importFile(ctx, dest);
                 t.state = t.msg.startsWith("导入失败") || t.msg.startsWith("不认识") || t.msg.contains("没有可用") ? "error" : "done";
-            } else if (folder != null) { received++; dest.setReadable(true, false); t.state = "done"; t.msg = "已保存到 " + dest.getName(); }
+            } else if (folder != null) { received++; dest.setReadable(true, false); t.state = "done"; t.msg = "已保存到 " + dest.getName(); if (Lib.isBook(dest.getName())) Lib.scan(ctx, 0); }
             else afterFile(dest, t);
             results.put(obj("name", dest.getName(), "task", t.id, "state", t.state, "msg", t.msg));
         }
@@ -946,22 +975,138 @@ final class Transfer {
         return new Cloud.Progress() { @Override public void update(long done, long total) { t.done = done; t.total = total; } };
     }
 
-    /** A download lands in TMP first; move it to the books folder (apk stays and is installed). */
+    /** Safely extract multipart boundary (handles quoted values, trailing parameters like '; charset=utf-8', and malformed quotes). */
+    static String parseBoundary(String ct) {
+        if (ct == null) return null;
+        String lower = ct.toLowerCase(Locale.US);
+        int idx = lower.indexOf("boundary=");
+        if (idx < 0) return null;
+        String v = ct.substring(idx + 9).trim();
+        if (v.startsWith("\"")) {
+            int end = v.indexOf('"', 1);
+            return end > 1 ? v.substring(1, end) : null;
+        }
+        int semi = v.indexOf(';');
+        if (semi >= 0) v = v.substring(0, semi).trim();
+        return v.isEmpty() ? null : v;
+    }
+
+    /** A download lands in TMP first; move it to the target folder (fonts -> Fonts/, books -> Books/KindleLibrary/, apk stays and is installed). */
     private void finishDownload(File f, String to, Task t) {
         t.name = f.getName();
+        if (isScript(cleanName(f.getName())) || WebAdmin.isProtected(f.getName())) {
+            f.delete();
+            t.state = "error"; t.msg = "不支持下载脚本文件";
+            return;
+        }
         if (!isApk(f.getName())) {
-            File dest = uniqueFile(dirFor(to), f.getName());
+            File dest = uniqueFile(targetDir(f.getName(), to), f.getName());
             if (!f.renameTo(dest)) {
+                File tmp = new File(dest.getParentFile(), ".vdpart-" + t.id + "-" + System.nanoTime());
+                FileOutputStream o = null;
+                InputStream i = null;
                 try {
-                    FileOutputStream o = new FileOutputStream(dest);
-                    InputStream i = new java.io.FileInputStream(f);
+                    i = new java.io.FileInputStream(f);
+                    o = new FileOutputStream(tmp);
                     byte[] b = new byte[65536]; int n;
                     while ((n = i.read(b)) > 0) o.write(b, 0, n);
-                    i.close(); o.close(); f.delete();
-                } catch (IOException e) { t.state = "error"; t.msg = "保存失败"; return; }
+                    o.close(); o = null;
+                    i.close(); i = null;
+                    if (!tmp.renameTo(dest)) {
+                        tmp.delete(); f.delete();
+                        t.state = "error"; t.msg = "保存失败";
+                        return;
+                    }
+                    f.delete();
+                } catch (IOException e) {
+                    tmp.delete();
+                    if (o != null) { try { o.close(); } catch (Exception ignored) { } o = null; }
+                    if (i != null) { try { i.close(); } catch (Exception ignored) { } i = null; }
+                    if (isKindleRoot(dest.getParentFile())) {
+                        libputFromFile(f, dest.getName(), t);
+                    } else {
+                        t.state = "error"; t.msg = "保存失败：" + e.getMessage();
+                    }
+                    f.delete();
+                    return;
+                } finally {
+                    if (o != null) try { o.close(); } catch (Exception ignored) { }
+                    if (i != null) try { i.close(); } catch (Exception ignored) { }
+                }
             }
             f = dest;
         }
         afterFile(f, t);
+    }
+
+    /** 加密的 Kindle 书库（KT6/Scribe fscrypt）代写通道：拷进私有目录后请宿主（root）写进 Kindle 书库根目录，返回写入后的最终文件名，失败返回 null。 */
+    static String libputFile(Context ctx, File src, String destName) {
+        if (ctx == null || src == null || !src.isFile() || destName == null || destName.length() == 0) return null;
+        byte[] rb = new byte[16];
+        new SecureRandom().nextBytes(rb);
+        String libId = HostReq.hex(rb);
+        File ld = new File(ctx.getFilesDir(), "libput");
+        ld.mkdirs();
+        try { android.system.Os.chmod(ld.getPath(), 0700); } catch (Throwable ignored) { }
+        File lib = new File(ld, libId + ".part");
+        InputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = new java.io.FileInputStream(src);
+            out = new FileOutputStream(lib);
+            byte[] b = new byte[65536]; int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            out.close(); out = null;
+            in.close(); in = null;
+            if (lib.length() != src.length()) return null;
+            java.util.Map<String, String> kv = HostReq.kv(HostReq.run(ctx, "libput", libId, destName, 600000));
+            if ("1".equals(kv.get("ok"))) {
+                String outName = kv.get("name");
+                return outName != null && outName.length() > 0 ? outName : destName;
+            }
+            return null;
+        } catch (Throwable e) {
+            return null;
+        } finally {
+            if (out != null) try { out.close(); } catch (Exception ignored) { }
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            lib.delete();
+        }
+    }
+
+    /** 加密的 Kindle 书库（KT6/Scribe fscrypt）回退路径：先拷进私有目录，再请宿主（root）代写。 */
+    private void libputFromFile(File src, String destName, Task t) {
+        byte[] rb = new byte[16]; rnd.nextBytes(rb);
+        String libId = HostReq.hex(rb);
+        File ld = new File(ctx.getFilesDir(), "libput");
+        ld.mkdirs();
+        try { android.system.Os.chmod(ld.getPath(), 0700); } catch (Throwable ignored) { }
+        File lib = new File(ld, libId + ".part");
+        InputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = new java.io.FileInputStream(src);
+            out = new FileOutputStream(lib);
+            byte[] b = new byte[65536]; int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            out.close(); out = null;
+            in.close(); in = null;
+            java.util.Map<String, String> kv = HostReq.kv(HostReq.run(ctx, "libput", libId, destName, 600000));
+            if ("1".equals(kv.get("ok"))) {
+                received++;
+                t.state = "done";
+                t.msg = "已由宿主写进加密的 Kindle 书库：" + kv.get("name");
+            } else {
+                t.state = "error";
+                t.msg = "写进加密的 Kindle 书库失败（" + (kv.isEmpty() ? "宿主没有回应" : kv.get("error")) + "）";
+            }
+        } catch (IOException e) {
+            t.state = "error";
+            t.msg = "保存失败：" + e.getMessage();
+        } finally {
+            if (out != null) try { out.close(); } catch (Exception ignored) { }
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            lib.delete();
+        }
     }
 }

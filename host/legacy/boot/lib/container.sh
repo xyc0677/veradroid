@@ -48,7 +48,22 @@ display_prepare() {
     [ -n "$m" ] && echo "$m" > $X/model
     hwc_prepare
     vdshim_prepare
-    chmod -R 777 $X
+    chown 0:0 $X $X/ctl 2>/dev/null || true
+    chmod 0755 $X $X/ctl
+    chmod 0644 $X/info $X/model $X/hwc.off $X/hz $X/hwc.dim 2>/dev/null || true
+    kfb_home_chown
+}
+# 仅限 VeraHome（com.veradroid.home）写入的控制项：独立 0700 目录 $X/home（供 settings.new）与属主文件 $X/fg
+kfb_home_chown() {
+    kh_u=$(awk '$1 == "com.veradroid.home" { print $2; exit }' $SYS/data/system/packages.list 2>/dev/null)
+    case "$kh_u" in ''|*[!0-9]*) return 0 ;; esac
+    mkdir -p $X/home 2>/dev/null || true
+    chown "$kh_u:0" $X/home 2>/dev/null || true
+    chmod 0700 $X/home 2>/dev/null || true
+    [ -f $X/fg ] || : > $X/fg
+    chown "$kh_u:0" $X/fg 2>/dev/null || true
+    chmod 0644 $X/fg 2>/dev/null || true
+    return 0
 }
 # ashmem 垫片（android/device/veradroid/kindle/shim/vdshim.c，init 给每个进程 LD_PRELOAD）也随宿主程序发（bin/libvdshim.so，
 # 和 host/pw6、host/k49 同一个文件），开机前换掉镜像里的那份：镜像里的旧版对 ASHMEM_GET_PROT_MASK 一律回答 rwx，应用自带的
@@ -95,8 +110,10 @@ rot_args() {   # 给 veradroid-epd / veradroid-input 的额外参数（0 度时�
 display_start() {
     [ -x "$VD/bin/veradroid-epd" ] || { t "display: veradroid-epd missing"; return 0; }
     : > $W/epd.log   # 追加方式打开：watchdog 的 log_cap 截短它时，显示桥接着写在新的末尾（不会留下空洞）
-    $VD/bin/veradroid-epd run $X/fb $X/epd.fifo $X/ctl --w ${viewWidth:-1272} --h ${viewHeight:-1696} --contrast ${KFB_CONTRAST:-1.3} --dither ${KFB_DITHER:-3} --flash ${KFB_FLASH:-0} --invert ${KFB_INVERT:-0} --lightf ${KFB_LIGHTF:-0} --darken ${KFB_DARKEN:-0} --mode ${KFB_MODE:-0} --settle ${KFB_SETTLE:-120} --hold ${KFB_HOLD:-70} --anim-mode ${KFB_ANIM_MODE:-1} --anim-dir ${KFB_ANIM_DIR:-2} --anim-steps ${KFB_ANIM_STEPS:-12} --anim-min ${KFB_ANIM_MIN:-60} --scroll-delay ${KFB_SCROLLDELAY:-500} --scroll-style ${KFB_SCROLLSTYLE:-1} --scroll-wfm ${KFB_SCROLLWFM:-a2} --nice ${KFB_EPD_NICE:--8} $(rot_args) >>$W/epd.log 2>&1 &
+    case "${KFB_SCROLLWFM:-0}" in 1|a2) _sa2=1 ;; *) _sa2=0 ;; esac
+    $VD/bin/veradroid-epd run $X/fb $X/epd.fifo $X/ctl --w ${viewWidth:-1272} --h ${viewHeight:-1696} --contrast ${KFB_CONTRAST:-1.3} --dither ${KFB_DITHER:-3} --flash ${KFB_FLASH:-0} --invert ${KFB_INVERT:-0} --lightf ${KFB_LIGHTF:-0} --darken ${KFB_DARKEN:-0} --mode ${KFB_MODE:-0} --settle ${KFB_SETTLE:-120} --hold ${KFB_HOLD:-70} --anim-mode ${KFB_ANIM_MODE:-1} --anim-dir ${KFB_ANIM_DIR:-2} --anim-steps ${KFB_ANIM_STEPS:-12} --anim-min ${KFB_ANIM_MIN:-60} --scroll-delay ${KFB_SCROLLDELAY:-500} --scroll-style ${KFB_SCROLLSTYLE:-1} --scroll-a2 $_sa2 $(rot_args) >>$W/epd.log 2>&1 &
     echo $! > $W/epd.pid
+    [ -n "${KFB_EPD_NICE:--8}" ] && renice -n "${KFB_EPD_NICE:--8}" "$!" >/dev/null 2>&1 || true
     rot_deg > $W/rotate
     # 以后能不能当场转 180：0 度启动时没传 --vw，可见宽 != 行宽（PW5 无 FBInk）的机器转了会偏 12 像素，只能重启
     if [ "$(rot_deg)" != 0 ] || [ -z "$viewVisWidth" ] || [ "$viewVisWidth" = "${viewWidth:-1272}" ]; then touch $W/rotate.live; else rm -f $W/rotate.live; fi
@@ -219,6 +236,26 @@ sysfont_mount() {     # 容器里（run_in_ns），/dev 的 tmpfs 建好之后�
     echo "veradroid: system font $sf_src not mounted, stock fonts" >&2
     return 0
 }
+sysbin_wrap_mount() {   # 容器里（run_in_ns），/dev 的 tmpfs 建好之后、换根之前
+    # 两个系统程序换成 boot/ 里的小脚本（原因写在脚本里）：
+    #   dex2oat：应用自己（DexClassLoader / 插件框架）编 /data 下的代码时只做 verify-at-runtime，不用 speed；
+    #   cmd：应用自己跑的 "cmd package compile ..."（自己给自己强制重编）不执行。
+    # 真的程序复制到 /dev/vdbin（不能 bind：Android init 把根设成 shared，后面绑在 /system/bin/dex2oat 上的包装会传播到
+    # 同一个 peer 的 bind 上，包装 exec 自己死循环；测试机实测）。SYSBIN_WRAP=off 关掉。
+    [ "${SYSBIN_WRAP:-on}" = off ] && return 0
+    for sw_n in dex2oat cmd; do
+        [ -f $VD/boot/$sw_n-wrap.sh ] && [ -x $R/system/bin/$sw_n ] || continue
+        mkdir -p $R/dev/vdbin || return 0
+        if cp $R/system/bin/$sw_n $R/dev/vdbin/$sw_n && cp $VD/boot/$sw_n-wrap.sh $R/dev/vdbin/$sw_n-wrap &&
+            chmod 755 $R/dev/vdbin/$sw_n $R/dev/vdbin/$sw_n-wrap &&
+            mount --bind $R/dev/vdbin/$sw_n-wrap $R/system/bin/$sw_n; then :
+        else
+            rm -f $R/dev/vdbin/$sw_n $R/dev/vdbin/$sw_n-wrap
+            echo "veradroid: $sw_n wrapper not mounted" >&2
+        fi
+    done
+    return 0
+}
 # AlarmManager 的定时器（docs/host-settings.md 第 5 节“时钟”）：Android 7.1 的 libandroid_servers.so 建 5 个 timerfd，其中两个用
 # CLOCK_REALTIME_ALARM / CLOCK_BOOTTIME_ALARM，要 CAP_WAKE_ALARM；7.1 的 zygote 不给 system_server 这个权限（8.0 才加），
 # timerfd_create 返回 EPERM，AlarmManager 退回“Falling back to a handler”：所有闹钟改用一个按 uptime 计时的 Handler 消息，
@@ -234,7 +271,7 @@ ALARMFIX_LIB=system/lib/libandroid_servers.so
 ALARMFIX_TAB=154856; ALARMFIX_TAB_OLD=080000000000000009000000070000000100000000000000; ALARMFIX_TAB_NEW=000000000000000007000000070000000100000000000000
 ALARMFIX_EPW=52736;  ALARMFIX_EPW_OLD=c2f20005; ALARMFIX_EPW_NEW=aff30080
 alarmfix_hex() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; }
-alarmfix_put() { printf "$(printf '%s' "$3" | sed 's/../\\x&/g')" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+alarmfix_put() { printf "$(awk -v s="$3" 'BEGIN{h="0123456789abcdef";s=tolower(s);for(i=1;i<=length(s);i+=2){v=(index(h,substr(s,i,1))-1)*16+index(h,substr(s,i+1,1))-1;printf "\\%03o",v}}')" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
 alarmfix_prepare() {   # 宿主侧，container_start 里、启动容器之前：$W/alarmfix/lib.so = 改好的副本（不改镜像里的文件：它和回退用的旧镜像是硬链接）
     rm -rf $W/alarmfix
     [ "${ALARM_FIX:-1}" = 0 ] && return 0
@@ -382,6 +419,7 @@ run_in_ns() {
     mount --bind $R $R || exit 1                       # pivot_root 要求新根是挂载点
     DEMO=; [ -f $R/.demo ] && DEMO=1
     [ -z "$DEMO" ] && mount -o remount,ro,bind $R
+    [ -d $R/acct ] && mount -t tmpfs -o rw,size=64k tmpfs $R/acct 2>/dev/null || true
     mount -t tmpfs -o nosuid,mode=755 tmpfs $R/dev || exit 1
     for n in null zero full tty random urandom kmsg fuse; do
         [ -e /dev/$n ] && touch $R/dev/$n && mount --bind /dev/$n $R/dev/$n
@@ -450,16 +488,20 @@ run_in_ns() {
     fi
     mount -t sysfs -o ro sysfs $R/sys || exit 1
     # 内核编进了 SELinux 但没加载策略：系统绝不能碰宿主的 SELinux，盖一层只读空目录
-    for d in sys/fs/selinux sys/fs/bpf sys/fs/pstore sys/kernel/tracing sys/kernel/debug; do
+    for d in sys/fs/selinux sys/fs/bpf sys/fs/pstore sys/kernel/tracing; do
         [ -d $R/$d ] && mount -t tmpfs -o ro,size=4k tmpfs $R/$d
     done
     # BatteryStatsService 的 KernelWakelockReader 每隔几分钟读 /proc/wakelocks 或 /d/wakeup_sources（/d -> /sys/kernel/debug）；
-    # 两者都不存在时 system_server 持续触发 Slog.wtf，向 /data/system/dropbox 写入大量 wtf 堆栈文件（用户诊断 实证）。
-    # 在只读空 tmpfs 中放一个 0 字节只读 wakeup_sources 即可彻底静音且保持宿主 debugfs 隔离。
-    if [ ! -e /proc/wakelocks ] && [ -d $R/sys/kernel/debug ]; then
-        mount -o remount,rw $R/sys/kernel/debug 2>/dev/null && \
-            : > $R/sys/kernel/debug/wakeup_sources && chmod 444 $R/sys/kernel/debug/wakeup_sources && \
-            mount -o remount,ro $R/sys/kernel/debug 2>/dev/null || true
+    # 文件不存在会触发 KernelWakelockReader Slog.wtf，0 字节空文件又会触发 BatteryStatsImpl "All kernel wakelocks had time of zero / were set stale"
+    # Slog.wtf（用户诊断 实证：dropbox 积压百余份 wtf）。先 rw 挂载 tmpfs 写入表头+1 条静态占位记录再 remount ro（busybox mount 不支持 ro->remount,rw），双路彻底静音且保持宿主 debugfs 隔离。
+    if [ -d $R/sys/kernel/debug ]; then
+        if mount -t tmpfs -o rw,size=4k tmpfs $R/sys/kernel/debug; then
+            if [ ! -e /proc/wakelocks ]; then
+                printf 'name\tactive_count\tevent_count\twakeup_count\texpire_count\tactive_since\ttotal_time\tmax_time\tlast_change\tprevent_suspend_time\nveradroid\t1\t0\t0\t0\t0\t1\t0\t0\t0\n' > $R/sys/kernel/debug/wakeup_sources 2>/dev/null && \
+                    chmod 444 $R/sys/kernel/debug/wakeup_sources 2>/dev/null || true
+            fi
+            mount -t tmpfs -o remount,ro,size=4k tmpfs $R/sys/kernel/debug 2>/dev/null || mount -o remount,ro $R/sys/kernel/debug 2>/dev/null || true
+        fi
     fi
 
     if [ -n "$DEMO" ]; then
@@ -483,11 +525,15 @@ run_in_ns() {
         # Android 的 installd 递归删 /data/media/0 时穿过了以前直接绑在那里的 documents）。链接弄不好就不绑：宁可 Android 里看不到书库。
         # legacy：这个 bind 在 unshare -m 的私有挂载命名空间里，容器的进程全死后随命名空间消失；stop.sh 再按 $R 下的挂载兜底卸一遍。
         # 只在模拟器上验证过的机型（$VD/tested = emulator-only）：默认不把 Kindle 书库绑进 Android——这些机型没有真机验证，
-        # Android 里的任何意外都碰不到用户的书（settings.test 里 KLIB_BIND=1 可以打开）。KindleLibrary 链接照建，只是指向空目录。
-        KLIB_SKIP=; [ "$(cat $VD/tested 2>/dev/null)" = emulator-only ] && [ "${KLIB_BIND:-0}" != 1 ] && KLIB_SKIP=1
+        # Android 里的任何意外都碰不到用户的书（设置里 KLIB_BIND=ro 可只读挂载、KLIB_BIND=1 可读写挂载）。KindleLibrary 链接照建，默认指向空目录。
+        KLIB_SKIP=; [ "$(cat $VD/tested 2>/dev/null)" = emulator-only ] && [ "${KLIB_BIND:-0}" != 1 ] && [ "${KLIB_BIND:-0}" != ro ] && KLIB_SKIP=1
         [ -n "$KLIB_SKIP" ] && echo "veradroid: emulator-only model: Kindle library not bound into Android" >&2
         if [ -z "$KLIB_SKIP" ] && [ -d /mnt/base-us/documents ] && [ -d $R$KLIB_MP ]; then
-            if klib_link $R/data; then mount --bind /mnt/base-us/documents $R$KLIB_MP
+            if klib_link $R/data; then
+                mount --bind /mnt/base-us/documents $R$KLIB_MP
+                if [ "${KLIB_BIND:-0}" = ro ]; then
+                    mount -o remount,ro,bind $R$KLIB_MP 2>/dev/null || { umount $R$KLIB_MP 2>/dev/null; echo "veradroid: ro bind failed, Kindle library NOT bound" >&2; }
+                fi
             else echo "veradroid: KindleLibrary link not in place, Kindle library NOT bound into Android" >&2; fi
         fi
         # Kindle 自带字体（宋体/黑体/Bookerly 等）只读绑进 Android，阅读器可以直接选，不复制、不打包
@@ -496,6 +542,7 @@ run_in_ns() {
         [ -d $VD/fonts ] && mount --bind $VD/fonts $R/data/media/0/Fonts
         chmod 777 $R/data/media/0/Fonts 2>/dev/null
         sysfont_mount        # 系统字体（SYSTEM_FONT）：上面 sysfont_prepare 准备好的才绑
+        sysbin_wrap_mount    # dex2oat / cmd 的包装（boot/*-wrap.sh）
         alarmfix_mount       # AlarmManager 的 timerfd（alarmfix_prepare 改好的副本）
         nocap_mount          # healthd 不带 CAP_BLOCK_SUSPEND / CAP_WAKE_ALARM（冻结时不挂唤醒源，待机能休眠；4.1 内核，3.0 内核没有 EPOLLWAKEUP）
         # /sdcard -> /storage/self/primary -> /storage/emulated/0. vold/FUSE

@@ -8,10 +8,12 @@ kmod_load() {
     for m in tun uinput binder; do
         [ -f "$d/$m.ko" ] || continue
         grep -q "^$m " /proc/modules && continue
+        # 内核里已经有这个设备就不加载。按 /proc/misc 判断，不看 /dev 里的节点：
+        # 预建或 mknod 残留的空壳节点在模块未加载时仍存在，看节点会跳过 insmod 报 ENODEV。
         case $m in
-            binder) [ -e /dev/vndbinder ] && continue ;;
-            tun)    [ -e /dev/net/tun ] && continue ;;
-            uinput) [ -e /dev/uinput ] || [ -e /dev/input/uinput ] && continue ;;
+            binder) grep -qw vndbinder /proc/misc 2>/dev/null && continue ;;
+            tun)    grep -qw tun /proc/misc 2>/dev/null && continue ;;
+            uinput) grep -qw uinput /proc/misc 2>/dev/null && continue ;;
         esac
         if insmod "$d/$m.ko" 2>>$LOG; then t "kmod: loaded $m"; else t "kmod: insmod $m failed"; fi
     done

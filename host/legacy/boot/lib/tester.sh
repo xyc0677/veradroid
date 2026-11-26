@@ -165,6 +165,13 @@ test_watch() {
                 b=$(cat $W/booted 2>/dev/null); tset boot.s $(( ${b:-$now} - t0 )); tset boot.result PASS
                 tlog "boot completed after $(( ${b:-$now} - t0 ))s"
                 sleep 20                       # 让 after_boot 的第一波设置先做完
+                p=$(cat $W/pid 2>/dev/null)
+                sp=$(cat /tmp/veradroid-stop.pid 2>/dev/null)
+                if [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null || [ -e $W/exiting ] || { [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; }; then
+                    tlog "android exiting or stopped during post-boot wait: skipping selftest"
+                    rm -f $W/test.t0
+                    return 0
+                fi
                 test_selftest; test_snapshot boot; test_report
                 test_notice
                 rm -f $W/test.t0

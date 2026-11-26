@@ -33,17 +33,17 @@ final class Fonts {
         try { return Math.max(0, Math.min(2, Store.prefs(c, "home").getInt(WEIGHT_KEY, 2))); } catch (Throwable t) { return 2; }
     }
 
-    private static String cachedKey;
-    private static Typeface cached, cachedBold;
+    private static volatile String cachedKey;
+    private static volatile Typeface cached, cachedBold;
     /** 用的是拼起来的粗体（Amazon Ember 的行高比 Roboto 大）：去掉字体自带的上下留白，行高和以前差不多，页面不因为换字体多出一页。 */
-    private static boolean tight;
+    private static volatile boolean tight;
     /**
      * 正文 / 粗体角色要不要“描粗”（Skia 的 fake bold，画字时每一笔加一圈）。只有一种字重的字体（选的系统字体、
      * 没有华文黑体时的 DroidSansFallback）靠它变粗。Typeface.create(tf, BOLD) 在 7.1 上对这种从文件读的字体并不总会描粗
      * （真机上实测正文没变粗），所以直接在画笔上开。
      */
-    private static boolean bodyFake, boldFake;
-    private static boolean lastRealCjk;
+    private static volatile boolean bodyFake, boldFake;
+    private static volatile boolean lastRealCjk;
 
     private static synchronized void load(Context c) {
         String p = "";
@@ -113,6 +113,14 @@ final class Fonts {
      * 告诉宿主（SYSTEM_FONT），和宿主现在用着的不一样就问要不要重启 Android。path = null：回到系统默认。
      */
     static void setSystem(final android.app.Activity a, String path, String name) {
+        if (path != null) {
+            String base = new File(path).getName();
+            if (path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0 || path.indexOf('\0') >= 0
+                    || base.length() == 0 || base.indexOf('\n') >= 0 || base.indexOf('\r') >= 0 || base.indexOf('/') >= 0) {
+                VeraToast.show(a, "字体文件名无效");
+                return;
+            }
+        }
         android.content.SharedPreferences prefs = Store.prefs(a, "home");
         prefs.edit().putString("system_font_path", path).putString("system_font_name", name)
             .putString("reader_font_path", path).putString("reader_font_name", name).commit();

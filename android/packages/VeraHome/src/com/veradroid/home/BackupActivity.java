@@ -76,7 +76,9 @@ public class BackupActivity extends Activity {
             final boolean ok = "1".equals(m.get("ok")) && MODE_V[idx].equals(m.get("mode"));
             new Handler(Looper.getMainLooper()).post(new Runnable() { @Override public void run() {
                 VeraToast.show(a, ok ? "更新前备份：" + MODE_L[idx] : "没能改（宿主没有回应，可能要先更新 VeraDroid）");
-                if (done != null) new Handler(Looper.getMainLooper()).postDelayed(done, 300);
+                if (done != null) new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override public void run() { if (!a.isFinishing()) done.run(); }
+                }, 300);
             } });
         } }, "backup-mode").start();
     }
@@ -134,11 +136,15 @@ public class BackupActivity extends Activity {
         busy = true;
         if (verb != null) { list.removeAllViews(); line("正在删除…", 20, true); }
         new Thread(new Runnable() { @Override public void run() {
-            byte[] r = verb == null ? HostReq.run(BackupActivity.this, "backups", null, null, 30000)
-                                    : HostReq.run(BackupActivity.this, verb, arg, null, 120000);
-            final Map<String, String> m = HostReq.kv(r);
-            handler.post(new Runnable() { @Override public void run() {
+            final Map<String, String> m;
+            try {
+                byte[] r = verb == null ? HostReq.run(BackupActivity.this, "backups", null, null, 30000)
+                                        : HostReq.run(BackupActivity.this, verb, arg, null, 120000);
+                m = HostReq.kv(r);
+            } finally {
                 busy = false;
+            }
+            handler.post(new Runnable() { @Override public void run() {
                 if (isFinishing()) return;
                 if (verb != null) {
                     int n = HostLink.num(m, "deleted", 0);
@@ -309,8 +315,13 @@ public class BackupActivity extends Activity {
         ask(null, null);
     }
     @Override protected void onPause() {
+        handler.removeCallbacksAndMessages(null);
         StatusBarService.setSuppressed(false);
         StatusBarService.refresh(this);
         super.onPause();
+    }
+    @Override protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 }

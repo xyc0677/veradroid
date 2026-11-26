@@ -142,12 +142,23 @@ final class WebFiles {
                 // 移动时隐藏文件也搬过去：后面会把原文件夹整个删掉，以前 .nomedia、应用的点文件就这样丢了（lockedInside 已经拦下了危险的点文件）
                 int[] skipped = { 0 };
                 ok = copyTree(f, target, 0, !copy, skipped);
+                if (!ok && !f.isDirectory() && "kindle".equals(dr) && Transfer.isKindleRoot(dd)) {
+                    String putName = Transfer.libputFile(ctx, f, target.getName());
+                    if (putName != null) {
+                        target = new File(dd, putName);
+                        ok = true;
+                    }
+                }
                 if (!ok) deleteTree(target, 0);
                 else if (!copy && skipped[0] > 0) { failed.put(n + "（已复制过去；里面有隐藏的文件夹或脚本没有搬，原文件夹留着）"); continue; }
                 else if (!copy) ok = deleteTree(f, 0);
             }
-            if (ok) done++; else failed.put(n);
+            if (ok) {
+                if (!copy && !target.isDirectory() && Lib.isBook(f.getName())) BlocksFiles.migrateReaderPrefs(ctx, f.getAbsolutePath(), target.getAbsolutePath());
+                done++;
+            } else failed.put(n);
         }
+        if (done > 0) Lib.scan(ctx, 0);
         return Transfer.obj("ok", failed.length() == 0, "done", done, "failed", failed, "msg", failed.length() == 0 ? "" : "有些没有完成");
     }
 
@@ -158,10 +169,14 @@ final class WebFiles {
         for (File f : fs) {
             if (WebAdmin.isLink(f)) continue;
             String n = f.getName();
-            // 普通的隐藏文件（.DS_Store、.nomedia…）不算：复制时本来就跳过；以点开头的 .sh 照样拦
+            if (".".equals(n) || "..".equals(n)) continue;
+            if (f.isDirectory()) {
+                if (WebAdmin.isProtected(n) || lockedInside(f, depth + 1, budget)) return true;
+                continue;
+            }
+            // 普通的隐藏文件（.DS_Store、.nomedia…）不算：复制时本来就跳过；以点开头的 .sh / 受保护文件照样拦
             if (n.startsWith(".") && !Transfer.isScript(n.substring(1)) && !WebAdmin.isProtected(n.substring(1))) continue;
             if (WebAdmin.isProtected(n)) return true;
-            if (f.isDirectory() && lockedInside(f, depth + 1, budget)) return true;
         }
         return false;
     }
@@ -204,15 +219,23 @@ final class WebFiles {
             return true;
         }
         File tmp = new File(dst.getParentFile(), ".vdcopy-" + Long.toHexString(System.nanoTime()));
+        InputStream in = null;
+        OutputStream o = null;
         try {
-            InputStream in = new FileInputStream(src);
-            OutputStream o = new FileOutputStream(tmp);
-            try { byte[] b = new byte[65536]; int n; while ((n = in.read(b)) > 0) o.write(b, 0, n); }
-            finally { in.close(); o.close(); }
+            in = new FileInputStream(src);
+            o = new FileOutputStream(tmp);
+            byte[] b = new byte[65536]; int n; while ((n = in.read(b)) > 0) o.write(b, 0, n);
+            o.close(); o = null;
+            in.close(); in = null;
+            if (tmp.length() != src.length()) { tmp.delete(); return false; }
             tmp.setReadable(true, false);
             tmp.setLastModified(src.lastModified());
             if (tmp.renameTo(dst)) return true;
         } catch (IOException e) { /* fall through */ }
+        finally {
+            if (o != null) try { o.close(); } catch (Exception ignored) { }
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+        }
         tmp.delete();
         return false;
     }
@@ -263,7 +286,7 @@ final class WebFiles {
         if (fs == null) return;
         for (File f : fs) {
             String n = f.getName();
-            if (n.startsWith(".") || WebAdmin.isLink(f) || WebAdmin.isProtected(n)) continue;
+            if (n.startsWith(".") || WebAdmin.isLink(f) || WebAdmin.isProtected(n) || WebAdmin.isKindleBind(f)) continue;
             if (f.isDirectory()) collect(f, prefix + n + "/", out, total, depth + 1);
             else { Item it = new Item(); it.f = f; it.name = prefix + n; out.add(it); total[0] += f.length(); }
         }
@@ -287,7 +310,7 @@ final class WebFiles {
                 String n = names.optString(i);
                 if (n.length() == 0 || n.indexOf('/') >= 0 || n.startsWith(".") || WebAdmin.isProtected(n)) continue;
                 File f = WebAdmin.resolve(which, (path == null ? "" : path) + "/" + n);
-                if (f == null || !f.exists()) continue;
+                if (f == null || !f.exists() || WebAdmin.isKindleBind(f)) continue;
                 if (f.isDirectory()) collect(f, n + "/", items, total, 0);
                 else { Item it = new Item(); it.f = f; it.name = n; items.add(it); total[0] += f.length(); }
             }
@@ -309,8 +332,13 @@ final class WebFiles {
             try {
                 InputStream in = new FileInputStream(it.f);
                 z.putNextEntry(e);
-                try { int n; while ((n = in.read(buf)) > 0) z.write(buf, 0, n); } finally { in.close(); }
-                z.closeEntry();
+                try {
+                    int n;
+                    while ((n = in.read(buf)) > 0) z.write(buf, 0, n);
+                } finally {
+                    try { in.close(); } catch (IOException ignored) { }
+                    z.closeEntry();
+                }
             } catch (IOException ex) {
                 if (ex.getMessage() != null && ex.getMessage().contains("EPIPE")) throw ex;
             }
@@ -388,19 +416,45 @@ final class WebFiles {
         Transfer.send(out, 200, png ? "image/png" : "image/jpeg", bo.toByteArray(), "Cache-Control: private, max-age=120\r\n");
     }
 
+    private static final long MAX_THUMB_PIXELS = 2_000_000L;
+    private static final int MAX_THUMB_DIM = 2048;
+    private static final long MAX_PDF_PIXELS = 1_500_000L;
+    private static final int MAX_PDF_DIM = 1600;
+
     static Bitmap decodeScaled(byte[] data, File f, int w) {
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
         if (data != null) BitmapFactory.decodeByteArray(data, 0, data.length, o); else BitmapFactory.decodeFile(f.getPath(), o);
         if (o.outWidth <= 0 || o.outHeight <= 0) return null;
         int s = 1;
-        while (o.outWidth / (s * 2) >= w && o.outHeight / (s * 2) >= w / 2) s *= 2;
+        while ((o.outWidth / (s * 2) >= w && o.outHeight / (s * 2) >= w / 2)
+                || (long) (o.outWidth / s) * (o.outHeight / s) > MAX_THUMB_PIXELS
+                || o.outWidth / s > MAX_THUMB_DIM
+                || o.outHeight / s > MAX_THUMB_DIM) {
+            if (s >= 1024) break;
+            s *= 2;
+        }
         BitmapFactory.Options o2 = new BitmapFactory.Options();
         o2.inSampleSize = s;
         Bitmap b = data != null ? BitmapFactory.decodeByteArray(data, 0, data.length, o2) : BitmapFactory.decodeFile(f.getPath(), o2);
         if (b == null) return null;
-        if (b.getWidth() > w) {
-            Bitmap c = Bitmap.createScaledBitmap(b, w, Math.max(1, b.getHeight() * w / b.getWidth()), true);
+        int tw = b.getWidth(), th = b.getHeight();
+        if (tw > w) {
+            th = Math.max(1, (int) ((long) th * w / tw));
+            tw = w;
+        }
+        if (th > MAX_THUMB_DIM) {
+            tw = Math.max(1, (int) ((long) tw * MAX_THUMB_DIM / th));
+            th = MAX_THUMB_DIM;
+        }
+        long px = (long) tw * th;
+        if (px > MAX_THUMB_PIXELS) {
+            double scale = Math.sqrt((double) MAX_THUMB_PIXELS / px);
+            tw = Math.max(1, (int) (tw * scale));
+            th = Math.max(1, (int) (th * scale));
+        }
+        if (tw != b.getWidth() || th != b.getHeight()) {
+            Bitmap c = Bitmap.createScaledBitmap(b, tw, th, true);
             if (c != b) b.recycle();
             b = c;
         }
@@ -451,9 +505,21 @@ final class WebFiles {
             if (r.getPageCount() < 1) return null;
             PdfRenderer.Page pg = r.openPage(0);
             try {
-                int h = Math.max(1, (int) ((long) w * pg.getHeight() / Math.max(1, pg.getWidth())));
-                if (h > 3 * w) h = 3 * w;
-                Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                int pw = Math.max(1, pg.getWidth()), ph = Math.max(1, pg.getHeight());
+                int rw = Math.min(w, MAX_PDF_DIM);
+                int rh = Math.max(1, (int) ((long) rw * ph / pw));
+                if (rh > 3 * rw) rh = 3 * rw;
+                if (rh > MAX_PDF_DIM) {
+                    rw = Math.max(1, (int) ((long) rw * MAX_PDF_DIM / rh));
+                    rh = MAX_PDF_DIM;
+                }
+                long px = (long) rw * rh;
+                if (px > MAX_PDF_PIXELS) {
+                    double scale = Math.sqrt((double) MAX_PDF_PIXELS / px);
+                    rw = Math.max(1, (int) (rw * scale));
+                    rh = Math.max(1, (int) (rh * scale));
+                }
+                Bitmap b = Bitmap.createBitmap(rw, rh, Bitmap.Config.ARGB_8888);
                 new Canvas(b).drawColor(Color.WHITE);
                 pg.render(b, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
                 return b;
@@ -491,6 +557,7 @@ final class WebFiles {
                 "custom", own != null, "source", own == null ? "" : own.getPath().startsWith(Theme.DIR) ? "theme" : "folder"));
         }
         o.put("apps", apps);
+        o.put("statusbar", Theme.statusBar());
         return o;
     }
 

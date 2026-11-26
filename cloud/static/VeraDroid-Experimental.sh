@@ -114,6 +114,7 @@ if [ -n "$EMU" ]; then
         echo "install $bid $now" > "$CF"; sync
         i=0
         while [ $i -lt 4 ]; do   # 书库界面可能会盖住：40 秒里重画几次
+            [ -f "$CF" ] || break
             screen "VeraDroid 实验机型 · 测试版" "这台：$EMU，固件 ${fwv:-?}" "-------------------------------" \
                 "这个机型只在模拟器上跑过，" "没有在真机上验证。可能无法启动；" "启动失败会自动回到 Kindle（最多约 15 分钟）。" \
                 "不会改动 Kindle 系统分区，只在用户存储里放文件。" "安装前会记下书库清单并备份小文件。" \
@@ -123,7 +124,10 @@ if [ -n "$EMU" ]; then
                 "device. It may not start; a failed start" "returns to the Kindle by itself (~15 min)." "The Kindle system partition is not changed." \
                 "Copy important books to a PC (USB) first!" "-----------------------------------------" \
                 "To INSTALL: tap this script again in" "10 s .. 2 min. To cancel: do nothing."
-            sleep 10; i=$((i + 1))
+            [ -f "$CF" ] || break
+            sleep 10
+            [ -f "$CF" ] || break
+            i=$((i + 1))
         done
         exit 0
     fi
@@ -132,8 +136,18 @@ say "VeraDroid：正在下载安装器…" "VeraDroid: downloading the installer
 # 只在模拟器上验证过的机型用老机型自己的安装器（static/bootstrap-legacy.sh，publish-legacy.sh 发布）：
 # 和 PW6 / PW5 / KT5 / KT6 共用的 bootstrap.sh 分开，发布老机型时不动它们的安装器
 BS_URL="$BASE/bootstrap.sh"; [ -n "$EMU" ] && BS_URL="$BASE/static/bootstrap-legacy.sh"
-curl -fsSL --retry 3 --connect-timeout 20 "$BS_URL?t=$(date +%s)" -o /tmp/vd-bootstrap.sh \
-    || { rc=$?; say "VeraDroid：下载安装器失败（curl $rc），正在检查网络…" "Download failed (curl $rc), checking network..."; net_why $rc; fail "VeraDroid：$NZ" "$NE"; }
+BS_ALT="https://dl.wenjin.jp/bootstrap.sh"; [ -n "$EMU" ] && BS_ALT="https://dl.wenjin.jp/static/bootstrap-legacy.sh"
+dl_bs() {
+    rm -f /tmp/vd-bootstrap.sh
+    for u in "$BS_URL?t=$(date +%s)" "$BS_ALT?t=$(date +%s)"; do
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 120 "$u" -o /tmp/vd-bootstrap.sh && [ -s /tmp/vd-bootstrap.sh ] && sh -n /tmp/vd-bootstrap.sh 2>/dev/null && return 0
+        rc=$?
+        echo "dl_bs: failed or truncated from $u (rc=$rc)"
+        rm -f /tmp/vd-bootstrap.sh
+    done
+    return "${rc:-1}"
+}
+dl_bs || { rc=$?; say "VeraDroid：下载安装器失败（curl $rc），正在检查网络…" "Download failed (curl $rc), checking network..."; net_why $rc; fail "VeraDroid：$NZ" "$NE"; }
 VD_INSTALLER="$0" sh /tmp/vd-bootstrap.sh
 rc=$?
 rm -f /tmp/vd-bootstrap.sh

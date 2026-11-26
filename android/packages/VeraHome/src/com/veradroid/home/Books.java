@@ -80,19 +80,19 @@ final class Books {
         String base = opf.contains("/") ? opf.substring(0, opf.lastIndexOf('/') + 1) : "";
 
         Map<String, String> items = new LinkedHashMap<String, String>();
-        Matcher im = Pattern.compile("(?is)<item\\b[^>]*>").matcher(xml);
+        Matcher im = Pattern.compile("(?is)<(?:\\w+:)?item\\b[^>]*>").matcher(xml);
         while (im.find()) {
             String id = attr(im.group(), "id");
             String href = attr(im.group(), "href");
             if (id != null && href != null) items.put(id, href);
         }
         String coverId = null;
-        Matcher meta = Pattern.compile("(?is)<meta\\b[^>]*name\\s*=\\s*[\"']cover[\"'][^>]*>").matcher(xml);
+        Matcher meta = Pattern.compile("(?is)<(?:\\w+:)?meta\\b[^>]*name\\s*=\\s*[\"']cover[\"'][^>]*>").matcher(xml);
         if (meta.find()) coverId = attr(meta.group(), "content");
         String coverHref = null;
         if (coverId != null) coverHref = items.get(coverId);
         if (coverHref == null) {
-            Matcher cm = Pattern.compile("(?is)<item\\b[^>]*properties\\s*=\\s*[\"'][^\"']*cover-image[^\"']*[\"'][^>]*>").matcher(xml);
+            Matcher cm = Pattern.compile("(?is)<(?:\\w+:)?item\\b[^>]*properties\\s*=\\s*[\"'][^\"']*cover-image[^\"']*[\"'][^>]*>").matcher(xml);
             if (cm.find()) coverHref = attr(cm.group(), "href");
         }
         if (coverHref == null) {
@@ -112,8 +112,13 @@ final class Books {
             }
         }
         if (coverHref != null) {
-            String path = resolve(base, coverHref);
-            if (z.getEntry(path) != null) i.coverEntry = path;
+            String decHref = Epub.pctDecode(coverHref);
+            String decBase = Epub.pctDecode(base);
+            String decPath = resolve(decBase, decHref);
+            String rawPath = resolve(base, coverHref);
+            if (z.getEntry(decPath) != null) i.coverEntry = decPath;
+            else if (z.getEntry(rawPath) != null) i.coverEntry = rawPath;
+            else if (z.getEntry(decHref) != null) i.coverEntry = decHref;
             else if (z.getEntry(coverHref) != null) i.coverEntry = coverHref;
         }
     }
@@ -133,10 +138,13 @@ final class Books {
                 if (e == null) return null;
                 InputStream in = z.getInputStream(e);
                 ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                byte[] b = new byte[32768];
-                int r;
-                while ((r = in.read(b)) > 0) { bo.write(b, 0, r); if (bo.size() > 8 * 1024 * 1024) break; }
-                in.close();
+                try {
+                    byte[] b = new byte[32768];
+                    int r;
+                    while ((r = in.read(b)) > 0) { bo.write(b, 0, r); if (bo.size() > 8 * 1024 * 1024) break; }
+                } finally {
+                    try { in.close(); } catch (Throwable ignored) { }
+                }
                 byte[] data = bo.toByteArray();
                 // Do not decode a 4000px cover at full size just to shrink it to 180px:
                 // on a 512 MB Kindle that alone can be tens of MB and OOM.
@@ -165,11 +173,23 @@ final class Books {
             pdf = new PdfRenderer(pfd);
             if (pdf.getPageCount() <= 0) return null;
             PdfRenderer.Page p = pdf.openPage(0);
-            Bitmap bm = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
-            bm.eraseColor(Color.WHITE);
-            p.render(bm, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-            p.close();
-            return bm;
+            try {
+                Bitmap bm = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
+                bm.eraseColor(Color.WHITE);
+                int pw = p.getWidth(), ph = p.getHeight();
+                if (pw > 0 && ph > 0) {
+                    float sc = Math.min(tw / (float) pw, th / (float) ph);
+                    android.graphics.Matrix m = new android.graphics.Matrix();
+                    m.postScale(sc, sc);
+                    m.postTranslate((tw - pw * sc) * 0.5f, (th - ph * sc) * 0.5f);
+                    p.render(bm, null, m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                } else {
+                    p.render(bm, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                }
+                return bm;
+            } finally {
+                p.close();
+            }
         } catch (Throwable ignored) {
             return null;
         } finally {
@@ -263,17 +283,21 @@ final class Books {
         try {
             ZipEntry e = z.getEntry(name);
             if (e == null) {
-                String d = java.net.URLDecoder.decode(name, "UTF-8");
-                e = z.getEntry(d);
+                String d = Epub.pctDecode(name);
+                if (!d.equals(name)) e = z.getEntry(d);
             }
             if (e == null) return null;
             InputStream in = z.getInputStream(e);
             ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            byte[] b = new byte[8192];
-            int n;
-            while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > 4 * 1024 * 1024) break; }
-            in.close();
-            return new String(bo.toByteArray(), "UTF-8");
+            try {
+                byte[] b = new byte[8192];
+                int n;
+                while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > 4 * 1024 * 1024) break; }
+            } finally {
+                try { in.close(); } catch (Throwable ignored) { }
+            }
+            byte[] raw = bo.toByteArray();
+            return Epub.decodeText(raw, raw.length);
         } catch (Throwable t) {
             return null;
         }
@@ -286,9 +310,9 @@ final class Books {
     }
 
     private static String attr(String tag, String name, String attrName) {
-        Matcher m = Pattern.compile("(?is)" + Pattern.quote(attrName) + "\\s*=\\s*\"([^\"]*)\"").matcher(tag);
+        Matcher m = Pattern.compile("(?is)(?:^|[\\s\"'/])" + Pattern.quote(attrName) + "\\s*=\\s*\"([^\"]*)\"").matcher(tag);
         if (m.find()) return m.group(1);
-        m = Pattern.compile("(?is)" + Pattern.quote(attrName) + "\\s*=\\s*'([^']*)'").matcher(tag);
+        m = Pattern.compile("(?is)(?:^|[\\s\"'/])" + Pattern.quote(attrName) + "\\s*=\\s*'([^']*)'").matcher(tag);
         if (m.find()) return m.group(1);
         return null;
     }
@@ -310,9 +334,6 @@ final class Books {
     }
 
     private static String html(String s) {
-        s = s.replaceAll("(?s)<[^>]+>", " ");
-        s = s.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-             .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'");
-        return s;
+        return Epub.htmlToText(s.replaceAll("(?s)<[^>]+>", " "));
     }
 }

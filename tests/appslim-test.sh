@@ -3,11 +3,13 @@
 # and apply / revert are idempotent against a mocked PackageManager (service call package 86 / 87).
 cd "$(dirname "$0")/.." || exit 2
 fail() { echo "FAIL: $*"; exit 1; }
-cmp -s host/pw6/boot/lib/appslim.sh host/k49/boot/lib/appslim.sh || fail "host/k49/boot/lib/appslim.sh differs from host/pw6"
-cmp -s host/pw6/boot/appslim.conf host/k49/boot/appslim.conf || fail "host/k49/boot/appslim.conf differs from host/pw6"
-for h in pw6 k49; do
+for h in k49 legacy; do
+    cmp -s host/pw6/boot/lib/appslim.sh host/$h/boot/lib/appslim.sh || fail "host/$h/boot/lib/appslim.sh differs from host/pw6"
+    cmp -s host/pw6/boot/appslim.conf host/$h/boot/appslim.conf || fail "host/$h/boot/appslim.conf differs from host/pw6"
+done
+for h in pw6 k49 legacy; do
     sh -n host/$h/boot/lib/appslim.sh || fail "syntax host/$h/boot/lib/appslim.sh"
-    grep -q ' memkeep appslim ' host/$h/boot/veradroid.sh || fail "host/$h/boot/veradroid.sh does not load appslim.sh"
+    grep -q ' appslim ' host/$h/boot/veradroid.sh || fail "host/$h/boot/veradroid.sh does not load appslim.sh"
     grep -q 'appslim_all boot' host/$h/boot/lib/afterboot.sh || fail "host/$h afterboot does not apply the list"
     grep -q 'appslim_all install' host/$h/boot/lib/cmd.sh || fail "host/$h install does not apply the list"
     grep -q 'appslim) *type appslim_cmd' host/$h/boot/lib/cmd.sh || fail "host/$h has no appslim command"
@@ -27,7 +29,7 @@ bad=$(grep -v '^[[:space:]]*\(#\|$\)' $C | sed 's/[[:space:]]*#.*//' | while rea
     case "$r" in (*[!0-9*-]*|*-*-*) echo "bad range: $p $r"; continue ;; esac
     case "$c" in (@default=lowmem|@default=on|@default=off) ;; (@*) echo "bad default: $p $c" ;;
         (*[!A-Za-z0-9._\$]*|'') echo "bad class: $p $c" ;;
-        (*SplashActivity|*MainActivity|*.account.*|*Login*|*Authenticator*) echo "must not disable: $p $c" ;; esac
+        (*Activity|*.account.*|*Login*|*Authenticator*) echo "must not disable: $p $c" ;; esac
 done)
 [ -z "$bad" ] || fail "appslim.conf: $bad"
 for p in $(grep -v '^[[:space:]]*\(#\|$\)' $C | awk '{print $1}' | sort -u); do

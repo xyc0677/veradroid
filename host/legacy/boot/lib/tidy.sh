@@ -123,7 +123,7 @@ vd_root_tidy() {
 # 包里自带的文件名记在 state/bundled.<文件夹>（整包安装时写）：带过去时跳过旧包自带的（新包有自己的那份；新包去掉的也不复活）。
 # 目标里已有同名文件的不动（包里有的以包为准）。这一段在 bootstrap*.sh 和各机型 boot/lib/tidy.sh 里是同一份
 # （tests/user-files-test.sh 核对）。set -eu 下不能失败。
-VD_USER_DIRS="fonts screensaver apps kindle-crash"
+VD_USER_DIRS="fonts screensaver apps kindle-crash webview-alt"
 # vd_user_carry 从 到 "文件夹…" [mv]：$1/<d>/ 下（含子文件夹）用户的文件拷进 $2/<d>/；mv=mv 时挪过去（同一个盘，卸载留下的那份）。
 # 同一个文件系统上先试硬链接（不多占地方，host.bak 里的那份照样能回退），不行再拷。输出带过去的文件数。
 vd_user_carry() {

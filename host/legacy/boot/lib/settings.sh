@@ -3,6 +3,19 @@
 settings_defaults() {
     RETURN_MODE=freeze     # 返回 Kindle 时：freeze = 冻结留在内存（再打开几秒），off = 关掉
     ZRAM_MB=512            # 运行期间的压缩内存（MB），0 = 不开
+    ZRAM_EXTRA=auto        # zram0 已在用、比 ZRAM_MB 小时再加一块 zram：auto（>= 700 MB 机型）| on | off
+    LMK_MINFREE=auto       # lmkd 杀进程门槛：auto（按内存，见 memkeep.sh）| stock（原厂大屏表）| "页数:adj ..."（最多 6 对）
+    MEM_KEEP=auto          # 桌面 / 输入法不换出（memory cgroup swappiness 0）：auto（>= 700 MB 机型）| on | off
+    MEM_KEEP_APPS=         # 另外也不换出的应用（逗号分隔的包名）
+    BG_FREEZE=0            # 切换应用冻结后台第三方应用（实验开关，默认关，见诊断 4330943330AB）
+    BG_STOP_MIN=0          # 后台应用定时停止：BG_STOP_APPS 里的应用离开前台超过这么多分钟就 force-stop，0 = 关
+    BG_STOP_APPS=          # 逗号分隔的包名（桌面 / 输入法 / 前台应用永远不停）
+    BOOT_BLOCK=1           # 1 = 第三方应用不许开机自启（pm disable 它们的开机广播接收器，闹钟 / 日历 / 待办类除外）；0 = 恢复（memkeep.sh）
+    APP_SLIM=auto          # 应用瘦身（appslim.sh / appslim.conf）：auto = 按每个应用的选择（“应用优化”的“后台瘦身”，跟随 = 清单默认）；0 = 全部恢复原样
+    BOOT_ALLOW=            # 允许开机自启的第三方应用（逗号分隔的包名）
+    WIFI_IDLE_OFF_MIN=0    # Android 在前台时 Wi-Fi 空闲（收发 < WIFI_IDLE_BPS 字节/秒）超过这么多分钟就关，换应用时再开；0 = 不关
+    WIFI_IDLE_BPS=512
+    KLIB_BIND=0            # 实验机型 Kindle 书库挂载：0 = 不挂载（默认安全）| ro = 只读挂载（可看原机书，零删书风险）| 1 = 读写挂载
     SLIM=1                 # 系统瘦身（lib/slim.sh）：1 = 停掉用不上的系统服务，0 = 原样
     HIDE_SU=1              # 1 = 应用看不到 su（lib/slim.sh su_hide：/system/xbin/su 改名 vdsu；加固应用见到 su 就自杀），0 = 原样
     LOWMEM=auto            # 低内存模式：auto = 内存不到约 700 MB 的机型自动开，on / off = 强制开 / 关（见下面 lowmem 的说明）
@@ -21,6 +34,7 @@ settings_defaults() {
     KFB_SETTLE=40          # 显示：滑动 / 动画时合并中间帧，静止这么多毫秒后才刷（0 = 每帧都刷）
     KFB_MODE=0             # 显示：刷新方式 0 均衡 1 灰度最准 2 最快
     KFB_HOLD=70            # 显示：小于屏幕 3% 的首个变化（按钮高亮）暂缓这么多毫秒，和随后的整页变化合成一次刷新（0 = 不暂缓）
+    KFB_SMOOTH=2           # 显示：统一刷新模式（0 自定义 / 1 快速 / 2 均衡 / 3 高清 / 4 极速 A2），经 smooth_apply 映射为 legacy 的 KFB_MODE / KFB_HOLD / KFB_SETTLE / KFB_SCROLLWFM
     KFB_ANIM_MODE=1        # 显示：翻页动画 0 关 1 跟随手势 2 左 3 右 4 上 5 下
     KFB_ANIM_DIR=2         # 动画方向：0 下 1 上 2 左 3 右（翻下一页通常用左）
     KFB_ANIM_STEPS=12      # 动画步数：越大越慢越细腻（MTK 驱动要求 <= 刷新区域宽/高）
@@ -33,7 +47,7 @@ settings_defaults() {
     KFB_SCROLLDELAY=500    # 触摸滚动（docs/legacy-perf.md）：手指拖动时每帧立刻用最快的波形刷、面板一刷完就刷最新的一帧（跟手）；
                            # 停下这么多毫秒后把拖动过的区域整块补刷一次（16 级灰、不闪）。0 = 关（回到以前：合并中间帧、按大小选波形）
     KFB_SCROLLSTYLE=1      # 1 拖动时跟手快刷；2 拖动时不刷，停下后刷一次（按应用设）
-    KFB_SCROLLWFM=a2       # 拖动时的波形：a2（i.MX 最快的 1 位波形，约为 DU 的一半时间）| du
+    KFB_SCROLLWFM=0        # 拖动时的波形：0 = DU（默认），1 = A2（极速 A2；兼容旧值 a2/du）
     FAST_DRAG=1            # 单指一动（超过拖动阈值）就马上交给 Android，不等双指判定窗口（G_WINDOW）走完
     KFB_EPD_NICE=-8        # 显示桥的优先级（nice）：单核老机型上应用画图时显示桥不再排在 Android 的界面线程后面。重启 Android 生效
     BG_NICE=10             # 后台应用（oom_score_adj >= 500）所有线程的 nice：老内核没有 cpu cgroup，Android 的后台组不生效（bgnice.sh）。0 = 关
@@ -49,6 +63,15 @@ settings_defaults() {
     G_TWO_SLIDE=1          # 双指上下滑：亮度 / 色温
     G_EDGE_SENS=1          # 边缘滑动灵敏度：0 低（条窄、要滑得长）1 标准 2 高（条宽、滑一点就算）
     G_BACK_EXCLUDE=com.tencent.weread.eink   # 这些 App 在前台时不做底边上滑返回（逗号分隔；none = 不排除）。微信读书上滑 = 阅读工具栏
+    G_EDGE_THIRDS=0        # 底边分三段：1 = 左/中/右三分之一上划分别做 G_EB_L / G_EB_M / G_EB_R，停住做 G_EB_HOLD；0 = 整条底边返回
+    G_EB_L=appopt          # 左段上划
+    G_EB_M=home            # 中段上划
+    G_EB_R=back            # 右段上划
+    G_EB_HOLD=switch       # 上划停住
+    G_EB_HOLD_MS=500       # 停住多久算上划停住（毫秒）
+    G_TAP=1                # 敲机壳翻页开关
+    G_TAP_KEY=voldown      # 敲机壳发的键
+    PASS_PX=12             # 单指移动超过这么多像素马上放给 Android
     UPDATE_BACKUP=full     # 更新前备份（安装器读，backup.sh）：full 设置、阅读进度和书 | light 只备份设置和阅读进度 | off 不备份。
                            # 只能经管理请求 updatebackup 改（不在下面 settings_apply 的键里：别的应用不能悄悄把备份关掉）
     DNS_MODE=auto          # DNS：auto（Wi-Fi 自动）| aliyun | tencent | google
@@ -165,10 +188,19 @@ settings_load() {
     [ -f "$VD/settings.test" ] && . "$VD/settings.test"
     # Low-memory mode: page-turn animation is an optional heavy feature, off unless the user chose one.
     if lowmem && ! grep -qs '^KFB_ANIM_MODE=' "$SYS/settings.conf"; then KFB_ANIM_MODE=0; fi
-    # 记下全局值：面板 / 设置页显示和修改的是全局设置，不能把“当前应用的单独设置”当成全局值发布出去
-    # （否则在某个应用里打开面板会看到“翻页动画关 / 刷新合并关”，再点一下别的就把它存成全局了）。
-    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN; do eval "GLOB_$k=\$$k"; done
-    [ -f "$SYS/settings.app" ] && . "$SYS/settings.app"       # 当前前台应用的显示参数（cmd.sh appdisp 写，已校验）
+    # 先按全局 KFB_SMOOTH 展开再记下全局值：面板 / 设置页显示和修改的是全局实际生效设置，
+    # 既不能把“当前应用的单独设置”当成全局值发布出去，也不能把被 smooth_apply 覆盖掉的旧 KFB_MODE 假回显为已生效。
+    smooth_apply
+    for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN; do eval "GLOB_$k=\$$k"; done
+    _am=; _as=
+    if [ -f "$SYS/settings.app" ]; then
+        . "$SYS/settings.app"       # 当前前台应用的显示参数（cmd.sh appdisp 写，已校验）
+        _am=$(sed -n 's/^KFB_MODE=//p' "$SYS/settings.app" 2>/dev/null)
+        _as=$(sed -n 's/^KFB_SMOOTH=//p' "$SYS/settings.app" 2>/dev/null)
+        [ -n "$_am" ] && [ -z "$_as" ] && KFB_SMOOTH=0
+    fi
+    smooth_apply
+    [ -n "$_am" ] && [ -z "$_as" ] && KFB_MODE=$_am
     # 512 MB devices: default to full exit when returning to Kindle, unless the
     # user already set RETURN_MODE. A frozen WeRead + Home sits on ~200 MB and
     # is what LMK then shoots (adj 0) when the user re-opens it.
@@ -182,12 +214,25 @@ settings_load() {
     if [ ! -e /proc/self/ns/pid ] && [ "$RETURN_MODE" != off ]; then RETURN_MODE=off; RETURN_MODE_FORCED=hostns; fi
 }
 
+# 统一 4 档刷新模式（KFB_SMOOTH）映射到 legacy 显示桥参数（0 = 自定义，保持用户手动项）
+smooth_apply() {
+    case "$KFB_SMOOTH" in
+        1) KFB_MODE=2; KFB_HOLD=0;  KFB_SETTLE=30; KFB_SCROLLWFM=0 ;;
+        2) KFB_MODE=0; KFB_HOLD=70; KFB_SETTLE=40; KFB_SCROLLWFM=0 ;;
+        3) KFB_MODE=1; KFB_HOLD=0;  KFB_SETTLE=40; KFB_SCROLLWFM=0 ;;
+        4) KFB_MODE=2; KFB_HOLD=0;  KFB_SETTLE=20; KFB_SCROLLWFM=1 ;;
+        *) KFB_SMOOTH=0 ;;
+    esac
+}
+
 # 把当前设置写给桌面看（/dev/kfb/settings）
 settings_publish() {
-    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG UPDATE_BACKUP USB_ASK PAGE_KEYS_MAP; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; echo "PAGE_KEYS_HW=$([ -n "$PAGE_KEYS" ] && echo 1 || echo 0)"; } > $X/settings.tmp \
+    { for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_HWC KFB_HZ KFB_DIM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE TIME_12_24 BG_FREEZE SAVER_EXIT_H GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG UPDATE_BACKUP USB_ASK KLIB_BIND PAGE_KEYS_MAP; do eval "echo $k=\${GLOB_$k:-\$$k}"; done; echo "PAGE_KEYS_HW=$([ -n "$PAGE_KEYS" ] && echo 1 || echo 0)"; } > $X/settings.tmp \
         && printf 'SYSTEM_FONT=%s\nSYSTEM_FONT_LIVE=%s\n' "$SYSTEM_FONT" "$(cat $W/sysfont/android 2>/dev/null)" >> $X/settings.tmp \
         && mv -f $X/settings.tmp $X/settings
     type ub_mirror >/dev/null 2>&1 && ub_mirror      # 安装器读的副本（backup.sh）
+    mkdir -p /mnt/base-us/veradroid/state 2>/dev/null
+    if [ "${STORAGE_AUTO:-1}" = 0 ]; then echo 0; else echo 1; fi > /mnt/base-us/veradroid/state/storage.auto 2>/dev/null
     return 0
 }
 # 桌面写了 ctl/settings.new（KEY=value 行）：只接受已知的键和简单的值，合并进 settings.conf，立即生效的推给显示桥
@@ -195,12 +240,12 @@ settings_apply() {
     # 先把文件挪走再读：看门狗和命令监听会同时调到这里（桌面发 apply 的同时看门狗看到 settings.new），
     # 以前两个一起读同一个文件，一个读完删掉，另一个满屏 "sed: settings.new: No such file"，那次设置可能没存上（用户诊断）
     sfile=$W/settings.apply.$$.$(cut -d' ' -f1 /proc/uptime | tr -d .)
-    mv -f $X/ctl/settings.new "$sfile" 2>/dev/null || return 0
+    mv -f $X/home/settings.new "$sfile" 2>/dev/null || mv -f $X/ctl/settings.new "$sfile" 2>/dev/null || return 0
     touch $SYS/settings.conf
     if [ -s "$sfile" ]; then
         sa_raw=" $(tr '\n' ' ' < "$sfile") "
-        sa_upd=""
-        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_TWO_TAP_ACT G_TWO_LONG_ACT WIFI_PS APP_COMPILE TIME_12_24 GESTURE_HINT BOOST_MS BOOST_KHZ KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK PAGE_KEYS_MAP; do
+        : > "$sfile.upd"
+        for k in KFB_CONTRAST KFB_DITHER KFB_FLASH KFB_INVERT KFB_LIGHTF KFB_DARKEN KFB_MODE KFB_SETTLE KFB_HOLD KFB_SMOOTH KFB_HWC KFB_HZ KFB_DIM KFB_ANIM_MODE KFB_ANIM_DIR KFB_ANIM_STEPS KFB_ANIM_MIN KFB_GESTURES KFB_ROTATE RETURN_MODE LOWMEM KINDLE_UI DNS_MODE G_TL G_TR G_BL G_BR G_EDGE_BACK G_EDGE_PANEL G_TWO_TAP G_TWO_LONG G_TWO_BACK G_TWO_SLIDE G_EDGE_SENS STORAGE_AUTO G_BACK_EXCLUDE G_EDGE_THIRDS G_EB_L G_EB_M G_EB_R G_EB_HOLD G_EB_HOLD_MS G_TWO_TAP_ACT G_TWO_LONG_ACT G_TAP G_TAP_KEY WIFI_PS APP_COMPILE TIME_12_24 BG_FREEZE SAVER_EXIT_H GESTURE_HINT BOOST_MS BOOST_KHZ SCROLL_PX PASS_PX KFB_SCROLLDELAY KFB_SCROLLSTYLE KFB_SCROLLWFM FAST_DRAG USB_ASK KLIB_BIND PAGE_KEYS_MAP; do
             case "$sa_raw" in *" $k="*) ;; *) continue ;; esac
             v=$(sed -n "s/^$k=//p" "$sfile" | tail -1)
             [ -n "$v" ] || continue
@@ -210,32 +255,28 @@ settings_apply() {
                 KINDLE_UI=auto|KINDLE_UI=keep|KINDLE_UI=freeze|KINDLE_UI=stop) ;; KINDLE_UI=*) continue ;;
                 GESTURE_HINT=all|GESTURE_HINT=stuck|GESTURE_HINT=off|GESTURE_HINT=default) ;; GESTURE_HINT=*) continue ;;
                 PAGE_KEYS_MAP=volume|PAGE_KEYS_MAP=page|PAGE_KEYS_MAP=dpad|PAGE_KEYS_MAP=default) ;; PAGE_KEYS_MAP=*) continue ;;
+                KLIB_BIND=0|KLIB_BIND=ro|KLIB_BIND=1|KLIB_BIND=default) ;; KLIB_BIND=*) continue ;;
+                BG_FREEZE=0|BG_FREEZE=1|BG_FREEZE=default) ;; BG_FREEZE=*) continue ;;
             esac
-            sa_upd="${sa_upd}${k}=${v}
-"
+            printf '%s=%s\n' "$k" "$v" >> "$sfile.upd"
         done
-        if [ -n "$sa_upd" ]; then
+        if [ -s "$sfile.upd" ]; then
+            if grep -q '^KFB_MODE=' "$sfile.upd" && ! grep -q '^KFB_MODE=default$' "$sfile.upd" && ! grep -q '^KFB_SMOOTH=' "$sfile.upd"; then
+                printf 'KFB_SMOOTH=0\n' >> "$sfile.upd"
+            fi
             # KEY=default：删掉用户的设置，回到默认值（机型默认 / models/<id>.conf / settings_defaults）——桌面“恢复默认设置”用
-            awk -v upd_str="$sa_upd" '
-                BEGIN {
-                    n = split(upd_str, lines, "\n")
-                    for (i = 1; i <= n; i++) {
-                        eq = index(lines[i], "=")
-                        if (eq > 1) { k = substr(lines[i], 1, eq - 1); upd[k] = substr(lines[i], eq + 1); ord[++m] = k }
-                    }
-                }
-                {
-                    eq = index($0, "=")
-                    if (eq > 1 && (substr($0, 1, eq - 1) in upd)) next
-                    print
-                }
-                END {
-                    for (i = 1; i <= m; i++) {
-                        k = ord[i]
-                        if (upd[k] != "default") print k "=" upd[k]
-                    }
-                }
-            ' "$SYS/settings.conf" > "$sfile.conf" 2>/dev/null && mv -f "$sfile.conf" $SYS/settings.conf
+            # 纯 POSIX + 同文件系统临时文件原子替换（避免老固件 BusyBox awk 兼容性差异与跨分区 mv 静默失败）
+            sa_tmp="$SYS/.settings.conf.tmp.$$"
+            cp "$SYS/settings.conf" "$sa_tmp" 2>/dev/null || : > "$sa_tmp"
+            sa_ok=1
+            while IFS='=' read -r sa_k sa_v; do
+                [ -n "$sa_k" ] || continue
+                grep -v "^${sa_k}=" "$sa_tmp" > "$sa_tmp.n" 2>/dev/null || : > "$sa_tmp.n"
+                [ "$sa_v" = default ] || printf '%s=%s\n' "$sa_k" "$sa_v" >> "$sa_tmp.n"
+                mv -f "$sa_tmp.n" "$sa_tmp" || { sa_ok=0; break; }
+            done < "$sfile.upd"
+            if [ "$sa_ok" = 1 ] && mv -f "$sa_tmp" "$SYS/settings.conf"; then :
+            else rm -f "$sa_tmp" "$sa_tmp.n"; t "settings: failed to update $SYS/settings.conf"; fi
         fi
     fi
     # 系统字体：值是路径（有 /、-、空格、中文），不走上面那条只认 [0-9A-Za-z._,] 的规则。只收三个字体目录里的文件（sysfont_host），
@@ -257,10 +298,16 @@ settings_apply() {
             t "settings: SYSTEM_FONT rejected"
         fi
     fi
-    rm -f "$sfile" "$sfile.conf"
+    sa_dns_ch=0
+    grep -q '^DNS_MODE=' "$sfile.upd" 2>/dev/null && sa_dns_ch=1
+    rm -f "$sfile" "$sfile.upd" "$sfile.conf"
     pk_before=$PAGE_KEYS_MAP
+    dns_before=$DNS_MODE
     settings_load
     settings_publish
+    # 手势开关：输入程序每次触摸前看这个标记文件（先写手势，不被 ndc / 显示桥阻塞）
+    if [ "$KFB_GESTURES" = 0 ]; then touch $W/nogestures; else rm -f $W/nogestures; fi
+    gestures_write
     # 实体翻页键发成什么键（memory.sh）：改了就重写键位表，让 Android 重新打开这个设备（立即生效）
     [ "$PAGE_KEYS_MAP" != "$pk_before" ] && type page_keys_apply >/dev/null 2>&1 && page_keys_apply
     # ANIM 必须先于 SET：显示桥收到 SET 会立刻重绘，若 ANIM 在后面，这次重绘仍用旧步数，
@@ -269,43 +316,63 @@ settings_apply() {
     epd_send SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}
     epd_send HOLD ${KFB_HOLD:-70}
     epd_send_scroll
-    dns_apply
-    # 手势开关：输入程序每次触摸前看这个标记文件
-    if [ "$KFB_GESTURES" = 0 ]; then touch $W/nogestures; else rm -f $W/nogestures; fi
-    gestures_write
+    # 仅 DNS_MODE 改动时才进容器跑 ndc（避免每次改显示/手势都阻塞命令循环 1–3 秒）
+    if [ "$sa_dns_ch" = 1 ] || [ "$DNS_MODE" != "$dns_before" ]; then dns_apply; fi
     # 新键（docs/host-settings.md）：立即生效的部分
     type wifi_ps_tick >/dev/null 2>&1 && [ ! -f $W/frozen ] && wifi_ps_tick
     type time_format_apply >/dev/null 2>&1 && alive $W/pid && time_format_apply
     [ "$APP_COMPILE" = off ] && rm -f $W/compile.queue
+    [ "${BG_FREEZE:-0}" != 1 ] && type bg_thaw_all >/dev/null 2>&1 && bg_thaw_all
     t "settings applied: contrast=$KFB_CONTRAST dither=$KFB_DITHER flash=$KFB_FLASH invert=$KFB_INVERT lightf=${KFB_LIGHTF:-0} darken=${KFB_DARKEN:-0}"
     rotate_apply      # 旋转变了才有动作（cmd.sh）
 }
 
 
-# 可选 DNS：Android 的 netd 里把 eth0（netId 100）的解析器换掉；不碰 Kindle 的 /etc/resolv.conf。
-# auto = slirp 给的 10.157.43.3；其余是公共 DNS。
+# 可选 DNS：Android 的 netd 里把当前活跃网络（动态解析 netId，回退 100）的解析器换掉；不碰 Kindle 的 /etc/resolv.conf。
+# auto = slirp 给的 10.157.43.3；其余是公共 DNS。兼容旧版方块设置写过的 ali / dnspod 别名。
 dns_apply() {
+    [ -f $W/frozen ] && return 0
     case "$DNS_MODE" in
-        aliyun)  d1=223.5.5.5; d2=223.6.6.6 ;;
-        tencent) d1=119.29.29.29; d2=182.254.116.116 ;;
-        google)  d1=8.8.8.8; d2=8.8.4.4 ;;
-        *)       d1=10.157.43.3; d2= ;;
+        aliyun|ali)     d1=223.5.5.5; d2=223.6.6.6 ;;
+        tencent|dnspod) d1=119.29.29.29; d2=182.254.116.116 ;;
+        google)         d1=8.8.8.8; d2=8.8.4.4 ;;
+        *)              d1=10.157.43.3; d2= ;;
     esac
     # hostnet（chroot，共用 Kindle 网络）没有 slirp，10.157.43.3 不存在：auto 时用写给系统的那份 DNS（ANDROID_DNS + Kindle 的）
-    if [ "$DNS_MODE" != aliyun ] && [ "$DNS_MODE" != tencent ] && [ "$DNS_MODE" != google ] && [ -s $X/hostnet ]; then
-        d1=$(sed -n "s/^dns=//p" $X/hostnet | sed -n 1p); d2=$(sed -n "s/^dns=//p" $X/hostnet | sed -n 2p)
-        [ -n "$d1" ] || return 0
-    fi
+    case "$DNS_MODE" in
+        aliyun|ali|tencent|dnspod|google) ;;
+        *)
+            if [ -s $X/hostnet ]; then
+                d1=$(sed -n "s/^dns=//p" $X/hostnet | sed -n 1p); d2=$(sed -n "s/^dns=//p" $X/hostnet | sed -n 2p)
+                [ -n "$d1" ] || return 0
+            fi ;;
+    esac
     pid=$(cat $W/pid 2>/dev/null)   # 以前读 $X/pid（从来没人写），DNS 选择一直没生效
     [ -n "$pid" ] || return 0
-    P=$pid; $(vd_in) /system/bin/sh -c "export ANDROID_DATA=/data ANDROID_ROOT=/system PATH=/system/bin; ndc resolver setnetdns 100 '' $d1 $d2" >/dev/null 2>&1
-    t "dns $DNS_MODE ($d1 $d2)"
+    P=$pid
+    nid=$(vd_timeout 15 $(vd_in) /system/bin/sh -c "
+        export ANDROID_DATA=/data ANDROID_ROOT=/system PATH=/system/bin
+        nid=\$(dumpsys connectivity 2>/dev/null | sed -n 's/.*Active default network: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+        [ -n \"\$nid\" ] || nid=\$(dumpsys connectivity 2>/dev/null | sed -n '/NetworkAgentInfo.* - \([0-9][0-9]*\)/s/.* - \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+        if [ -z \"\$nid\" ] && [ -r /data/misc/net/rt_tables ]; then
+            while read -r tn nm _; do
+                case \"\$nm\" in eth0|wlan0)
+                    case \"\$tn\" in *[!0-9]*|'') ;; *) [ \"\$tn\" -ge 1100 ] && { nid=\$((tn - 1000)); break; } ;; esac ;;
+                esac
+            done < /data/misc/net/rt_tables
+        fi
+        case \"\$nid\" in ''|*[!0-9]*) nid=100 ;; esac
+        ndc resolver setnetdns \"\$nid\" '' $d1 $d2 >/dev/null 2>&1
+        echo \"\$nid\"
+    " 2>/dev/null | tr -d '\r\n')
+    t "dns $DNS_MODE ($d1 $d2, netId=${nid:-100})"
 }
 
 # 触摸滚动的几条（显示桥 SCROLLDELAY / SCROLLSTYLE / SCROLLWFM 等，docs/legacy-perf.md）。appprof.sh 切换应用时也发
-# （那份文件三个宿主相同：它看到 epd_scroll_lines 才发）
+# （那份文件三个宿主相同：它看到 epd_scroll_lines 才发）。display/epd.c SCROLLWFM 只认 0/1，兼容旧设置里的 a2/du。
 epd_scroll_lines() {
-    echo "SCROLLDELAY ${KFB_SCROLLDELAY:-500}"; echo "SCROLLSTYLE ${KFB_SCROLLSTYLE:-1}"; echo "SCROLLWFM ${KFB_SCROLLWFM:-a2}"
+    case "${KFB_SCROLLWFM:-0}" in 1|a2) _sw=1 ;; *) _sw=0 ;; esac
+    echo "SCROLLDELAY ${KFB_SCROLLDELAY:-500}"; echo "SCROLLSTYLE ${KFB_SCROLLSTYLE:-1}"; echo "SCROLLWFM $_sw"
     echo "MONO ${KFB_MONO:-0}"; echo "MAXDEFER ${KFB_MAXDEFER:-1200}"; echo "FLIPINPUT ${KFB_FLIPINPUT:-1000}"
 }
 epd_send_scroll() {
@@ -318,9 +385,13 @@ gestures_write() {
     eb=${G_EDGE_BACK:-1}; [ "${KFB_EDGE_BACK:-1}" = 0 ] && eb=0   # 旧设置 KFB_EDGE_BACK=0 仍然有效
     { echo "G_EDGE_BACK=$eb"; echo "G_EDGE_PANEL=${G_EDGE_PANEL:-1}"; echo "G_TWO_TAP=${G_TWO_TAP:-1}"; echo "G_TWO_LONG=${G_TWO_LONG:-1}"
       echo "G_TWO_BACK=${G_TWO_BACK:-1}"; echo "G_TWO_SLIDE=${G_TWO_SLIDE:-1}"; echo "G_EDGE_SENS=${G_EDGE_SENS:-1}"; echo "G_BACK_EXCLUDE=${G_BACK_EXCLUDE:-none}"
+      echo "G_TAP=${G_TAP:-1}"; echo "G_TAP_KEY=${G_TAP_KEY:-voldown}"
+      echo "G_EDGE_THIRDS=${G_EDGE_THIRDS:-0}"; echo "G_EB_L=${G_EB_L:-appopt}"; echo "G_EB_M=${G_EB_M:-home}"; echo "G_EB_R=${G_EB_R:-back}"
+      echo "G_EB_HOLD=${G_EB_HOLD:-switch}"; echo "G_EB_HOLD_MS=${G_EB_HOLD_MS:-500}"
       cs=; for c in TL:tl TR:tr BL:bl BR:br; do eval "a=\${G_${c%%:*}:-none}"; [ "$a" = none ] || cs="$cs${cs:+,}${c#*:}"; done
       # 触摸加速和拖动信号（SCROLL 1 / 0 给显示桥的触摸滚动方式；KFB_SCROLLDELAY=0 时显示桥自己不理）
-      echo "BOOST_MS=${BOOST_MS:-150}"; echo "BOOST_KHZ=${BOOST_KHZ:-0}"; echo "SCROLL_PX=${SCROLL_PX:-20}"; echo "FAST_DRAG=${FAST_DRAG:-1}"
+      _pp=${PASS_PX:-12}; [ "${FAST_DRAG:-1}" = 0 ] && _pp=0
+      echo "BOOST_MS=${BOOST_MS:-150}"; echo "BOOST_KHZ=${BOOST_KHZ:-0}"; echo "SCROLL_PX=${SCROLL_PX:-20}"; echo "PASS_PX=$_pp"; echo "FAST_DRAG=${FAST_DRAG:-1}"
       echo "G_CORNERS=${cs:-none}"   # 只有配了动作的角才算手势，别的角的长按照样给 Android
       echo "ROTATE=$(rot_deg)"; } > $W/gestures.tmp \
         && mv -f $W/gestures.tmp $W/gestures

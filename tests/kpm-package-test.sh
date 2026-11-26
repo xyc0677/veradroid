@@ -70,5 +70,24 @@ done <<EOF
 $PKGS
 EOF
 [ -n "$PKGS" ] || { echo "FAIL no KPM packages found"; fail=1; }
+cmp -s "$REPO/kpm/manifest.v2.json" "$REPO/cloud/static/kpm/manifest.v2.json" || { echo "FAIL kpm/manifest.v2.json and cloud/static/kpm/manifest.v2.json differ"; fail=1; }
+python3 - "$REPO" $PKGS <<'PY' || fail=1
+import json, os, sys
+repo = sys.argv[1]
+pkg_dirs = sys.argv[2:]
+m = json.load(open(os.path.join(repo, 'kpm', 'manifest.v2.json')))
+pkgs = m.get('packages') or {}
+for d in pkg_dirs:
+    name = os.path.basename(d)
+    assert name in pkgs, f'missing {name} in kpm/manifest.v2.json'
+    pm = json.load(open(os.path.join(d, 'manifest.json')))
+    arts = pkgs[name].get('artifacts') or []
+    assert arts, f'no artifacts for {name}'
+    art = arts[0]
+    ver = '.'.join(str(x) for x in art.get('version') or [])
+    assert ver == pm['version'], f'{name} version mismatch: repo={ver} pkg={pm["version"]}'
+    assert f'{name}_{ver}_' in (art.get('url') or ''), f'{name} url version mismatch: {art.get("url")}'
+print('repo manifest sync and versions ok')
+PY
 [ "$fail" = 0 ] && echo "ALL KPM PACKAGES OK" || echo "KPM PACKAGE FAILURES"
 exit "$fail"

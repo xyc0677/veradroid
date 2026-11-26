@@ -17,12 +17,13 @@ jankrec_loop() {
     while :; do
         if [ -e $W/frozen ] || [ -e $X/ctl/sleep ]; then sleep 5; continue; fi
         # one awk for the whole line (each fork costs ~10 ms of CPU here)
+        cf=; [ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ] && cf=/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
         awk 'FILENAME == "/proc/uptime" { printf "%s ", $1 }
              FILENAME == "/proc/stat" && $1 == "cpu" { printf "cpu=%d,%d,%d,%d ", $2+$3, $4+$7+$8, $5, $6 }
              FILENAME == "/proc/vmstat" && $1 ~ /^(pgmajfault|pgpgin|pswpin|pswpout|workingset_refault_file|pgsteal_direct|pgscan_kswapd|allocstall_movable)$/ { printf "%s=%s ", $1, $2 }
              FILENAME ~ /cpufreq/ { printf "freq=%s ", $1 }
              FILENAME == "/proc/meminfo" && $1 == "MemAvailable:" { printf "avail=%s", $2 }
-             END { print "" }' /proc/uptime /proc/stat /proc/vmstat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq /proc/meminfo >> $JR/vm 2>/dev/null
+             END { print "" }' /proc/uptime /proc/stat /proc/vmstat $cf /proc/meminfo >> $JR/vm 2>/dev/null
         if [ $((n % 12)) = 11 ]; then tail -n 12 $JR/vm > $JR/vm.t && mv -f $JR/vm.t $JR/vm; fi
         if [ $((n % 5)) = 0 ]; then
             i=$((n / 5 % 3))

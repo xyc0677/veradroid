@@ -92,19 +92,32 @@ SAVER_MAXALL=100663296
 saver_cmd() {
     case "$1" in
     list)
-        rm -rf $X/saver $X/saver.tmp; mkdir -p $X/saver.tmp || return 0
-        n=0; tot=0; : > $X/saver.tmp/.skipped
+        rm -rf $X/saver $X/saver.tmp $X/ctl/saver.listed; mkdir -p $X/saver.tmp || return 0
+        mem_kb=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null | head -1)
+        maxall=$SAVER_MAXALL
+        [ -n "$mem_kb" ] && [ "$mem_kb" -le 600000 ] && maxall=25165824
+        n=0; tot=0; : > $X/saver.tmp/.skipped; : > $X/saver.tmp/.cached
         for f in "$VD"/screensaver/*; do
             [ -f "$f" ] && [ ! -L "$f" ] || continue
             saver_is_img "$f" || continue
             case "${f##*/}" in default.png|default.PNG) continue ;; esac
             sz=$(wc -c < "$f" | tr -d ' ')
-            if [ "$sz" -gt $SAVER_MAX1 ] || [ $((tot + sz)) -gt $SAVER_MAXALL ] || [ $n -ge 60 ]; then
-                printf '%s\t%s\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
+            if [ $n -ge 60 ]; then
+                printf '%s\t%s\tcount\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
+            fi
+            if [ "$sz" -gt $SAVER_MAX1 ]; then
+                printf '%s\t%s\tsize\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
+            fi
+            if saver_cached "$f"; then
+                printf '%s\n' "${f##*/}" >> $X/saver.tmp/.cached
+                n=$((n + 1)); continue
+            fi
+            if [ $((tot + sz)) -gt $maxall ]; then
+                printf '%s\t%s\ttotal\n' "${f##*/}" "$sz" >> $X/saver.tmp/.skipped; continue
             fi
             cp -p "$f" $X/saver.tmp/ 2>/dev/null && { n=$((n + 1)); tot=$((tot + sz)); }
         done
-        for f in /usr/share/blanket/screensaver/bg_ss*.png; do [ -f "$f" ] && { cp "$f" $X/saver.tmp/.kindle-preview.png; break; }; done
+        for f in /usr/share/blanket/screensaver/bg_ss*.png; do [ -f "$f" ] && { cp "$f" $X/saver.tmp/.kindle-preview.png 2>/dev/null; break; }; done
         pw=; ph=
         if [ -x "$FBINK" ]; then
             fe=$("$FBINK" -e 2>/dev/null | tr ';' '\n')
@@ -120,7 +133,7 @@ saver_cmd() {
             [ $c -gt 0 ] && printf '%s\t%s\n' "${d#/mnt/us/}" "$c" >> $X/saver.tmp/.elsewhere
         done
         chmod 755 $X/saver.tmp; chmod 644 $X/saver.tmp/* $X/saver.tmp/.[a-z]* 2>/dev/null
-        mv $X/saver.tmp $X/saver; : > $X/ctl/saver.listed
+        mv $X/saver.tmp $X/saver; : > $X/ctl/saver.listed && chmod 644 $X/ctl/saver.listed 2>/dev/null
         t "screensaver: exported $n image(s) from veradroid/screensaver for the picker$([ -s $X/saver/.skipped ] && echo ", $(wc -l < $X/saver/.skipped | tr -d ' ') too big")" ;;
     done) rm -rf $X/saver $X/saver.tmp $X/ctl/saver.listed ;;
     esac
@@ -143,6 +156,8 @@ saver_dir_fix() {
     mkdir -p "$sdd/Screensaver" 2>/dev/null || return 0
     chown 1023:1023 "$sdd/Screensaver" 2>/dev/null || true; chmod 777 "$sdd/Screensaver" 2>/dev/null || true
     sdn="$sdd/Screensaver/把屏保图片放这里.txt"
+    [ -L "$sdn" ] && rm -f "$sdn" 2>/dev/null
+    [ -L "$sdn" ] && return 0
     if [ "$(cat "$sdn" 2>/dev/null)" != "$SAVER_NOTE_SD" ]; then
         { printf '%s\n' "$SAVER_NOTE_SD" > "$sdn" && chmod 644 "$sdn" && chown 1023:1023 "$sdn"; } 2>/dev/null || true
     fi

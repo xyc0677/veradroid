@@ -78,6 +78,7 @@ int limits(GLenum pname, GLint* v) {
     case GL_IMPLEMENTATION_COLOR_READ_FORMAT: v[0] = GL_RGBA; return 1;
     case GL_IMPLEMENTATION_COLOR_READ_TYPE: v[0] = GL_UNSIGNED_BYTE; return 1;
     case GL_NUM_COMPRESSED_TEXTURE_FORMATS: case GL_NUM_SHADER_BINARY_FORMATS: v[0] = 0; return 1;
+    case GL_SHADER_COMPILER: v[0] = GL_TRUE; return 1;
     case GL_COMPRESSED_TEXTURE_FORMATS: case GL_SHADER_BINARY_FORMATS: return -1;   // zero values follow
     case GL_ALIASED_POINT_SIZE_RANGE: case GL_ALIASED_LINE_WIDTH_RANGE: v[0] = 1; v[1] = 1; return 2;
     case GL_VIEWPORT: case GL_SCISSOR_BOX: v[0] = v[1] = 0; v[2] = v[3] = 1; return 4;
@@ -108,8 +109,29 @@ void v_glGetInfoLog(GLuint, GLsizei bufSize, GLsizei* length, GLchar* log) {
     if (log && bufSize > 0) log[0] = 0;
 }
 void v_glReadPixels(GLint, GLint, GLsizei w, GLsizei h, GLenum format, GLenum type, void* pixels) {
-    if (pixels && w > 0 && h > 0 && type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_BGRA_EXT))
-        memset(pixels, 0, (size_t)w * (size_t)h * 4);
+    if (!pixels || w <= 0 || h <= 0) return;
+    size_t bpp = 0;
+    switch (type) {
+    case GL_UNSIGNED_BYTE:
+        switch (format) {
+        case GL_RGBA: case GL_BGRA_EXT: bpp = 4; break;
+        case GL_RGB: bpp = 3; break;
+        case GL_LUMINANCE_ALPHA: bpp = 2; break;
+        case GL_ALPHA: case GL_LUMINANCE: bpp = 1; break;
+        }
+        break;
+    case GL_UNSIGNED_SHORT_5_6_5:
+    case GL_UNSIGNED_SHORT_4_4_4_4:
+    case GL_UNSIGNED_SHORT_5_5_5_1:
+        bpp = 2;
+        break;
+    }
+    if (!bpp) return;
+    size_t row = (size_t)w;
+    if (row > SIZE_MAX / bpp) return;
+    row *= bpp;
+    if ((size_t)h > SIZE_MAX / row) return;
+    memset(pixels, 0, row * (size_t)h);
 }
 
 struct Entry { const char* name; void* fn; };
@@ -120,6 +142,8 @@ const Entry kOverrides[] = {
     { "glGenRenderbuffers", (void*)v_glGenRenderbuffers },
     { "glGenQueriesEXT", (void*)v_glGenQueriesEXT },
     { "glGenVertexArraysOES", (void*)v_glGenVertexArraysOES },
+    { "glGenVertexArrays", (void*)v_glGenBuffers },
+    { "glGenSamplers", (void*)v_glGenBuffers },
     { "glCreateShader", (void*)v_glCreateShader },
     { "glCreateProgram", (void*)v_glCreateProgram },
     { "glIsBuffer", (void*)v_glIsObject },

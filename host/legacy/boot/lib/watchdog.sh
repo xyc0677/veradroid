@@ -16,7 +16,9 @@ diag_save() {
         echo "cmdline=$(cat /proc/cmdline 2>/dev/null)"
         echo "soc=$(cat /proc/device-tree/compatible 2>/dev/null | tr '\0' ' ')"
         echo "fb=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)"
-        echo "battery=$(cat /sys/class/power_supply/bd71827_bat/capacity 2>/dev/null)"
+        _dbat=; for _bp in /sys/class/power_supply/*; do [ "$(cat "$_bp/type" 2>/dev/null)" = Battery ] && _dbat=$(cat "$_bp/capacity" 2>/dev/null) && [ -n "$_dbat" ] && break; done
+        [ -n "$_dbat" ] || _dbat=$(lipc-get-prop com.lab126.powerd battLevel 2>/dev/null)
+        echo "battery=$_dbat"
     } > $d/README.txt 2>/dev/null
     cp $LOG $d/veradroid.log 2>/dev/null
     cp $W/epd.log $d/epd.log 2>/dev/null
@@ -91,8 +93,10 @@ diag_save() {
             adb_sh 'export PATH=/system/bin:/system/xbin; settings list secure' > $d/android-settings-secure.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; ip addr' > $d/android-ip.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; netstat -tunlp' > $d/android-netstat.txt 2>&1
-            adb_sh 'export PATH=/system/bin:/system/xbin; top -n 1 -d 1 -m 40' > $d/android-top.txt 2>&1
-            adb_sh 'export PATH=/system/bin:/system/xbin; top -H -n 1 -d 1 -m 60' > $d/android-top-threads.txt 2>&1
+            # AOSP 7.1 toolbox top -n 1 compares two back-to-back /proc/stat reads without sleeping first,
+            # dividing by total_delta_time==0 (SIGFPE) and dropping bogus tombstones. Use host BusyBox top + Android ps -t.
+            top -b -n 1 > $d/android-top.txt 2>&1 || true
+            adb_sh 'export PATH=/system/bin:/system/xbin; ps -t' > $d/android-top-threads.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; ps -A -o USER,PID,PPID,VSZ,RSS,STAT,NAME' > $d/android-ps-all.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; dumpsys -l' > $d/android-dumpsys-list.txt 2>&1
             adb_sh 'export PATH=/system/bin:/system/xbin; dumpsys cpuinfo' > $d/android-cpuinfo.txt 2>&1
@@ -139,8 +143,9 @@ do_exit() {
             cpu_gov_restore 2>/dev/null || true   # android_freeze 切到 powersave 是给屏保用的；回到 Kindle 界面要恢复原来的调速器
             input_release
             wifi_ps_restore 2>/dev/null || true   # 回到 Kindle：Wi-Fi 省电交还 Kindle（WIFI_PS=off / auto 临时关掉的）
-            for f in sleep lipc guard watchdog; do kill $(cat $W/$f.pid 2>/dev/null) 2>/dev/null; done
+            type sleep_watch_stop >/dev/null 2>&1 && sleep_watch_stop
             type usb_watch_stop >/dev/null 2>&1 && usb_watch_stop   # 回到 Kindle：插线由 Kindle 自己处理
+            for f in sleep lipc guard watchdog; do kill $(cat $W/$f.pid 2>/dev/null) 2>/dev/null; done
             framework_start
             userstore_check freeze
             t "frozen, kindle ui back"
@@ -164,6 +169,7 @@ do_restart() {
 
 # 内存盘（/dev/shm，占的是内存）里的日志：显示桥每刷一次写一行，开着几天能长到几 MB。超过上限就留后一半
 log_cap() {   # log_cap <文件> <字节>
+    [ -f "$1" ] || return 0
     sz=$(wc -c < "$1" 2>/dev/null || echo 0)
     [ "$sz" -gt "$2" ] 2>/dev/null || return 0
     tail -c $(($2 / 2)) "$1" > "$1.tmp" 2>/dev/null && cat "$1.tmp" > "$1"; rm -f "$1.tmp"
@@ -244,10 +250,13 @@ wd_guard() {
 # 不用定时器、不挂唤醒源，冻结时不发（休眠不受影响）。
 bat_poke_tick() {
     bp_now=$(cut -d. -f1 ${BAT_UPTIME:-/proc/uptime})
-    [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-60} ] || return 0
+    [ $((bp_now - ${BAT_POKE_T:-0})) -ge ${BAT_POKE_S:-180} ] || return 0
     BAT_POKE_T=$bp_now
     for bp_d in ${BAT_PS_DIR:-/sys/class/power_supply}/*; do
-        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] && echo change > $bp_d/uevent 2>/dev/null
+        [ "$(cat $bp_d/type 2>/dev/null)" = Battery ] && [ -w $bp_d/uevent ] || continue
+        # Oasis 2/3 & KPW4 max77796-battery/uevent 有 31 行属性（加内核头尾 35 对），原生 powerd parse_uevent 固定 32 槽无边界检查，写 change 会堆越界 SIGABRT
+        [ "$(wc -l < $bp_d/uevent 2>/dev/null || echo 0)" -ge 28 ] && continue
+        echo change > $bp_d/uevent 2>/dev/null
     done
     return 0
 }
@@ -266,41 +275,49 @@ host_oom_protect() {
 watchdog() {
     # PERF: poll every 60s while frozen to cut host wakeups. FIFO cmd.sh still handles UI.
     # MEM: re-apply kernel LMK each tick (lab126 can reset minfree).
+    wd_tick=0
     while :; do
         if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then sleep_for=60; else sleep_for=20; fi
         sleep $sleep_for
         kill -0 $P 2>/dev/null || { t "system exited"; log_release; sh $VD/boot/stop.sh >/dev/null 2>&1; break; }
+        wd_tick=$((wd_tick + 1))
         lmk_kernel_tune 2>/dev/null || true
-        host_oom_protect
-        var_guard; pm_pending_guard
-        log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
+        if [ $((wd_tick % 3)) -eq 1 ] || [ $sleep_for -ge 60 ]; then
+            host_oom_protect
+            var_guard; pm_pending_guard
+            log_cap $W/epd.log 262144; log_cap $W/input.log 131072; log_cap $W/input.err 65536
+        fi
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ]; then
             # 命令监听没了（FIFO 建不起来、被杀）：桌面的“返回 Kindle”、设置、手势全都没反应，只能重启 Kindle。重新起一个。
             alive $W/cmd.pid || { t "cmd listener gone, restarting it"; cmd_listen & echo $! > $W/cmd.pid; }
             # 显示桥 / 触摸前端没了（崩溃、被 OOM 杀掉）：以前没人管，屏幕永远停在最后一帧，或者 Android 再也收不到触摸，
             # 只能重启 Kindle。重新起一个（每次开机各最多 3 次，再多就是程序本身起不来，留给诊断）。
             helpers_supervise
+            # 桌面 / 输入法不换出、后台应用定时停止（memkeep.sh）
+            type mem_keep_tick >/dev/null 2>&1 && { mem_keep_tick; bg_stop_tick; wifi_idle_tick; }
             # system_server 重启（Watchdog 杀掉后软重启）以后 ActivityManager 会把 lmkd 的门槛写回原厂的大屏手机档，
             # 512 MB 机型上前台的微信读书又会被反复杀掉（用户诊断）。pid 变了就重新设一次。
             ss=$(pidof system_server 2>/dev/null | cut -d' ' -f1)
             if [ -n "$ss" ] && [ "$ss" != "$(cat $W/ss.pid 2>/dev/null)" ]; then
-                [ -f $W/ss.pid ] && [ -f $W/booted ] && { t "system_server restarted ($(cat $W/ss.pid) -> $ss): re-tuning lmkd"; ( sleep 20; lmk_tune; i=0; while [ $i -lt 30 ] && [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" != 1 ]; do sleep 5; i=$((i+1)); done; trust_unlock ) & }
+                [ -f $W/ss.pid ] && [ -f $W/booted ] && { t "system_server restarted ($(cat $W/ss.pid) -> $ss): re-tuning lmkd"; ( sleep 20; lmk_tune; i=0; while [ $i -lt 30 ] && [ "$(adb_sh 'getprop sys.boot_completed' 2>/dev/null | tr -d '\r\n')" != 1 ]; do sleep 5; i=$((i+1)); done; trust_unlock ) </dev/null >>$LOG 2>&1 & }
                 echo "$ss" > $W/ss.pid
             fi
         fi
-        [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { [ -f $X/ctl/settings.new ] && settings_apply; }
+        [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { { [ -f $X/home/settings.new ] || [ -f $X/ctl/settings.new ]; } && settings_apply; }
         # Wi-Fi 省电（network.sh）、新装 / 更新的应用排队预编译（compile.sh）、电量记录（energy.sh）
         if [ ! -f $W/saver_frozen ] && [ ! -f $W/frozen ]; then
             type wifi_ps_tick >/dev/null 2>&1 && wifi_ps_tick
             type net_watch_tick >/dev/null 2>&1 && net_watch_tick    # Kindle 的网络变了 / 定时：从 Android 里查一次网络（network.sh）
             [ -f $W/booted ] && type bgnice_tick >/dev/null 2>&1 && bgnice_tick     # 后台应用降优先级（bgnice.sh）
             [ -f $W/booted ] && type compile_watch >/dev/null 2>&1 && compile_watch
+            [ -f $W/booted ] && type appslim_tick >/dev/null 2>&1 && appslim_tick
         fi
         type bat_log >/dev/null 2>&1 && bat_log
         if [ -f $W/saver_frozen ] || [ -f $W/frozen ]; then BAT_POKE_T=0; else bat_poke_tick; fi
+        type wa_adb_tick >/dev/null 2>&1 && wa_adb_tick     # 无线调试到时间自动关（webadmin.sh）
         # 系统盘快满了就自动扩（storage.sh）。冻结时不做。
         [ -f $W/saver_frozen ] || [ -f $W/frozen ] || { type st_auto_tick >/dev/null 2>&1 && st_auto_tick; }
-        if [ -f $X/ctl/diag ]; then rm -f $X/ctl/diag; ( diag_save; touch $X/ctl/diag.done ) & fi
+        if [ -f $X/ctl/diag ]; then rm -f $X/ctl/diag; ( diag_save; touch $X/ctl/diag.done && chmod 644 $X/ctl/diag.done 2>/dev/null ) </dev/null >>$LOG 2>&1 & fi
         [ -f $X/ctl/stop ] && { rm -f $X/ctl/stop; do_stop; }
         [ -f $X/ctl/restart ] && { rm -f $X/ctl/restart; do_restart; }
         [ -f $X/ctl/exit ] && { rm -f $X/ctl/exit; do_exit; }

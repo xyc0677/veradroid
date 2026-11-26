@@ -86,11 +86,13 @@ final class TaskCards {
         SpannableStringBuilder b = new SpannableStringBuilder();
         if (steps == null || steps.length() == 0) return b;
         String[] s = steps.split(",");
-        boolean past = !finished;
+        int curIdx = -1;
+        if (!finished && cur != null && cur.length() > 0) {
+            for (int i = 0; i < s.length; i++) if (s[i].equals(cur)) { curIdx = i; break; }
+        }
         for (int i = 0; i < s.length; i++) {
             if (i > 0) b.append("  →  ");
-            boolean isCur = !finished && s[i].equals(cur);
-            if (isCur) past = false;
+            boolean isCur = !finished && i == curIdx;
             int st = b.length();
             if (isCur) {
                 b.append(" ").append(stepShort(s[i])).append(" ");
@@ -98,7 +100,7 @@ final class TaskCards {
                 b.setSpan(new ForegroundColorSpan(Color.WHITE), st, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 b.setSpan(new StyleSpan(Typeface.BOLD), st, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             } else {
-                boolean done = finished || (past && cur != null && cur.length() > 0 && steps.indexOf(cur) >= 0);
+                boolean done = finished || (curIdx > 0 && i < curIdx);
                 b.append(done ? "■ " : "□ ").append(stepShort(s[i]));
             }
         }

@@ -10,6 +10,18 @@ P=$(cat "$W/pid" 2>/dev/null || true)
 TMP=/mnt/base-us/system/veradroid/data/local/tmp
 mkdir -p "$TMP"
 
+run_in_android() {
+    if [ -f /mnt/base-us/veradroid/boot/ashell.sh ]; then
+        sh /mnt/base-us/veradroid/boot/ashell.sh "$1"
+    elif [ "$(cat "$W/mode" 2>/dev/null || true)" = chroot ]; then
+        chroot "/proc/$P/root" /system/bin/sh -c \
+          "export PATH=/system/bin:/system/xbin ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_STORAGE=/storage EXTERNAL_STORAGE=/sdcard; $1"
+    else
+        nsenter -t "$P" -m -u -i -n -p -r -w/ /system/bin/sh -c \
+          "export PATH=/system/bin:/system/xbin ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_STORAGE=/storage EXTERNAL_STORAGE=/sdcard; $1"
+    fi
+}
+
 install_apk() {
     pkg="$1"; label="$2"
     json=$(curl -fsSL "$BASE/api/latest?package=$pkg") || { echo "$label: 查询失败"; return 1; }
@@ -18,12 +30,12 @@ install_apk() {
     [ -n "$url" ] || { echo "$label: 没有发布版本"; return 1; }
     echo "下载 $label $ver ..."
     curl -fL --retry 3 -o "$TMP/online.apk" "$url" || { echo "$label: 下载失败"; return 1; }
+    chmod 644 "$TMP/online.apk" 2>/dev/null || true
     echo "安装 $label ..."
-    nsenter -t "$P" -m -u -i -n -p -r -w/ /system/bin/sh -c \
-      "export PATH=/system/bin:/system/xbin ANDROID_ROOT=/system ANDROID_DATA=/data; pm install -r -d /data/local/tmp/online.apk" || return 1
+    sz=$(stat -c%s "$TMP/online.apk" 2>/dev/null || wc -c < "$TMP/online.apk" | tr -d ' ')
+    run_in_android "cmd package install -r -d -g -S $sz < /data/local/tmp/online.apk || pm install -r -d /data/local/tmp/online.apk" || return 1
     if [ "$pkg" = "com.veradroid.ime" ]; then
-        nsenter -t "$P" -m -u -i -n -p -r -w/ /system/bin/sh -c \
-          "export PATH=/system/bin:/system/xbin ANDROID_ROOT=/system ANDROID_DATA=/data; ime enable com.veradroid.ime/.VeraImeService; ime set com.veradroid.ime/.VeraImeService" >/dev/null 2>&1 || true
+        run_in_android "ime enable com.veradroid.ime/.VeraImeService; ime set com.veradroid.ime/.VeraImeService" >/dev/null 2>&1 || true
     fi
 }
 

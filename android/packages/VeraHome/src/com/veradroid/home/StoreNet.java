@@ -51,10 +51,23 @@ final class StoreNet {
     }
 
     /**
-     * A small picture from the store (app icon, font preview), kept in the cache folder under key (the file's sha256 or
-     * the app id, so a changed picture gets a new name). null = not available; nothing is thrown.
+     * A small picture from the store (app icon, font preview, bind QR), kept in the cache folder under key (the file's
+     * sha256 or the app id, so a changed picture gets a new name). null = not available; nothing is thrown.
      */
     static android.graphics.Bitmap image(String url, String key) {
+        return image(url, key, 192);
+    }
+
+    /** Remove cached images whose file name starts with prefix (e.g. one-time bind QR codes). */
+    static void evictPrefix(String prefix) {
+        if (prefix == null || prefix.length() == 0) return;
+        try {
+            File[] fs = Store.cache("store-img").listFiles();
+            if (fs != null) for (File f : fs) if (f.getName().startsWith(prefix)) f.delete();
+        } catch (Throwable ignored) { }
+    }
+
+    static android.graphics.Bitmap image(String url, String key, int maxDim) {
         if (url == null || url.length() == 0 || key == null || !key.matches("[A-Za-z0-9._-]{1,80}")) return null;
         try {
             File f = new File(Store.cache("store-img"), key);
@@ -69,13 +82,15 @@ final class StoreNet {
                     ByteArrayOutputStream bo = new ByteArrayOutputStream();
                     byte[] b = new byte[16384]; int n;
                     while ((n = in.read(b)) > 0) { bo.write(b, 0, n); if (bo.size() > (2 << 20)) return null; }
-                    Dl.write(f, bo.toByteArray());
+                    File tmp = new File(f.getParentFile(), key + ".tmp." + Thread.currentThread().getId());
+                    Dl.write(tmp, bo.toByteArray());
+                    if (!tmp.renameTo(f)) { Dl.write(f, bo.toByteArray()); tmp.delete(); }
                 } finally {
                     if (in != null) try { in.close(); } catch (Exception ignored) { }
                     h.disconnect();
                 }
             }
-            android.graphics.Bitmap bm = decodeBounded(f.getPath(), 128);
+            android.graphics.Bitmap bm = decodeBounded(f.getPath(), Math.max(128, maxDim));
             if (bm == null) f.delete();
             return bm;
         } catch (Throwable t) { return null; }
@@ -109,7 +124,7 @@ final class StoreNet {
     static Thread keepAwake() {
         Thread k = new Thread(new Runnable() {
             @Override public void run() {
-                try { while (true) { HostLink.cmd("poke"); Thread.sleep(60000); } } catch (InterruptedException e) { }
+                try { while (true) { HostLink.cmd("poke"); Thread.sleep(20000); } } catch (InterruptedException e) { }
             }
         }, "StoreAwake");
         k.setDaemon(true); k.start();

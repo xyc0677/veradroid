@@ -21,7 +21,7 @@ for h in pw6 k49 legacy; do
     for k in ZRAM_EXTRA LMK_MINFREE MEM_KEEP MEM_KEEP_APPS BG_FREEZE BG_STOP_MIN BG_STOP_APPS BOOT_BLOCK BOOT_ALLOW WIFI_IDLE_OFF_MIN WIFI_IDLE_BPS; do
         grep -q "^    $k=" $b/lib/settings.sh || fail "$h settings.sh has no default for $k"
     done
-    grep -q '^    BG_FREEZE=1 ' $b/lib/settings.sh || fail "$h: instant background freeze must default to on"
+    grep -q '^    BG_FREEZE=0 ' $b/lib/settings.sh || fail "$h: background freeze must default to off (prevents TIME_TICK ANR/WAL loss)"
     grep -q '^    BG_STOP_MIN=0 ' $b/lib/settings.sh || fail "$h: timed background stop must default to off"
 done
 for h in pw6 k49; do
@@ -118,8 +118,11 @@ out2=$(W=$T/w X=$T/x SYS=$T/sys D=$T/dump sh -c '
     kill() { echo "KILL $*" >> $W/sig; }
     BG_FREEZE=1; mem_fg com.keep; mem_fg com.five; mem_fg com.other
     bg_freeze_sweep
+    echo "V0 $(tr "\n" ";" < $W/sig) | $(tr "\n" "," < $W/memfg.frozen 2>/dev/null)"
+    date() { echo 520; }
+    bg_freeze_sweep
     echo "V $(tr "\n" ";" < $W/sig) | $(tr "\n" "," < $W/memfg.frozen)"
-    : > $W/sig; mem_fg com.five; bg_freeze_sweep
+    : > $W/sig; mem_fg com.five; date() { echo 540; }; bg_freeze_sweep
     echo "W $(tr "\n" ";" < $W/sig) | $(tr "\n" "," < $W/memfg.frozen)"
     : > $W/sig; bg_thaw_all
     echo "X $(tr "\n" ";" < $W/sig) | $([ -f $W/memfg.frozen ] && echo kept || echo gone)"
@@ -134,6 +137,7 @@ expect2 "R com.android.providers.media/.MediaScannerReceiver,com.douban.book.rea
 expect2 "S com.tipsoon.android/.Boot,"
 expect2 "T 1"
 expect2 "U pm enable com.tipsoon.android/.Boot, gone"
+expect2 "V0  | "
 expect2 "V KILL -STOP 201 202; | com.five,"
 expect2 "W KILL -CONT 201 202;KILL -STOP 301; | com.other,"
 expect2 "X KILL -CONT 301; | gone"

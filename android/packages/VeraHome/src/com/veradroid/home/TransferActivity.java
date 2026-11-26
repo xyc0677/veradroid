@@ -148,6 +148,7 @@ public class TransferActivity extends Activity {
         super.onResume();
         StatusBarService.setSuppressed(true);
         StatusBarService.refresh(this);
+        HostLink.cmd("status");
         handler.removeCallbacks(tick);
         handler.postDelayed(tick, 2000);   // 页面刚搭好时已经填过一次
     }

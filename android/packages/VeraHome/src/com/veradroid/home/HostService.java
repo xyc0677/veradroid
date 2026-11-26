@@ -46,19 +46,26 @@ public class HostService extends Service {
         handler.post(new Runnable() { @Override public void run() { handle("app"); } });
         // 宿主在桌面起来之前就写好的提示（开机时 apps 文件夹里的 APK 装不上）
         handler.post(new Runnable() { @Override public void run() {
+            boolean lockReq = false;
             String[] l = new File(HostLink.CTL).list();
             if (l != null) for (String n : l) {
                 if (n.startsWith("notice.")) handle(n);
+                else if (n.equals("act.lock")) { File lf = new File(HostLink.CTL + n); if (isRootRegularFile(lf)) { deleteCtl(lf); lockReq = true; } }
                 // 桌面还没开始听时宿主留下的手势（开机时下划、桌面进程被杀重启的那几秒）：已经过时，删掉、不执行。
                 // 以前留着不管：老的宿主脚本用 touch 发手势，文件一直在就再也收不到事件，之后每次下划都“没有响应”
-                else if (n.startsWith("act.")) { new File(HostLink.CTL + n).delete(); android.util.Log.i("VeraHome", "ctl: dropped stale " + n); }
+                else if (n.startsWith("act.")) { deleteCtl(new File(HostLink.CTL + n)); android.util.Log.i("VeraHome", "ctl: dropped stale " + n); }
             }
+            // 锁屏密码（LockScreen）：USB 上放了重置文件就先清掉；仅在收到宿主上锁请求（act.lock）或本次开机尚未解锁时盖上锁屏，
+            // 避免 512MB 机型 LMK 杀掉桌面后 START_STICKY 重建在阅读中途误弹锁屏。
+            handle("lock.reset");
+            if (lockReq || !LockScreen.isUnlocked(HostService.this)) LockScreen.show(HostService.this);
         } });
-        // 锁屏密码（LockScreen）：USB 上放了重置文件就先清掉，再按需盖上锁屏（开机这一次）
-        handler.post(new Runnable() { @Override public void run() { handle("lock.reset"); LockScreen.show(HostService.this); } });
         watchForeground();
         AppProf.migrate(this);
         keepAnimationsOff();
+        // LMK 杀掉 com.veradroid.home 后系统按 START_STICKY 只重建 HostService（不重建 HomeActivity）：
+        // 若用户开了“三大金刚键”，必须在此重新拉起 NavBarService，防止 512 MB 机型阅读时三大金刚丢失。
+        try { NavBarService.apply(this); } catch (Throwable t) { android.util.Log.w("VeraHome", "navbar apply: " + t); }
         try {
             android.content.IntentFilter f = new android.content.IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
             f.addAction(Intent.ACTION_SCREEN_OFF);
@@ -75,6 +82,7 @@ public class HostService extends Service {
     // HOME 键（系统发 CLOSE_SYSTEM_DIALOGS，reason=homekey / recentapps）和屏幕关掉：收起下拉面板
     private final android.content.BroadcastReceiver panelCloser = new android.content.BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
+            if (Intent.ACTION_SCREEN_OFF.equals(i.getAction())) Stats.flushForeground(HostService.this);
             if (Panel.isOpen()) { android.util.Log.i("VeraHome", "panel: " + i.getAction() + " " + i.getStringExtra("reason") + " - closing"); Panel.close(); }
         }
     };
@@ -85,27 +93,45 @@ public class HostService extends Service {
     private final Runnable fgCheck5 = new Runnable() { @Override public void run() { writeForeground(); } };
     private final Runnable fgCheck15 = new Runnable() { @Override public void run() { writeForeground(); } };
     // 兜底：任务栈通知在模拟器上会漏（连开三个应用，有的那次一次通知都没收到，后台保留应用就没动作）。
-    // 每 10 秒看一眼栈顶（一次 getRunningTasks(1)，没变就什么都不做）。
-    private final Runnable fgPoll = new Runnable() { @Override public void run() { writeForeground(); handler.postDelayed(this, 10000); } };
+    // 每 30 秒看一眼栈顶（一次 getRunningTasks(1)，没变就什么都不做），减少离线阅读时的跨进程唤醒。
+    private final Runnable fgPoll = new Runnable() { @Override public void run() { writeForeground(); handler.postDelayed(this, 30000); } };
+    private static volatile HostService activeService;
+    private static ITaskStackListener taskStackListener;
+    private static boolean taskStackRegistered;
+
+    private void onTaskStackEvent() {
+        handler.removeCallbacks(fgCheck); handler.postDelayed(fgCheck, 30);
+        // 启动慢的应用：30 ms 时栈顶有时还是上一个，之后不一定再有变化通知——1.5 秒后再看一次（只在栈变过以后，不是轮询）
+        handler.removeCallbacks(fgCheckLate); handler.postDelayed(fgCheckLate, 1500);
+        handler.removeCallbacks(fgCheck5); handler.postDelayed(fgCheck5, 5000);
+        handler.removeCallbacks(fgCheck15); handler.postDelayed(fgCheck15, 15000);
+    }
+
     private void watchForeground() {
+        activeService = this;
         try {
-            ActivityManagerNative.getDefault().registerTaskStackListener(new ITaskStackListener.Stub() {
-                @Override public void onTaskStackChanged() {
-                    handler.removeCallbacks(fgCheck); handler.postDelayed(fgCheck, 30);
-                    // 启动慢的应用：30 ms 时栈顶有时还是上一个，之后不一定再有变化通知——1.5 秒后再看一次（只在栈变过以后，不是轮询）
-                    handler.removeCallbacks(fgCheckLate); handler.postDelayed(fgCheckLate, 1500);
-                    handler.removeCallbacks(fgCheck5); handler.postDelayed(fgCheck5, 5000);
-                    handler.removeCallbacks(fgCheck15); handler.postDelayed(fgCheck15, 15000);
+            synchronized (HostService.class) {
+                if (!taskStackRegistered) {
+                    if (taskStackListener == null) {
+                        taskStackListener = new ITaskStackListener.Stub() {
+                            @Override public void onTaskStackChanged() {
+                                HostService s = activeService;
+                                if (s != null) s.onTaskStackEvent();
+                            }
+                            @Override public void onActivityPinned() { }
+                            @Override public void onPinnedActivityRestartAttempt() { }
+                            @Override public void onPinnedStackAnimationEnded() { }
+                            @Override public void onActivityForcedResizable(String packageName, int taskId) { }
+                            @Override public void onActivityDismissingDockedStack() { }
+                        };
+                    }
+                    ActivityManagerNative.getDefault().registerTaskStackListener(taskStackListener);
+                    taskStackRegistered = true;
                 }
-                @Override public void onActivityPinned() { }
-                @Override public void onPinnedActivityRestartAttempt() { }
-                @Override public void onPinnedStackAnimationEnded() { }
-                @Override public void onActivityForcedResizable(String packageName, int taskId) { }
-                @Override public void onActivityDismissingDockedStack() { }
-            });
+            }
         } catch (Throwable t) { android.util.Log.w("VeraHome", "foreground listener: " + t); }
         handler.post(fgCheck);
-        handler.postDelayed(fgPoll, 10000);
+        handler.postDelayed(fgPoll, 30000);
     }
     /** 现在真正在前台的 activity（包名/类名）；拿不到就是 null。fgAct 要等下一次前台检查才更新，可能还是上一个页面。 */
     static String topActivity(Context c) {
@@ -150,14 +176,13 @@ public class HostService extends Service {
             launchedPkg = null;
             profPkg = prof;
         }
+        Stats.onForeground(this, pkg, cls);
         if (pkg.equals(lastFg)) return;
         Cleaner.onForeground(this, pkg);   // 后台保留应用：用户应用到了前台，3 秒后按设置清掉多出来的
         try {
-            File tmp = new File(HostLink.KFB + "fg.tmp");
-            FileWriter w = new FileWriter(tmp);
-            w.write(pkg + "\n");
-            w.close();
-            if (tmp.renameTo(new File(HostLink.KFB + "fg"))) lastFg = pkg;
+            byte[] fgBytes = (pkg + "\n").getBytes("UTF-8");
+            File fgFile = new File(HostLink.KFB + "fg");
+            if (HostLink.writeAtomic(fgFile, fgBytes) || writeFileInPlace(fgFile, fgBytes)) lastFg = pkg;
         } catch (Exception ignored) { }
     }
 
@@ -191,22 +216,94 @@ public class HostService extends Service {
     }
 
     @Override public void onDestroy() {
+        Stats.flushForeground(this);
         handler.removeCallbacksAndMessages(null);
         if (noticeDialog != null) { try { if (noticeDialog.isShowing()) noticeDialog.dismiss(); } catch (Throwable ignored) { } noticeDialog = null; noticeText = null; }
         if (usbDialog != null) { try { if (usbDialog.isShowing()) usbDialog.dismiss(); } catch (Throwable ignored) { } usbDialog = null; }
         try { unregisterReceiver(panelCloser); } catch (Throwable ignored) { }
         try { if (animObserver != null) getContentResolver().unregisterContentObserver(animObserver); } catch (Throwable ignored) { }
+        if (activeService == this) activeService = null;
+        synchronized (HostService.class) {
+            if (taskStackRegistered && taskStackListener != null) {
+                try {
+                    Object am = ActivityManagerNative.getDefault();
+                    Method m = am.getClass().getMethod("unregisterTaskStackListener", ITaskStackListener.class);
+                    m.invoke(am, taskStackListener);
+                    taskStackRegistered = false;
+                } catch (Throwable ignored) { }
+            }
+        }
         if (observer != null) CtlWatch.remove(observer);
         super.onDestroy();
     }
 
+    private static boolean writeFileInPlace(File f, byte[] data) {
+        java.io.FileDescriptor fd = null;
+        try {
+            fd = android.system.Os.open(f.getPath(),
+                    android.system.OsConstants.O_WRONLY
+                            | android.system.OsConstants.O_TRUNC
+                            | android.system.OsConstants.O_NOFOLLOW,
+                    0);
+            int off = 0;
+            while (off < data.length) {
+                int w = android.system.Os.write(fd, data, off, data.length - off);
+                if (w <= 0) return false;
+                off += w;
+            }
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        } finally {
+            if (fd != null) try { android.system.Os.close(fd); } catch (Throwable ignored) { }
+        }
+    }
+
+    private static void deleteCtl(File f) {
+        if (f == null) return;
+        if (f.delete() || !f.exists()) return;
+        String name = f.getName();
+        if (name != null && name.length() > 0 && name.indexOf('/') < 0 && !name.equals(".") && !name.equals("..")) {
+            HostLink.cmd("ctlack " + name);
+        }
+    }
+
+    private static boolean isRootRegularFile(File f) {
+        try {
+            android.system.StructStat st = android.system.Os.lstat(f.getPath());
+            if (st != null && st.st_uid == 0 && android.system.OsConstants.S_ISREG(st.st_mode)) return true;
+            android.util.Log.w("VeraHome", "ctl rejected (untrusted owner/type): " + f.getName());
+            f.delete();
+            return false;
+        } catch (android.system.ErrnoException e) {
+            if (e.errno != android.system.OsConstants.ENOENT) {
+                android.util.Log.w("VeraHome", "ctl stat failed: " + f.getName() + ": " + e);
+                f.delete();
+            }
+            return false;
+        } catch (Throwable t) {
+            android.util.Log.w("VeraHome", "ctl stat failed: " + f.getName() + ": " + t);
+            f.delete();
+            return false;
+        }
+    }
+
     private void handle(String name) {
+        if ("sleep".equals(name)) { Stats.flushForeground(this); return; }
+        boolean isHostCtl = name.equals("app") || name.equals("storage.notice")
+                || (name.startsWith("notice.") && !name.endsWith(".tmp"))
+                || name.equals("usb.ask") || name.equals("usb.gone")
+                || name.equals("lock.reset") || name.startsWith("act.");
+        if (!isHostCtl) return;
         File f = new File(HostLink.CTL + name);
-        if (!f.exists()) return;
+        if (!isRootRegularFile(f)) return;
         if (name.equals("app")) {
             String want = null;
-            try { BufferedReader r = new BufferedReader(new FileReader(f)); want = r.readLine(); r.close(); } catch (Exception ignored) { }
-            f.delete();
+            try {
+                BufferedReader r = new BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+                try { want = r.readLine(); } finally { r.close(); }
+            } catch (Exception ignored) { }
+            deleteCtl(f);
             if (want == null) return;
             want = want.trim();
             if (want.length() == 0) return;
@@ -215,40 +312,47 @@ public class HostService extends Service {
             AppFont.forForeground(this, want, null);   // 启动前就换好字号，免得应用画完一遍再重排一遍
             HostLink.cmd("appdirs " + want);
             Intent i = getPackageManager().getLaunchIntentForPackage(want);
-            if (i != null) startActivity(i);
+            if (i != null) {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                startActivity(i);
+            }
         } else if (name.equals("storage.notice")) {
             // 宿主调整了存储空间（自动扩容、离线调整的结果、断电后的收尾）：告诉用户一声（boot/lib/storage.sh 的 st_notify）
             String l = null;
-            try { BufferedReader r = new BufferedReader(new FileReader(f)); l = r.readLine(); r.close(); } catch (Exception ignored) { }
-            f.delete();
+            try {
+                BufferedReader r = new BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+                try { l = r.readLine(); } finally { r.close(); }
+            } catch (Exception ignored) { }
+            deleteCtl(f);
             String msg = storageNotice(l);
             if (msg != null) VeraToast.show(this, msg);
         } else if (name.startsWith("notice.")) {
             if (name.endsWith(".tmp")) return;
             String title = null; StringBuilder body = new StringBuilder();
             try {
-                BufferedReader r = new BufferedReader(new FileReader(f));
-                title = r.readLine();
-                String line;
-                while ((line = r.readLine()) != null && body.length() < 1000) { if (body.length() > 0) body.append('\n'); body.append(line); }
-                r.close();
+                BufferedReader r = new BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+                try {
+                    title = r.readLine();
+                    String line;
+                    while ((line = r.readLine()) != null && body.length() < 1000) { if (body.length() > 0) body.append('\n'); body.append(line); }
+                } finally { r.close(); }
             } catch (Exception ignored) { }
-            f.delete();
+            deleteCtl(f);
             if (title == null || title.trim().length() == 0) return;
             notice(title.trim(), body.toString().trim());
         } else if (name.equals("usb.ask")) {
             // 插上了 USB 线（宿主 boot/lib/usb.sh 的 usb_ask）：问要不要切到 USB 传输
-            f.delete();
+            deleteCtl(f);
             usbAsk();
         } else if (name.equals("usb.gone")) {
             // 线拔了：还开着的插线提示收起来
-            f.delete();
+            deleteCtl(f);
             if (usbDialog != null) { try { usbDialog.dismiss(); } catch (Throwable ignored) { } usbDialog = null; }
         } else if (name.equals("lock.reset")) {
-            f.delete();
+            deleteCtl(f);
             if (LockScreen.enabled(this)) { LockScreen.clear(this); VeraToast.show(this, "锁屏密码已清除"); }
         } else if (name.startsWith("act.")) {
-            f.delete();
+            deleteCtl(f);
             Perf.begin();   // 宿主手势到达：从这里算面板 / 切换器打开用了多久
             String act = name.substring(4);
             if (act.equals("lock")) { LockScreen.show(this); return; }
@@ -259,6 +363,11 @@ public class HostService extends Service {
             else if (act.equals("appopt")) appOpt();
             else if (act.equals("home")) { Panel.close(); goHome(false); }
             else if (act.equals("back")) key(KeyEvent.KEYCODE_BACK);
+            else if (act.equals("screenshot")) {
+                Panel.close();
+                // Wait 900ms for any 800ms gesture badge or closing panel to disappear before capturing /dev/fb0.
+                handler.postDelayed(new Runnable() { @Override public void run() { WebAdmin.saveScreenshot(HostService.this, false); } }, 900);
+            }
         }
     }
 
@@ -370,7 +479,9 @@ public class HostService extends Service {
             box.setBackground(Ui.frame(c, false));
             android.widget.TextView m = Ui.text(c, item, 16, false);
             m.setPadding(0, 0, 0, Ui.dp(c, 14));
-            box.addView(m);
+            android.widget.ScrollView sv = new android.widget.ScrollView(c);
+            sv.addView(m);
+            box.addView(sv, new android.widget.LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
             box.addView(Ui.button(c, "知道了", 16, true, new android.view.View.OnClickListener() {
                 @Override public void onClick(android.view.View v) { try { d.dismiss(); } catch (Throwable ignored) { } }
             }));
@@ -383,7 +494,14 @@ public class HostService extends Service {
                 w.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);   // 墨水屏上压暗 = 整屏闪两次
             }
             d.show();
+            int maxH = (int) (getResources().getDisplayMetrics().heightPixels * 0.72f);
             if (w != null) w.setLayout((int) (getResources().getDisplayMetrics().widthPixels * 0.86), android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            sv.getLayoutParams().height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+            final int limitH = maxH;
+            final android.widget.ScrollView fsv = sv;
+            sv.post(new Runnable() { @Override public void run() {
+                if (fsv.getHeight() > limitH) { fsv.getLayoutParams().height = limitH; fsv.requestLayout(); }
+            } });
             noticeDialog = d; noticeText = m;
         } catch (Throwable t) { android.util.Log.w("VeraHome", "notice dialog: " + t); }
     }
@@ -426,7 +544,7 @@ public class HostService extends Service {
 
     private void goHome(boolean settings) {
         if (settings) { SettingsActivity.open(this); return; }   // 设置盖在当前应用上面，返回回到它（不切到桌面）
-        HostLink.cmd("appdisp home");
+        if (AppProf.host()) foregroundHome(); else HostLink.cmd("appdisp home");
         Intent i = HomeActivity.homeIntent(this);
         startActivity(i);
     }

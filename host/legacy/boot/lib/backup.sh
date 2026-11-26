@@ -133,7 +133,7 @@ vb_info() {
     echo "mode=$(vd_backup_mode)"
     if vb_busy; then echo busy=1; else echo busy=0; fi
     if vb_pending; then echo pending=1; else echo pending=0; fi
-    echo "free_kb=$(df -k "$VB_TOP" 2>/dev/null | awk 'NR==2{print $4 + 0}')"
+    echo "free_kb=$(df -Pk "$VB_TOP" 2>/dev/null | awk 'NR==2{print $4 + 0}')"
     if [ -f "$VB_ST/backup.last" ]; then
         for vi_k in stamp mode kind result; do echo "last.$vi_k=$(sed -n "s/^$vi_k=//p" "$VB_ST/backup.last" | tail -1 | tr -cd 'A-Za-z0-9._-')"; done
     fi

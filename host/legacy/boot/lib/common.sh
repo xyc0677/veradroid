@@ -195,6 +195,7 @@ storage_umount() {
     dev=$(awk -v m="$SYS" '$2==m {print $1}' /proc/mounts | tail -1)
     [ -n "$dev" ] || {
         # Detach any loop still tied to the system image even if mount gone
+        for l in $(img_loops); do losetup -d "$(loop_dev "$l")" 2>/dev/null || true; done
         return 0
     }
     # 刚杀掉的容器进程、延迟卸载（umount -l）的挂载要过一会儿才真正放手：立刻 umount 会报 busy，
@@ -250,6 +251,22 @@ done
 [ -f "$VD/boot/lib/progress.sh" ] && . "$VD/boot/lib/progress.sh"
 
 t() { echo "[$(date +%H:%M:%S) up=$(cut -d' ' -f1 /proc/uptime)] $*"; }
+# 只开关 Wi-Fi 接口、不动飞行模式和蓝牙（支持 disableInterfaces 的固件用它，否则退回 wirelessEnable）
+wifi_dis() { lipc-hash-prop com.lab126.cmd disableInterfaces </dev/null 2>/dev/null | sed -n "s/^[[:space:]]*$1 = (\([0-9]*\)).*/\1/p" | head -1; }
+wifi_state() {
+    wa=$(lipc-get-prop com.lab126.cmd wirelessEnable 2>/dev/null); wd=$(wifi_dis wifi)
+    if [ -n "$wd" ]; then [ "$wd" = 0 ] && ww=1 || ww=0; else ww=${wa:-1}; fi
+    [ "$wa" = 0 ] && ww=0
+    echo "$ww"
+}
+wifi_set() { # 0|1
+    wd=$(wifi_dis wifi)
+    if [ -n "$wd" ]; then
+        wn=$(wifi_dis wan); [ "$1" = 1 ] && wv=0 || wv=1
+        echo "{ wan = (${wn:-0}), wifi = ($wv) }" | lipc-hash-prop com.lab126.cmd disableInterfaces >/dev/null 2>&1
+        [ "$1" = 1 ] && [ "$(lipc-get-prop com.lab126.cmd wirelessEnable 2>/dev/null)" = 0 ] && lipc-set-prop -i com.lab126.cmd wirelessEnable 1
+    else lipc-set-prop -i com.lab126.cmd wirelessEnable "$1"; fi
+}
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 # 给显示桥发命令。显示桥不在了就不写：往没有读端的 FIFO 里 echo 会永远卡在 open()，
 # 命令监听、看门狗、唤醒流程以前都可能这样被拖死（显示桥崩过：tmpfs 写满时 SIGBUS）。

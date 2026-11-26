@@ -26,26 +26,38 @@ usb_online() {
     return 0
 }
 usb_android_front() { [ ! -f $W/frozen ] && [ ! -f $W/saver_frozen ] && [ ! -f $W/idlefz ] && [ -f $W/booted ]; }
-# 让桌面问（HostService 看 ctl/usb.ask）。屏保 / 空闲冻结着就等它醒（最多 10 分钟），中途拔了线就不问了。
+# 让桌面问（HostService 看 ctl/usb.ask）。空闲冻结着就等它醒（最多 10 分钟），中途拔了线就不问了。
+usb_ask_cancel() {
+    uap=$(cat $W/usb.ask.pid 2>/dev/null)
+    if [ -n "$uap" ]; then
+        for uac in $(pgrep -P "$uap" 2>/dev/null); do kill $uac 2>/dev/null; done
+        kill "$uap" 2>/dev/null
+    fi
+    rm -f $W/usb.ask.pid
+}
 usb_ask() {
-    grep -q '^USB_ASK=0$' $SYS/settings.conf 2>/dev/null && { t "usb: plugged in (USB_ASK=0, not asking)"; return 0; }
+    _up=$$; read -r _up _ < /proc/self/stat 2>/dev/null || true
+    grep -q '^USB_ASK=0$' $SYS/settings.conf 2>/dev/null && { t "usb: plugged in (USB_ASK=0, not asking)"; [ "$(cat $W/usb.ask.pid 2>/dev/null)" = "$_up" ] && rm -f $W/usb.ask.pid; return 0; }
     ua_i=0
     while ! usb_android_front; do
-        [ -f $W/frozen ] && return 0          # 已经回到 Kindle 了：Kindle 自己处理
-        ua_i=$((ua_i + 1)); [ $ua_i -gt 300 ] && return 0
+        if [ -f $W/frozen ] || [ -f $W/saver_frozen ]; then [ "$(cat $W/usb.ask.pid 2>/dev/null)" = "$_up" ] && rm -f $W/usb.ask.pid; return 0; fi          # 已经回到 Kindle 或屏保冻结：不轮询等待
+        ua_i=$((ua_i + 1)); [ $ua_i -gt 300 ] && { [ "$(cat $W/usb.ask.pid 2>/dev/null)" = "$_up" ] && rm -f $W/usb.ask.pid; return 0; }
         sleep 2
     done
     # 等过（屏保 / 空闲冻结）才看线还在不在：刚插上的那一刻充电芯片可能还没报 online（事件是 USB 控制器先发的），
     # 那时候查会误判成“已拔掉”。拔线本身另有 usbPlugOut（usb_gone 收起提示）。
-    if [ $ua_i -gt 0 ] && ! usb_online; then t "usb: plugged in and out again before Android was in front: not asking"; return 0; fi
+    if [ $ua_i -gt 0 ] && ! usb_online; then t "usb: plugged in and out again before Android was in front: not asking"; [ "$(cat $W/usb.ask.pid 2>/dev/null)" = "$_up" ] && rm -f $W/usb.ask.pid; return 0; fi
     mkdir -p $X/ctl 2>/dev/null
-    echo "plug $(date +%s)" > $X/ctl/usb.ask.tmp 2>/dev/null && chmod 644 $X/ctl/usb.ask.tmp && mv -f $X/ctl/usb.ask.tmp $X/ctl/usb.ask
+    echo "plug $(date +%s)" > "$X/ctl/usb.ask.tmp.$_up" 2>/dev/null && chmod 644 "$X/ctl/usb.ask.tmp.$_up" && mv -f "$X/ctl/usb.ask.tmp.$_up" $X/ctl/usb.ask
+    [ "$(cat $W/usb.ask.pid 2>/dev/null)" = "$_up" ] && rm -f $W/usb.ask.pid
     t "usb: plugged in while Android is in front: asking whether to switch to USB transfer"
 }
 # 线拔了：桌面上还开着的提示收起来（ctl/usb.gone）
 usb_gone() {
+    usb_ask_cancel
     rm -f $X/ctl/usb.ask 2>/dev/null
-    [ -d $X/ctl ] && : > $X/ctl/usb.gone 2>/dev/null && chmod 644 $X/ctl/usb.gone 2>/dev/null
+    _ug=$$; read -r _ug _ < /proc/self/stat 2>/dev/null || true
+    [ -d $X/ctl ] && : > "$X/ctl/usb.gone.tmp.$_ug" 2>/dev/null && chmod 644 "$X/ctl/usb.gone.tmp.$_ug" 2>/dev/null && mv -f "$X/ctl/usb.gone.tmp.$_ug" $X/ctl/usb.gone 2>/dev/null
     t "usb: unplugged"
 }
 usb_watch() {
@@ -58,7 +70,7 @@ usb_watch() {
         uw_ev=$(lipc-wait-event -s 600 com.lab126.hal usbPlugIn,usbPlugOut </dev/null 2>/dev/null) || uw_ev=
         kill -0 "$me" 2>/dev/null || return 0
         case "$uw_ev" in
-        usbPlugIn*) ( usb_ask ) </dev/null & ;;
+        usbPlugIn*) usb_ask_cancel; ( usb_ask ) </dev/null & echo $! > $W/usb.ask.pid ;;
         usbPlugOut*) usb_gone ;;
         *) # 没等到（超时）或者马上就失败了：失败时别空转
            [ "$(( $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0) - ${uw_t0:-0} ))" -ge 5 ] 2>/dev/null || sleep 5 ;;
@@ -72,6 +84,7 @@ usb_watch_start() {
 }
 # 停掉监视连同它的 lipc-wait-event（只杀父进程的话，订阅和管道另一头会留下来）
 usb_watch_stop() {
+    usb_ask_cancel
     up=$(cat $W/usb.pid 2>/dev/null); [ -n "$up" ] || return 0
     for c in $(pgrep -P "$up" 2>/dev/null); do
         for cc in $(pgrep -P "$c" 2>/dev/null); do kill $cc 2>/dev/null; done
@@ -83,6 +96,7 @@ usb_watch_stop() {
 }
 # 桌面上点了“切换”：回到 Kindle，让它进 USB 传输。和 cmd exit 一样在命令监听里直接调（do_exit / do_stop 最后 exit，监听随之结束，下次启动 / 解冻时 start_helpers 重起）。
 usb_switch() {
+    usb_ask_cancel
     rm -f $X/ctl/usb.ask $X/ctl/usb.gone 2>/dev/null
     date +%s > $W/usb.switched
     if [ -f /etc/upstart/mtp.conf ] || [ -n "${VD_TEST_MTP:-}" ]; then
@@ -97,8 +111,8 @@ usb_switch() {
 # “不再询问”：USB_ASK=0 存进 settings.conf（设置里能改回来）
 usb_noask() {
     touch $SYS/settings.conf
-    grep -v '^USB_ASK=' $SYS/settings.conf > $W/settings.usb.tmp 2>/dev/null
-    echo USB_ASK=0 >> $W/settings.usb.tmp && mv -f $W/settings.usb.tmp $SYS/settings.conf
+    grep -v '^USB_ASK=' $SYS/settings.conf > $SYS/settings.conf.usb.tmp 2>/dev/null
+    echo USB_ASK=0 >> $SYS/settings.conf.usb.tmp && mv -f $SYS/settings.conf.usb.tmp $SYS/settings.conf
     settings_load 2>/dev/null; settings_publish 2>/dev/null
     t "usb: USB_ASK=0 (not asking any more)"
 }

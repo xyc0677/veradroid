@@ -106,10 +106,10 @@ bt_late_bg() {
             sleep 2; i=$((i + 1))
         done
         [ -f $W/bt.auto ] || exit 0
-        if bt_input_present || [ -n "$(bt_paired_macs)" ]; then
+        if bt_input_present || { bt_on && [ -n "$(bt_paired_macs)" ]; }; then
             bt_late_start
         else
-            t "bt: nothing paired, bridge not started ($1)"
+            t "bt: off or nothing paired, bridge not started ($1)"
         fi
         rm -f $W/bt.auto
     ) </dev/null >>${LOG:-/dev/null} 2>&1 &
@@ -174,11 +174,18 @@ bt_hash() {
     echo '{}' | lipc-hash-prop $BTF "$1" 2>/dev/null | awk -v tab="$(printf '\t')" '
     function yes(v) { v = tolower(v); return (v == "1" || v == "true" || v == "yes") ? 1 : 0 }
     function flush() {
-        if (mac != "") { gsub(/[\001-\037\177]/, "", name); if (length(name) > 64) name = substr(name, 1, 64); print mac tab name tab pa tab co }
+        if (mac != "") { gsub(/[\001-\037\177",]/, "", name); if (length(name) > 64) name = substr(name, 1, 64); print mac tab name tab pa tab co }
         mac = ""; name = ""; pa = 0; co = 0; seen = " "
     }
     BEGIN { pa = 0; co = 0; seen = " " }
     /^[ \t]*Hash Index/ { flush(); next }
+    /^[ \t]*bd_name[ \t]*=[ \t]*".*"[ \t]*$/ {
+        if (index(seen, " bd_name ")) flush()
+        seen = seen "bd_name "
+        v = $0; sub(/^[ \t]*bd_name[ \t]*=[ \t]*"/, "", v); sub(/"[ \t]*$/, "", v)
+        gsub(/[\001-\037\177",]/, "", v)
+        name = v; next
+    }
     {
         line = $0
         while (match(line, /[A-Za-z_][A-Za-z_0-9]*[ \t]*=[ \t]*("[^"]*"|\([^)]*\)|[^ \t]+)/)) {
@@ -203,6 +210,8 @@ bt_on() { [ "$(lipc-get-prop $BTF BTstate 2>/dev/null)" = 1 ]; }
 # 名字空的用 MAC 代替。原子替换（先写 .tmp 再 mv），桌面用 inotify 等 MOVED_TO。
 bt_list_write() {
     mkdir -p $X/ctl
+    _btp=$(awk '{print $1}' /proc/self/stat 2>/dev/null || echo $$)
+    _btf="$X/ctl/bt.list.$$.$_btp.tmp"
     { bt_hash ListPaired | awk -F'\t' -v OFS='\t' '{ $3 = 1; print "P", $0 }'
       bt_hash ListConnected | awk -F'\t' -v OFS='\t' '{ $4 = 1; print "C", $0 }'
       bt_hash ListDiscovered | awk -F'\t' -v OFS='\t' '{ print "D", $0 }'
@@ -212,8 +221,7 @@ bt_list_write() {
           if ($4 == 1 || $1 == "P") pa[m] = 1
           if ($5 == 1 || $1 == "C") co[m] = 1 }
         END { for (pass = 1; pass >= 0; pass--) for (i = 1; i <= n; i++) { m = ord[i]; if ((pa[m] ? 1 : 0) != pass) continue
-                  print (nm[m] == "" ? m : nm[m]), m, (pa[m] ? 1 : 0), (co[m] ? 1 : 0) } }' > $X/ctl/bt.list.tmp
-    mv -f $X/ctl/bt.list.tmp $X/ctl/bt.list
+                  print (nm[m] == "" ? m : nm[m]), m, (pa[m] ? 1 : 0), (co[m] ? 1 : 0) } }' > "$_btf" && chmod 644 "$_btf" && mv -f "$_btf" $X/ctl/bt.list || rm -f "$_btf"
 }
 bt_is() {  # bt_is <mac> paired|connected：在 Kindle 的表里查（大小写不敏感）
     case "$2" in paired) f=3 ;; *) f=4 ;; esac
@@ -227,7 +235,11 @@ bt_addr() {
 }
 
 # 结果：$X/ctl/bt.result（state=running|done，op，mac，ok，error，secs = 预计最长秒数）
-bt_result() { printf '%s\n' "$@" > $X/ctl/bt.result.tmp && mv -f $X/ctl/bt.result.tmp $X/ctl/bt.result; }
+bt_result() {
+    _btp=$(awk '{print $1}' /proc/self/stat 2>/dev/null || echo $$)
+    _btf="$X/ctl/bt.result.$$.$_btp.tmp"
+    printf '%s\n' "$@" > "$_btf" && chmod 644 "$_btf" && mv -f "$_btf" $X/ctl/bt.result || rm -f "$_btf"
+}
 # 只允许一个蓝牙操作同时进行（扫描 15 秒、配对最多 40 秒）；持有者已经不在了就当残留接管
 bt_lock() {
     if ! mkdir $W/bt.op 2>/dev/null; then
@@ -300,7 +312,7 @@ bt_bond() {
     i=0; ok=; conf=; err=timeout; end=$(( $(date +%s) + 35 ))
     while [ $(date +%s) -lt $end ]; do
         sleep 1; i=$((i + 1))
-        if [ -z "$conf" ] && grep -q btConfirmationEvent $ev 2>/dev/null; then
+        if [ -z "$conf" ] && awk -v m="$mac" 'BEGIN{m=toupper(m)} /btConfirmationEvent/ && index(toupper($0), m) { found=1; exit } END { exit !found }' $ev 2>/dev/null; then
             conf=1; lipc-set-prop -i $BTF PairUserConfirmation 1 2>/dev/null; t "bt: pairing confirmation for $mac accepted"
         fi
         grep -qE 'PairingFailed|btNotConfirmed' $ev 2>/dev/null && { err=failed; break; }
@@ -372,6 +384,9 @@ bt_power() {  # 1|0：开关 Kindle 的蓝牙（和 Kindle 设置里的开关是
     fi
     if [ "$1" = 1 ]; then bt_wait 15 bt_on; else bt_wait 15 eval '! bt_on'; fi
     r=$?; bt_list_write
+    if [ $r = 0 ] && [ "$(bt_mode)" = auto ]; then
+        if [ "$1" = 1 ]; then bt_late_bg power; else alive $W/bt.pid && bt_stop; fi
+    fi
     status_write 2>/dev/null          # 先写状态再写结果：结果一出来桌面就可能发下一条命令，那时锁应该已经快放了
     if [ $r = 0 ]; then bt_result state=done op=power "on=$1" ok=1; else bt_result state=done op=power "on=$1" ok=0 error=timeout; fi
 }
@@ -383,7 +398,7 @@ bt_power() {  # 1|0：开关 Kindle 的蓝牙（和 Kindle 设置里的开关是
 #   bt bond|connect|disconnect|unbond <MAC>     MAC 必须是大写的 AA:BB:CC:DD:EE:FF，否则什么都不做
 # 慢的操作在后台跑（命令 FIFO 不能被堵住），同一时间只有一个；忙时结果写 error=busy。
 bt_cmd() {
-    sub=${1%% *}; arg=; [ "$sub" != "$1" ] && arg=${1#* }
+    if [ $# -ge 2 ]; then sub=$1; shift; arg="$*"; else sub=${1%% *}; arg=; [ "$sub" != "$1" ] && arg=${1#* }; fi
     case "$sub" in
         map|swap|bridge)
             case "$sub:$arg" in
@@ -394,6 +409,7 @@ bt_cmd() {
             esac
             { grep -v "^$k=" $SYS/settings.conf 2>/dev/null; echo "$k=$arg"; } > $SYS/settings.conf.tmp && mv -f $SYS/settings.conf.tmp $SYS/settings.conf
             case "$k" in BT_PT_MAP) BT_PT_MAP=$arg ;; BT_PT_SWAP) BT_PT_SWAP=$arg ;; BT_BRIDGE) BT_BRIDGE=$arg ;; esac
+            type settings_publish >/dev/null 2>&1 && settings_publish
             alive $W/bt.pid && kill -HUP "$(cat $W/bt.pid)" 2>/dev/null
             if [ "$k" = BT_BRIDGE ] && bt_supported; then
                 case "$arg" in
@@ -414,7 +430,11 @@ bt_cmd() {
         *) t "bt: unknown command"; return 1 ;;
     esac
     (
-        bt_lock || { bt_result state=done "op=$sub" "mac=$arg" ok=0 error=busy; exit 1; }
+        if ! bt_lock; then
+            [ "$sub" = list ] && exit 0
+            bt_result state=done "op=$sub" "mac=$arg" ok=0 error=busy
+            exit 1
+        fi
         trap bt_unlock EXIT
         case "$sub" in
             list) bt_list_write; bt_result state=done op=list ok=1 ;;

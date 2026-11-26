@@ -4,6 +4,8 @@
 # Icon: data:image/png;base64,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
 # Offline installer: the full bundle and bootstrap.sh sit next to this file.
 # 全程写日志：失败时用 USB 取 /mnt/us/veradroid/logs/install.log
+# 整个脚本包在 { } 里：sh 先读完再执行，防止安装过程中本文件被清理后 sh 读到半截报 syntax error。
+{
 trap '' PIPE   # 书库启动器把输出管道给 fbink；fbink 缺失/崩溃时管道断开，不能让 SIGPIPE 杀掉脚本
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH; export PATH   # 系统自带的 curl/tar 优先：越狱工具或插件装的 curl 可能没有根证书（HTTPS 全部失败）
 LOG=/mnt/us/veradroid/logs/install.log
@@ -120,15 +122,17 @@ if [ -z "$B" ]; then
     fi
     fail "缺少安装包（veradroid-$WANT-…tar.gz）：请把 $WANTZ 里的文件全部放进 documents" "Missing veradroid-$WANT-*.tar.gz. Copy all files of $WANTZ into documents."
 fi
-VER=$BV; [ -n "$VER" ] || { VER=$(basename "$B" .tar.gz); VER=${VER##*-}; }
-case "$B" in *veradroid-k49-*) export VD_EXPERIMENTAL=1 ;; esac   # 实验机型离线包
-# 老机型（3.0 / 4.1 内核）离线包：veradroid-legacy-<版本>.tar.gz，只在模拟器上验证过，和联网安装一样先警告、再点一次确认
-case "$B" in *veradroid-legacy-*) export VD_EXPERIMENTAL=1; [ -n "$BV" ] || { VER=$(basename "$B" .tar.gz); VER=${VER#veradroid-legacy-}; } ;; esac
+VER=$BV
+if [ -z "$VER" ]; then
+    VER=$(basename "$B" .tar.gz | sed -n 's/^veradroid-[a-z0-9]*-\([0-9][0-9.]*\).*/\1/p' | sed 's/\.*$//')
+    case "$VER" in ''|*[!0-9.]*|.*|*.|*..*|*.*.*.*.*) VER= ;; esac
+fi
+case "$B" in *veradroid-k49-*|*veradroid-legacy-*) export VD_EXPERIMENTAL=1 ;; esac   # 实验机型 / 老机型离线包
 # ---- 只在模拟器上验证过的机型（3.0 内核 PW2 / PW3 / Voyage，4.1 内核 PW4 / 入门款 2019 / Oasis 2 / Oasis 3）----
 # 先在屏幕上把风险说清楚，要用户在 10 秒到 2 分钟之内再点一次本脚本才继续（Kindle 上没有键盘，这是最简单的“确认”）。
 # 真机验证过的实验机型（PW5 / KT5 / KT6 / Scribe，4.9 / 5.x 内核）不经过这里，流程和以前一样。
-EMU=
-case "$(uname -r)" in 3.*) EMU="3.0 内核（PW2 / PW3 / Voyage 一代）" ;; 4.1.*) EMU="4.1 内核（PW4 / 入门款 2019 / Oasis 2 / Oasis 3）" ;; esac
+EMU=; EMU_EN=
+case "$(uname -r)" in 3.*) EMU="3.0 内核（PW2 / PW3 / Voyage 一代）"; EMU_EN="kernel 3.0 (PW2/PW3/Voyage)" ;; 4.1.*) EMU="4.1 内核（PW4 / 入门款 2019 / Oasis 2 / Oasis 3）"; EMU_EN="kernel 4.1 (PW4/KT4/Oasis 2/Oasis 3)" ;; esac
 if [ -n "$EMU" ]; then
     CF=/mnt/base-us/veradroid/state/confirm
     mkdir -p /mnt/base-us/veradroid/state 2>/dev/null
@@ -144,24 +148,46 @@ if [ -n "$EMU" ]; then
         echo "install $bid $now" > "$CF"; sync
         i=0
         while [ $i -lt 4 ]; do   # 书库界面可能会盖住：40 秒里重画几次
+            [ -f "$CF" ] || break
             screen "VeraDroid 实验机型 · 测试版" "这台：$EMU，固件 ${fwv:-?}" "-------------------------------" \
                 "这个机型只在模拟器上跑过，" "没有在真机上验证。可能无法启动；" "启动失败会自动回到 Kindle（最多约 15 分钟）。" \
                 "不会改动 Kindle 系统分区，只在用户存储里放文件。" "安装前会记下书库清单并备份小文件。" \
                 "请先用 USB 把重要的书拷到电脑！" "卸载：Android 设置→设备与更新→卸载 VeraDroid。" "-------------------------------" \
-                "确认安装：10 秒后、2 分钟内再点一次本脚本。" "不想装：什么都不用做。"
-            sleep 10; i=$((i + 1))
+                "确认安装：10 秒后、2 分钟内再点一次本脚本。" "不想装：什么都不用做。" \
+                -- "VeraDroid: OLD Kindle model, TEST build" "$EMU_EN, firmware ${fwv:-?}" "Only tested in emulators, never on a real" \
+                "device. It may not start; a failed start" "returns to the Kindle by itself (~15 min)." "The Kindle system partition is not changed." \
+                "Copy important books to a PC (USB) first!" "-----------------------------------------" \
+                "To INSTALL: tap this script again in" "10 s .. 2 min. To cancel: do nothing."
+            [ -f "$CF" ] || break
+            sleep 10
+            [ -f "$CF" ] || break
+            i=$((i + 1))
         done
         exit 0
     fi
 fi
 
 [ -f "$HERE/bootstrap.sh" ] || fail "缺少 bootstrap.sh，请把 $WANTZ 里的文件全部放进 documents" "Missing bootstrap.sh. Copy all files of $WANTZ into documents."
+BS_RUN="$HERE/bootstrap.sh"
+if ! sh -n "$BS_RUN" 2>/dev/null; then
+    # 兼容 Windows 换行符（CRLF）导致 sh 报语法错；若剥掉 \r 仍不通过则说明拷贝被截断/文件损坏
+    tr -d '\r' < "$HERE/bootstrap.sh" > /tmp/vd-offline-bootstrap.sh 2>/dev/null || true
+    if [ -s /tmp/vd-offline-bootstrap.sh ] && sh -n /tmp/vd-offline-bootstrap.sh 2>/dev/null; then
+        echo "offline bootstrap.sh had CRLF, stripped to /tmp/vd-offline-bootstrap.sh"
+        BS_RUN=/tmp/vd-offline-bootstrap.sh
+    else
+        rm -f /tmp/vd-offline-bootstrap.sh
+        fail "bootstrap.sh 文件不完整或已损坏（常见于 USB 未安全弹出或下载中断）。请重新下载并完整解压 $WANTZ 到 documents 后重试" "bootstrap.sh is truncated or corrupted. Re-extract $WANTZ into documents and eject USB safely."
+    fi
+fi
 msg "VeraDroid：使用离线整包安装…"
-VD_BUNDLE="$B" VD_OFFLINE_BUNDLE="$B" VD_INSTALLER="$0" VD_HELPER="$HERE/bootstrap.sh" VD_VERSION="$VER" sh "$HERE/bootstrap.sh"
+VD_BUNDLE="$B" VD_OFFLINE_BUNDLE="$B" VD_INSTALLER="$0" VD_HELPER="$HERE/bootstrap.sh" VD_VERSION="$VER" sh "$BS_RUN"
 rc=$?
+rm -f /tmp/vd-offline-bootstrap.sh
 echo "bootstrap rc=$rc"
 # 安装器在进度画面出现之前就停下（机型 / 分辨率 / 固件检查）时，原因只在日志里：把它的最后一句话也写到屏幕上
 why=; whyen=; [ -f "$LOG" ] && why=$(tail -n 20 "$LOG" 2>/dev/null | grep -v -e '^bootstrap rc=' -e '^EN: ' -e '^[[:space:]]*$' | tail -1 | cut -c1-120)
 [ -f "$LOG" ] && whyen=$(tail -n 20 "$LOG" 2>/dev/null | sed -n 's/^EN: //p' | tail -1 | cut -c1-120)   # 安装器给 eips 留的英文原因
 [ "$rc" = 0 ] || fail "安装失败（代码 $rc）${why:+：$why}" "${whyen:-Install failed (code $rc). See veradroid/logs/install.log}"
 exit 0
+}

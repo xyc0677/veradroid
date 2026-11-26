@@ -88,6 +88,51 @@ public class EpubTocTest {
         plain.text = "没有章节的一段文字。\n\n第二段。";
         check(Epub.txtToc(plain) == null, "txt without chapters has no toc");
 
+        // Cycle 6 回归：HTML 实体（含 $ / \ 数值实体、常见中英文实体、&amp; 后解码、非法码点）、HTML 注释含 >、BOM 与 GB18030/UTF-16 编码
+        String ent = Epub.htmlToText("&#36;100 &amp; &#92;path &mdash; &ldquo;hi&rdquo;&hellip; &amp;lt;tag&amp;gt; &#x4E2D;");
+        check("$100 & \\path \u2014 \u201Chi\u201D\u2026 &lt;tag&gt; 中".equals(ent), "htmlToText entities: " + ent);
+        String badCp = Epub.htmlToText("A&#55296;B&#0;C&#x110000;D");
+        check("ABCD".equals(badCp), "htmlToText invalid/surrogate codepoints: " + badCp);
+        String cmt = Epub.stripHtml("<!-- a > b --><p>正文内容</p><!-- end -->");
+        check("正文内容".equals(cmt), "stripHtml comment with >: " + cmt);
+
+        byte[] utf8Bom = "\uFEFF第一章 风起\n正文".getBytes("UTF-8");
+        String d8 = Epub.decodeText(utf8Bom, utf8Bom.length);
+        check(d8.startsWith("第一章") && Epub.patLevel(Epub.lineAt(d8, 0)) == Epub.PAT_CHAPTER, "UTF-8 BOM stripped for patLevel");
+
+        byte[] u16le = new byte[] { (byte) 0xFF, (byte) 0xFE };
+        byte[] u16body = "第一章 归来".getBytes("UTF-16LE");
+        byte[] u16all = new byte[2 + u16body.length];
+        System.arraycopy(u16le, 0, u16all, 0, 2); System.arraycopy(u16body, 0, u16all, 2, u16body.length);
+        check("第一章 归来".equals(Epub.decodeText(u16all, u16all.length)), "UTF-16LE BOM decode");
+
+        byte[] u16be = new byte[] { (byte) 0xFE, (byte) 0xFF };
+        byte[] u16bBody = "第二章 远行".getBytes("UTF-16BE");
+        byte[] u16bAll = new byte[2 + u16bBody.length];
+        System.arraycopy(u16be, 0, u16bAll, 0, 2); System.arraycopy(u16bBody, 0, u16bAll, 2, u16bBody.length);
+        check("第二章 远行".equals(Epub.decodeText(u16bAll, u16bAll.length)), "UTF-16BE BOM decode");
+
+        byte[] shortGbk = "春眠不觉晓".getBytes("GB18030");
+        check("春眠不觉晓".equals(Epub.decodeText(shortGbk, shortGbk.length)), "short GB18030 decode");
+
+        // 命名空间前缀 OPF (<opf:item>, <opf:spine>, <opf:itemref>) 解析回归
+        File nsEpub = new File(dir, "ns-opf-test.epub");
+        java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(nsEpub));
+        try {
+            zos.putNextEntry(new java.util.zip.ZipEntry("META-INF/container.xml"));
+            zos.write("<?xml version=\"1.0\"?><container><rootfiles><rootfile full-path=\"OEBPS/content.opf\"/></rootfiles></container>".getBytes("UTF-8"));
+            zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("OEBPS/content.opf"));
+            zos.write("<opf:package xmlns:opf=\"http://www.idpf.org/2007/opf\"><opf:manifest><opf:item id=\"c1\" href=\"ch1.xhtml\" media-type=\"application/xhtml+xml\"/></opf:manifest><opf:spine><opf:itemref idref=\"c1\"/></opf:spine></opf:package>".getBytes("UTF-8"));
+            zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("OEBPS/ch1.xhtml"));
+            zos.write("<html><body><h1>第一章 命名空间</h1><p>这是一段足够长的正文内容，用于验证带前缀 OPF 能够正常打开。</p></body></html>".getBytes("UTF-8"));
+            zos.closeEntry();
+        } finally { zos.close(); }
+        Epub.Book nsBook = Epub.load(nsEpub);
+        check(nsBook.chapters.size() == 1 && nsBook.chapters.get(0).text.contains("命名空间"), "namespaced OPF epub load");
+        nsEpub.delete();
+
         if (a.length > 1) {   // 额外的书（比如 VD_BIG 生成的大书）：只打印
             for (int i = 1; i < a.length; i++) {
                 long t0 = System.currentTimeMillis();

@@ -211,7 +211,7 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         rm -f $W/epd.restarts $W/input.restarts
         [ -x "$VD/bin/veradroid-epd" ] && ! alive $W/epd.pid && { t "thaw: display bridge was gone, starting it"; display_start; }
         perf_mark "thaw: android thawed"
-        type lock_reset_check >/dev/null 2>&1 && lock_reset_check
+        type lock_reset_check >/dev/null 2>&1 && { lock_reset_check; lock_request; }
         rm -f $W/frozen
         # 解冻以后尽快整屏闪刷一次。以前：先用 fbink 画一屏“正在恢复”（整屏清屏 + 文字），固定 1 秒后再整屏重画 Android：
         # 两次整屏刷新，第一次刷新和固定的 1 秒都算在“再进 Android”里（perf/thaw，tools/bench 的 thaw.first_refresh）。

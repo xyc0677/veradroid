@@ -3,7 +3,7 @@
   "id": "veradroid-ks",
   "name": "VeraDroid Scribe (experimental)",
   "author": "VeraDroid",
-  "description": "Host-layer profile only; eink-emulator shows Android zygote failure on PW5. Not bootable yet; development/logs only.",
+  "description": "Scribe experimental; rotation/stylus are not handled.",
   "version": "0.1.4",
   "dependencies": [],
   "supported_platforms": [

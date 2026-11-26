@@ -90,14 +90,28 @@ compile_done_filter() { # filter [target]
 # 用户用过、有 JIT 档案了编 speed-profile（测试机实测番茄 194 s），没有档案就留在安装时的 interpret-only；speed-profile 也超时过的只要
 # interpret-only。判断：apk 里 classes*.dex 合计 ≥ COMPILE_BIG_DEX_MB（默认 120），或者这个包（任何一次安装）speed 超时过。
 # 而且只在前台没有别的应用时编（桌面在前台 / 屏幕没人用），编着时有应用到了前台就停（busy，等空闲再编）：不为它挤掉正在读的应用。
+compile_apk_mb() { # pkg -> base.apk MB（读不出来返回 1）
+    cam_d=$(app_dir "$1") || return 1
+    cam_b=$(stat -c %s "$SYS/data/app/$cam_d/base.apk" 2>/dev/null)
+    case "$cam_b" in ''|*[!0-9]*) return 1 ;; esac
+    echo $(( cam_b / 1048576 ))
+}
 compile_dex_mb() { # pkg -> MB（读不出来返回 1）；按安装目录 + base.apk 时间缓存在 $W
     cdm_d=$(app_dir "$1") || return 1
     cdm_a=$SYS/data/app/$cdm_d/base.apk
     cdm_k="$cdm_d $(stat -c %Y "$cdm_a" 2>/dev/null)"; cdm_c=$W/compile.dexmb.$1
     if [ -f "$cdm_c" ] && [ "$(head -n 1 "$cdm_c")" = "$cdm_k" ]; then sed -n 2p "$cdm_c"; return 0; fi
-    command -v unzip >/dev/null 2>&1 || return 1
-    cdm_m=$(unzip -l "$cdm_a" 2>/dev/null | awk '$4 ~ /^classes[0-9]*\.dex$/ { s += $1 } END { print int(s / 1048576) }')
-    case "$cdm_m" in ''|*[!0-9]*) return 1 ;; esac
+    cdm_m=
+    if command -v unzip >/dev/null 2>&1; then
+        cdm_m=$(unzip -l "$cdm_a" 2>/dev/null | awk '$4 ~ /^classes[0-9]*\.dex$/ { s += $1 } END { print int(s / 1048576) }')
+    fi
+    case "$cdm_m" in
+        ''|0|*[!0-9]*)
+            # 宿主没有 unzip 或精简 busybox unzip 输出格式不同时，按 APK 体积估算（大阅读器未压缩 dex 约占 APK 体积 1.5-2 倍）
+            cdm_ab=$(stat -c %s "$cdm_a" 2>/dev/null)
+            case "$cdm_ab" in ''|*[!0-9]*) return 1 ;; esac
+            cdm_m=$(( cdm_ab * 3 / 2 / 1048576 )) ;;
+    esac
     printf '%s\n%s\n' "$cdm_k" "$cdm_m" > "$cdm_c" 2>/dev/null
     echo "$cdm_m"
 }
@@ -137,7 +151,13 @@ compile_prof_back() { # pkg：编成了（odex 是 speed-profile）就只删存�
 #   verify-at-runtime：74 s 编完，dex2oat 峰值 256 MB，交换区几乎没动、0 次失败；之后打开番茄 dex 从 odex 里映射
 #     （97 MB 是可以随时丢掉再读回的文件页），可用内存一直在 225 MB 左右、交换只用 10 MB。
 # 代价：类的校验挪到运行时（和没有 odex 时一样），只是不再占匿名内存。
-compile_low_big() { lowmem_ram && [ "${COMPILE_BIG_LOW:-on}" != off ] && compile_big "$1"; }
+compile_low_big() {
+    lowmem_ram && [ "${COMPILE_BIG_LOW:-on}" != off ] || return 1
+    compile_big "$1" && return 0
+    clb_m=$(compile_dex_mb "$1") && [ "$clb_m" -ge ${COMPILE_LOW_BIG_DEX_MB:-60} ] && return 0
+    clb_a=$(compile_apk_mb "$1") && [ "$clb_a" -ge ${COMPILE_LOW_BIG_APK_MB:-35} ] && return 0
+    return 1
+}
 compile_light_filter() { if compile_low_big "$1"; then echo verify-at-runtime; else echo interpret-only; fi; }
 compile_pkg_mode() { # pkg mode
     [ "$2" = speed ] && compile_low_big "$1" && { echo verify-at-runtime; return 0; }
@@ -174,7 +194,8 @@ compile_needed() { # pkg [force|stale]
 
 compile_status() { # KEY=value...
     [ -d $X/ctl ] || return 0
-    { printf '%s\n' "$@"; echo "time=$(date +%s)"; if compile_manual; then echo manual=1; fi; } > $CST.tmp 2>/dev/null && mv -f $CST.tmp $CST
+    _cp=$$; read -r _cp _ < /proc/self/stat 2>/dev/null || true
+    { printf '%s\n' "$@"; echo "time=$(date +%s)"; if compile_manual; then echo manual=1; fi; } > "$CST.tmp.$_cp" 2>/dev/null && chmod 644 "$CST.tmp.$_cp" 2>/dev/null && mv -f "$CST.tmp.$_cp" $CST
 }
 # 排队（去重）。$2=force：强制重编
 compile_enqueue() { # pkg [force]
@@ -471,15 +492,26 @@ compile_active_abort_mb() {
         if lowmem_ram; then echo ${COMPILE_MANUAL_ABORT_MB_LOW:-60}; else echo ${COMPILE_MANUAL_ABORT_MB:-100}; fi
     elif lowmem_ram; then echo ${COMPILE_ACTIVE_ABORT_MB_LOW:-100}; else echo ${COMPILE_ACTIVE_ABORT_MB:-200}; fi
 }
+# 判断 dex2oat / patchoat 是否属于本次预编译（绝不碰用户 pm install 的 /data/app/vmdl*.tmp/）
+compile_match_pid() { # pid [pkg]
+    cmp_s=$( { tr '\0' '\n' < /proc/"$1"/cmdline; for cmp_fd in /proc/"$1"/fd/*; do readlink "$cmp_fd"; done; } 2>/dev/null )
+    [ -n "$cmp_s" ] || return 1
+    case "$cmp_s" in */data/app/vmdl*.tmp/*) return 1 ;; esac
+    if [ -n "$2" ]; then
+        cmp_pk=$(printf '%s\n' "$cmp_s" | sed -n 's#.*/data/app/\([A-Za-z0-9._]*\)-[0-9][0-9]*/.*#\1#p' | head -n 1)
+        [ "$cmp_pk" = "$2" ]
+        return $?
+    fi
+    case "$cmp_s" in */system/app/*|*/system/priv-app/*|*/data/app/*) return 0 ;; esac
+    return 1
+}
 # 只停给某一个包编译的 dex2oat / patchoat。返回 0 = 真的停掉了至少一个；1 = 一个也没找到 / 没杀掉
 # （cmd package compile 还没起 dex2oat、或者 dex2oat 刚好在换文件）。以前不看结果：babysit 当成已经停了、不再试，
 # 连超时也不查了，dex2oat 照样编完（Oasis 2 用户日志：busy 停了个空，590 秒后 Success，又被当成 aborted 强制重排）。
 compile_preempt_pkg() { # pkg
     cpp_r=1
     for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do
-        pk=$( { tr '\0' '\n' < /proc/$p/cmdline; for fd in /proc/$p/fd/*; do readlink "$fd"; done; } 2>/dev/null |
-              sed -n 's#.*/data/app/\([A-Za-z0-9._]*\)-[0-9][0-9]*/.*#\1#p' | head -n 1)
-        [ "$pk" = "$1" ] && kill -9 "$p" 2>/dev/null && cpp_r=0
+        compile_match_pid "$p" "$1" && kill -9 "$p" 2>/dev/null && cpp_r=0
     done
     return $cpp_r
 }
@@ -517,6 +549,11 @@ compile_babysit() { # cmd 的 pid [包]
     killed=; cbs_miss=; t0=$(cut -d. -f1 /proc/uptime)
     cbs_big=; [ -n "$2" ] && compile_big "$2" && cbs_big=1
     while kill -0 "$1" 2>/dev/null; do
+        # 容器冻结（屏保或回到 Kindle）时 dex2oat 也已暂停：低频休眠，跳过 /proc 扫描避免阻止深睡
+        if [ -f $W/frozen ] || [ -f $W/saver_frozen ]; then
+            sleep 15
+            continue
+        fi
         # 大应用（compile_big）编着的时候有应用到了前台：停掉，不为它挤掉正在用的应用（busy：等空闲再编）
         if [ -n "$cbs_big" ] && [ -z "$killed" ] && compile_fg_app; then
             compile_babysit_stop busy "$2" "compile: $(compile_fg) came to the foreground while the large app $2 was being compiled, stopping it (will retry when idle)"
@@ -548,7 +585,10 @@ compile_babysit() { # cmd 的 pid [包]
         # 不管前面停没停过（以前 killed 了就不查：停了个空的那次 dex2oat 一直编到 590 秒），过了时间还有 dex2oat 就每一轮都杀。
         if [ $(( $(cut -d. -f1 /proc/uptime) - t0 )) -ge ${COMPILE_MAX_S:-540} ]; then
             cbs_k=
-            for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do kill -9 "$p" 2>/dev/null && cbs_k=1; done
+            for p in $(pgrep dex2oat 2>/dev/null) $(pgrep patchoat 2>/dev/null); do
+                compile_match_pid "$p" "$2" || continue
+                kill -9 "$p" 2>/dev/null && cbs_k=1
+            done
             if [ -z "$killed" ]; then
                 t "compile: still running after ${COMPILE_MAX_S:-540}s, aborting dex2oat"
                 killed=timeout; echo timeout > $W/compile.abort
@@ -557,6 +597,7 @@ compile_babysit() { # cmd 的 pid [包]
             fi
         fi
         for p in $(pgrep dex2oat 2>/dev/null); do
+            compile_match_pid "$p" "$2" || continue
             for tk in /proc/$p/task/*; do
                 tid=${tk##*/}
                 renice -n 19 -p "$tid" >/dev/null 2>&1
@@ -616,6 +657,11 @@ compile_keep_divert() { # dir ext
 # 时按路径删的）也马上放回。cmd 结束后按结果收尾（compile_keep_end）。
 compile_keep_guard() { # cmd 的 pid  oat 目录  输出文件
     while kill -0 "$1" 2>/dev/null; do
+        # 容器冻结（屏保或回到 Kindle）时 installd/dex2oat 也已暂停：低频休眠，避免 5Hz 空转阻止深睡
+        if [ -f $W/frozen ] || [ -f $W/saver_frozen ]; then
+            sleep 10
+            continue
+        fi
         compile_keep_divert "$2" odex; compile_keep_divert "$2" art
         [ -f "$2/.vd-new.odex" ] && [ ! -f "$2/base.odex" ] && compile_keep_put "$2" odex
         usleep 200000 2>/dev/null || sleep 1
@@ -772,8 +818,10 @@ compile_one() { # pkg mode [force|stale]
     if [ -z "$cflag" ] && [ ! -s $W/compile.abort ] && grep -q Success $W/compile.out && alive $W/pid; then
         if compile_stale_pkgs | grep -q "^$pkg " || ! compile_done_filter "$(odex_filter "$pkg")" "$mode"; then
             t "compile: $pkg still not usable after a plain dexopt, full recompile"
+            [ "$mode" = speed-profile ] && compile_prof_save "$pkg"
             compile_pm_start "$pkg" $W/compile.out -m $mode -f $pkg
             compile_babysit $cp_ "$pkg"; compile_pm_wait; rc=$?
+            [ "$mode" = speed-profile ] && compile_prof_back "$pkg"
         fi
     fi
     sec=$(( $(cut -d. -f1 /proc/uptime) - s ))
@@ -791,7 +839,6 @@ compile_one() { # pkg mode [force|stale]
     # PackageManager 不在（Android 正在停 / system_server 重启）：不是这个包编不了，不能记成失败——
     # 同一个安装记满两次 fail 以后再也不会自动编（pw5-5182 实测：停 Android 那一刻两个包各记了一次 "Can't find service: package"）
     elif grep -q "Can't find service" $W/compile.out || ! alive $W/pid; then r=aborted
-    elif [ "$f" = "$mode" ] && grep -q Success $W/compile.out; then r=ok
     # PackageManager 说成功了、过滤器却没变：应用自己要求安全模式（vmSafeMode，KOReader 就是）或系统把它压低了。
     # 这不是失败，再编多少次也一样：记成 capped，以后不再自动排队。
     elif [ -n "$f" ] && grep -q Success $W/compile.out; then r=capped

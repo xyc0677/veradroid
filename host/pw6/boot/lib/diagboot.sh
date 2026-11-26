@@ -23,13 +23,15 @@ diagboot() {
         sleep "$delay"
         P=$(cat /dev/shm/veradroid/pid 2>/dev/null)
         [ -n "$P" ] && kill -0 "$P" 2>/dev/null || continue
+        in_=$(vd_in)
+        [ -n "$in_" ] || continue
         {
             echo
             echo "== sample $(date +%H:%M:%S) pid=$P =="
-            timeout 6 $(vd_in) /system/bin/sh -c \
+            vd_timeout 6 $in_ /system/bin/sh -c \
               'export PATH=/system/bin:/system/xbin ANDROID_ROOT=/system ANDROID_DATA=/data; getprop sys.boot_completed; logcat -b all -d -t 220 2>/dev/null' 2>&1 | tail -45
         } >> "$LOG" 2>&1
-        [ -f /dev/shm/veradroid/boot.done ] && break
+        { [ -f /dev/shm/veradroid/booted ] || [ -f "${X:-/dev/shm/veradroid/kfb}/ctl/booted" ]; } && break
     done
     echo "== diagnostics end $(date) ==" >> "$LOG"
 }

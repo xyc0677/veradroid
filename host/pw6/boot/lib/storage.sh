@@ -61,6 +61,7 @@ st_battery_ok() {   # 离线调整要几分钟，中途没电最伤：电量不�
 st_auto_on() { ! grep -q '^STORAGE_AUTO=0' "$SYS/settings.conf" 2>/dev/null; }
 # 能不能在线扩：ext4 正挂在唯一的一个 loop 设备上、有 resize2fs、losetup 认识 -c
 st_online_ok() {
+    case "$(uname -r)" in 3.*|4.1.*) return 1 ;; esac
     [ "$(st_fstype)" = ext4 ] || return 1
     [ "$(img_loops | wc -l)" = 1 ] || return 1
     st_tool resize2fs >/dev/null || return 1
@@ -143,12 +144,36 @@ st_check() { # MB（先 st_calc）
 }
 
 # 把镜像文件加长到 MB。FAT 没有稀疏文件：内核要真的写零，512 MB 要几十秒。
+# 非整 MB 镜像先对齐尾部防止 dd bs=1M seek 零覆写原尾数据块；大块写按 8 MiB 分块 + 低优先级 + sync/sleep 防看门狗复位。
 st_extend() {
     cur=$(st_img_mb); [ "$1" -gt "$cur" ] || return 0
-    truncate -s "${1}M" "$SYSTEM_IMG" 2>/dev/null
-    [ "$(st_img_mb)" = "$1" ] && return 0
+    if ! st_isfat && truncate -s "${1}M" "$SYSTEM_IMG" 2>/dev/null && [ "$(st_img_mb)" = "$1" ]; then
+        return 0
+    fi
+    b=$(stat -c %s "$SYSTEM_IMG" 2>/dev/null)
+    case "$b" in ''|*[!0-9]*) return 1 ;; esac
     cur=$(st_img_mb)
-    [ "$1" -gt "$cur" ] && dd if=/dev/zero of="$SYSTEM_IMG" bs=1M seek=$cur count=$(($1 - cur)) conv=notrunc 2>/dev/null
+    rem=$(awk -v b="$b" 'BEGIN { r = b % 1048576; print (r ? 1048576 - r : 0) }')
+    if [ "$rem" -gt 0 ]; then
+        cur=$((cur + 1))
+        want=$(awk -v c="$cur" 'BEGIN { printf "%.0f", c * 1048576 }')
+        if ! truncate -s "${cur}M" "$SYSTEM_IMG" 2>/dev/null || [ "$(stat -c %s "$SYSTEM_IMG" 2>/dev/null)" != "$want" ]; then
+            r4k=$((rem / 4096)); r1=$((rem % 4096))
+            if [ "$r4k" -gt 0 ]; then dd if=/dev/zero bs=4096 count="$r4k" >> "$SYSTEM_IMG" 2>/dev/null || return 1; fi
+            if [ "$r1" -gt 0 ]; then dd if=/dev/zero bs=1 count="$r1" >> "$SYSTEM_IMG" 2>/dev/null || return 1; fi
+        fi
+        [ "$(stat -c %s "$SYSTEM_IMG" 2>/dev/null)" = "$want" ] || return 1
+    fi
+    pri=
+    command -v ionice >/dev/null 2>&1 && ionice -c 3 true 2>/dev/null && pri="ionice -c 3"
+    command -v nice >/dev/null 2>&1 && nice -n 10 true 2>/dev/null && pri="${pri:+$pri }nice -n 10"
+    while [ "$cur" -lt "$1" ]; do
+        n=$(($1 - cur)); [ "$n" -le 8 ] || n=8
+        $pri dd if=/dev/zero of="$SYSTEM_IMG" bs=1048576 seek="$cur" count="$n" conv=notrunc 2>/dev/null || return 1
+        sync; sleep 1
+        nw=$(st_img_mb); [ "$nw" -gt "$cur" ] || return 1
+        cur=$nw
+    done
     [ "$(st_img_mb)" = "$1" ]
 }
 # 把镜像文件截短到 MB。只有超级块说文件系统不超过这个大小才动手：这是“绝不丢数据”的最后一道闸。
@@ -174,7 +199,8 @@ st_lock() {
         op=$(cat $ST_LOCK/pid 2>/dev/null)
         [ -n "$op" ] && kill -0 "$op" 2>/dev/null && return 1
     fi
-    echo ${1:-$$} > $ST_LOCK/pid
+    _sl_me=$$; read -r _sl_me _ < /proc/self/stat 2>/dev/null || true
+    echo "${1:-$_sl_me}" > $ST_LOCK/pid
 }
 st_unlock() { rm -f $ST_LOCK/pid; rmdir $ST_LOCK 2>/dev/null; return 0; }
 st_locked_by_other() {
@@ -350,11 +376,12 @@ st_auto_tick() {
 
 # storage info | resize <MB> | auto on|off（cmd.sh 的 FIFO）
 st_cmd() {
+    _sc_p=$$; read -r _sc_p _ < /proc/self/stat 2>/dev/null || true
     case "$1" in
-    info)   st_info > $X/ctl/storage.tmp 2>/dev/null && chmod 644 $X/ctl/storage.tmp && mv -f $X/ctl/storage.tmp $X/ctl/storage ;;
+    info)   st_info > "$X/ctl/storage.tmp.$_sc_p" 2>/dev/null && chmod 644 "$X/ctl/storage.tmp.$_sc_p" && mv -f "$X/ctl/storage.tmp.$_sc_p" $X/ctl/storage ;;
     resize) rm -f $X/ctl/storage.result
-            st_request "$2" > $X/ctl/storage.result.tmp 2>/dev/null; chmod 644 $X/ctl/storage.result.tmp 2>/dev/null
-            mv -f $X/ctl/storage.result.tmp $X/ctl/storage.result 2>/dev/null
+            st_request "$2" > "$X/ctl/storage.result.tmp.$_sc_p" 2>/dev/null; chmod 644 "$X/ctl/storage.result.tmp.$_sc_p" 2>/dev/null
+            mv -f "$X/ctl/storage.result.tmp.$_sc_p" $X/ctl/storage.result 2>/dev/null
             st_cmd info ;;
     auto)   case "$2" in on|1) v=1 ;; off|0) v=0 ;; *) return 0 ;; esac
             touch $SYS/settings.conf

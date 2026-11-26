@@ -87,7 +87,7 @@ public class FilePickerActivity extends Activity {
             @Override public int count() { return files.size(); }
             @Override public View row(int i) {
                 final File f = files.get(i);
-                View r = Blocks.listRow(FilePickerActivity.this, f.isDirectory() ? Icons.Kind.FOLDER : Icons.Kind.IMAGE, f.getName(),
+                View r = Blocks.listRow(FilePickerActivity.this, iconFor(f), f.getName(),
                     f.isDirectory() ? "文件夹" : (f.length() / 1024) + " KB", f.isDirectory() ? new Icons.IconView(FilePickerActivity.this, Icons.Kind.CHEV_R) : null);
                 r.setClickable(true);
                 r.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { pick(f); } });
@@ -105,7 +105,7 @@ public class FilePickerActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (paged != null && dir != null && !ROOT.equals(dir.getAbsolutePath())) open(dir.getParentFile()); else super.onBackPressed();
+        if (dir != null && !ROOT.equals(dir.getAbsolutePath())) open(dir.getParentFile()); else super.onBackPressed();
     }
 
     private void pick(File f) {
@@ -203,11 +203,113 @@ public class FilePickerActivity extends Activity {
         }
     }
 
+    private static Icons.Kind iconFor(File f) {
+        if (f.isDirectory()) return Icons.Kind.FOLDER;
+        String n = f.getName().toLowerCase(java.util.Locale.US);
+        if (isImageExt(n)) return Icons.Kind.IMAGE;
+        if (isBookExt(n)) return Icons.Kind.BOOK;
+        if (isFontExt(n)) return Icons.Kind.FONT;
+        if (n.endsWith(".apk")) return Icons.Kind.GRID;
+        return Icons.Kind.NOTE;
+    }
+
+    private static boolean isImageExt(String n) {
+        return n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".webp") || n.endsWith(".gif") || n.endsWith(".bmp");
+    }
+
+    private static boolean isBookExt(String n) {
+        return n.endsWith(".epub") || n.endsWith(".pdf") || n.endsWith(".mobi") || n.endsWith(".azw") || n.endsWith(".azw3")
+            || n.endsWith(".kfx") || n.endsWith(".fb2") || n.endsWith(".cbz") || n.endsWith(".cbr") || n.endsWith(".djvu");
+    }
+
+    private static boolean isFontExt(String n) {
+        return n.endsWith(".ttf") || n.endsWith(".otf") || n.endsWith(".ttc");
+    }
+
+    private static String mimeFor(String n) {
+        if (n.endsWith(".json")) return "application/json";
+        if (n.endsWith(".zip")) return "application/zip";
+        if (n.endsWith(".apk")) return "application/vnd.android.package-archive";
+        if (n.endsWith(".html") || n.endsWith(".htm")) return "text/html";
+        if (n.endsWith(".md")) return "text/markdown";
+        if (n.endsWith(".xml") || n.endsWith(".opml")) return "text/xml";
+        if (n.endsWith(".csv")) return "text/csv";
+        if (n.endsWith(".txt") || n.endsWith(".log") || n.endsWith(".conf") || n.endsWith(".ini") || n.endsWith(".yaml") || n.endsWith(".yml")) return "text/plain";
+        if (n.endsWith(".epub")) return "application/epub+zip";
+        if (n.endsWith(".pdf")) return "application/pdf";
+        if (n.endsWith(".mobi") || n.endsWith(".azw") || n.endsWith(".azw3")) return "application/x-mobipocket-ebook";
+        if (n.endsWith(".ttf")) return "font/ttf";
+        if (n.endsWith(".otf")) return "font/otf";
+        if (n.endsWith(".ttc")) return "font/collection";
+        if (n.endsWith(".png")) return "image/png";
+        if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+        if (n.endsWith(".webp")) return "image/webp";
+        if (n.endsWith(".gif")) return "image/gif";
+        if (n.endsWith(".bmp")) return "image/bmp";
+        int dot = n.lastIndexOf('.');
+        String m = dot < 0 ? null : android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(n.substring(dot + 1));
+        return m != null ? m.toLowerCase(java.util.Locale.US) : "application/octet-stream";
+    }
+
+    private static boolean mimeMatch(String pattern, String fileMime, String lowerName) {
+        if ("*/*".equals(pattern) || "application/octet-stream".equals(pattern)) return true;
+        if (pattern.equals(fileMime)) return true;
+        if (pattern.endsWith("/*")) {
+            String prefix = pattern.substring(0, pattern.length() - 1);
+            if (fileMime.startsWith(prefix)) return true;
+            if ("text/".equals(prefix) && ("application/json".equals(fileMime) || "application/xml".equals(fileMime))) return true;
+            if ("font/".equals(prefix) && isFontExt(lowerName)) return true;
+        }
+        if (("application/x-font-ttf".equals(pattern) || "application/x-font-truetype".equals(pattern) || "application/font-sfnt".equals(pattern)) && isFontExt(lowerName)) return true;
+        if ("application/xml".equals(pattern) && "text/xml".equals(fileMime)) return true;
+        return false;
+    }
+
     private boolean allowed(File f) {
-        String n = f.getName().toLowerCase();
-        return n.endsWith(".json") || n.endsWith(".txt") || n.endsWith(".zip")
-            || n.endsWith(".epub") || n.endsWith(".pdf") || n.endsWith(".mobi")
-            || n.endsWith(".azw3") || n.endsWith(".apk");
+        String name = f.getName();
+        if (WebAdmin.isProtected(name)) return false;
+        String n = name.toLowerCase(java.util.Locale.US);
+        Intent in = getIntent();
+        String[] extras = in != null ? in.getStringArrayExtra(Intent.EXTRA_MIME_TYPES) : null;
+        java.util.List<String> want = new java.util.ArrayList<String>();
+        if (extras != null && extras.length > 0) {
+            for (String s : extras) if (s != null && s.trim().length() > 0) want.add(s.trim().toLowerCase(java.util.Locale.US));
+        } else if (in != null && in.getType() != null && in.getType().trim().length() > 0) {
+            want.add(in.getType().trim().toLowerCase(java.util.Locale.US));
+        }
+        if (!want.isEmpty()) {
+            String fm = mimeFor(n);
+            for (String p : want) if (mimeMatch(p, fm, n)) return true;
+            return false;
+        }
+        return isImageExt(n) || isBookExt(n) || isFontExt(n)
+            || n.endsWith(".txt") || n.endsWith(".md") || n.endsWith(".html") || n.endsWith(".htm")
+            || n.endsWith(".rtf") || n.endsWith(".doc") || n.endsWith(".docx")
+            || n.endsWith(".mdx") || n.endsWith(".mdd") || n.endsWith(".apkg") || n.endsWith(".dsl")
+            || n.endsWith(".json") || n.endsWith(".xml") || n.endsWith(".opml") || n.endsWith(".bak")
+            || n.endsWith(".csv") || n.endsWith(".db") || n.endsWith(".sqlite")
+            || n.endsWith(".css") || n.endsWith(".js") || n.endsWith(".conf") || n.endsWith(".ini")
+            || n.endsWith(".log") || n.endsWith(".yml") || n.endsWith(".yaml")
+            || n.endsWith(".zip") || n.endsWith(".rar") || n.endsWith(".7z")
+            || n.endsWith(".tar") || n.endsWith(".gz") || n.endsWith(".tgz")
+            || n.endsWith(".apk");
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
+    }
+
+    @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
+        super.onDestroy();
     }
 
     private int dp(int v) { return Ui.dp(this, v); }

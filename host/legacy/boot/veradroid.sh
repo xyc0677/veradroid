@@ -22,7 +22,7 @@ esac
 umask 022
 VD=${VD:-$(cd "$(dirname "$0")/.." && pwd)}
 . "$VD/boot/lib/common.sh"
-for m in settings memory slim freeze kmod framework container input network sleep status cmd watchdog afterboot splash bootwatch diagboot compile energy tz tester bgnice; do . "$VD/boot/lib/$m.sh"; done
+for m in settings memory memkeep appslim slim freeze kmod framework container input network sleep status cmd watchdog afterboot splash bootwatch diagboot compile energy tz tester bgnice; do . "$VD/boot/lib/$m.sh"; done
 mkdir -p $SYS $W
 # 上次停在某个应用时留下的“当前应用显示参数”不带进这一次（开机时前台是桌面；appprof.sh）。
 # 解冻（Android 冻着、还活着）时不删：显示桥一直在跑，手里还是那个应用的参数（比如微信读书的 KFB_MODE=1 / FLASH=6）。以前这里删了，
@@ -135,7 +135,7 @@ keepawake_heal() {
     [ -f $kh_f ] || return 0
     [ -d /mnt/base-us/veradroid/state/install.lock ] && return 0
     kh_v=$(cat $kh_f 2>/dev/null); case "$kh_v" in 0|1) ;; *) kh_v=0 ;; esac
-    lipc-set-prop com.lab126.powerd preventScreenSaver "$kh_v" >/dev/null 2>&1 && rm -f $kh_f && t "restored preventScreenSaver=$kh_v left by an installer that was killed"
+    lipc-set-prop -i com.lab126.powerd preventScreenSaver "$kh_v" >/dev/null 2>&1 && rm -f $kh_f && t "restored preventScreenSaver=$kh_v left by an installer that was killed"
 }
 keepawake_heal 2>/dev/null
 
@@ -225,7 +225,7 @@ if [ -n "$P" ] && kill -0 $P 2>/dev/null; then
         # 显示桥没了马上拉起来（不等看门狗的下一轮）
         rm -f $W/epd.restarts $W/input.restarts
         [ -x "$VD/bin/veradroid-epd" ] && ! alive $W/epd.pid && { t "thaw: display bridge was gone, starting it"; display_start; }
-        type lock_reset_check >/dev/null 2>&1 && lock_reset_check
+        type lock_reset_check >/dev/null 2>&1 && { lock_reset_check; lock_request; }
         rm -f $W/frozen
         ( sleep 1; rm -f $X/ctl/sleep; epd_send REDRAW ) &
         start_helpers
@@ -272,10 +272,12 @@ fi
 # 装好后用新版本的脚本接着启动。只看文件名的检查很快；没有包时什么都不做。装过一次（成功或失败）的包会被删掉 / 改名，不会每次重试。
 if [ -z "$VD_LOCALUPD" ] && ls "$VD"/update/veradroid-*-*.tar.gz "$VD"/update/VeraDroid-Offline*.zip >/dev/null 2>&1; then
     export VD_LOCALUPD=1
+    exec >>/tmp/veradroid-stop.log 2>&1
     if cp "$VD/boot/lib/localupdate.sh" $W/localupdate.sh 2>/dev/null && ( cd / && sh $W/localupdate.sh install ) </dev/null; then
         t "local update installed, restarting with the new version"
         exec sh "$VD/boot/veradroid.sh" "$@"
     fi
+    storage_mount; log_reopen
 fi
 if ! mkdir $W/starting 2>/dev/null; then
     op=$(cat $W/starting/pid 2>/dev/null)
@@ -343,7 +345,7 @@ start_helpers
 # Whole-image auto updater (opt out with /mnt/base-us/veradroid/autoupdate = 0)
 # 自动更新常驻（每 6 小时看一次）。从 tmpfs 里的副本运行、cwd 为 /：sh 会一直开着脚本文件，
 # 直接跑 $VD 里的那份会让 /mnt/base-us 在关机时卸不掉（EBUSY），哪怕 VeraDroid 早就停了。
-[ -x "$VD/boot/lib/auto-update.sh" ] && cp "$VD/boot/lib/auto-update.sh" $W/auto-update.sh 2>/dev/null && ( cd / && exec setsid sh $W/auto-update.sh ) </dev/null >/dev/null 2>&1 &
+[ -x "$VD/boot/lib/auto-update.sh" ] && cp "$VD/boot/lib/auto-update.sh" "$W/auto-update.sh.tmp" 2>/dev/null && mv -f "$W/auto-update.sh.tmp" "$W/auto-update.sh" && ( cd / && exec setsid sh $W/auto-update.sh ) </dev/null >/dev/null 2>&1 &
 after_boot &
 echo $! > $W/afterboot.pid    # legacy：stop.sh 要能停掉它（见 stop.sh）
 t "started"

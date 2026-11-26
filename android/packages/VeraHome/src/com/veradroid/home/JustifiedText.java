@@ -91,7 +91,7 @@ final class JustifiedText extends TextView {
         int x0 = Math.max(a, s), x1 = Math.min(b, ve);
         if (x1 <= x0) return null;
         float per = justify ? perOf(l, text, line, s, e, ve) : -1;
-        return new float[] { xAt(l, text, line, s, x0, per), xAt(l, text, line, s, x1, per) };
+        return new float[] { xAt(l, text, line, s, ve, x0, per, false), xAt(l, text, line, s, ve, x1, per, true) };
     }
 
     /** 这一行两端对齐时每处拉开多少；这一行照常左对齐返回 -1（和 onDraw 的判断一样）。 */
@@ -102,21 +102,37 @@ final class JustifiedText extends TextView {
         int lead = s;
         while (lead < ve && text.charAt(lead) == '\u3000') lead++;
         int gaps = 0;
-        for (int i = s + 1; i < ve; i++) if (i > lead && breakBetween(text.charAt(i - 1), text.charAt(i))) gaps++;
-        float natural = p.measureText(text, s, ve);
+        float natural = 0;
+        int runStart = s;
+        for (int i = s + 1; i <= ve; i++) {
+            if (i == ve || i > lead && breakBetween(text.charAt(i - 1), text.charAt(i))) {
+                natural += p.measureText(text, runStart, i);
+                if (i < ve) gaps++;
+                runStart = i;
+            }
+        }
         float extra = l.getParagraphRight(line) - l.getParagraphLeft(line) - natural;
         if (gaps == 0 || extra <= 0) return -1;
         float per = extra / gaps;
         return per > 2 * p.getTextSize() ? -1 : per;
     }
 
-    private float xAt(Layout l, CharSequence text, int line, int s, int off, float per) {
+    private float xAt(Layout l, CharSequence text, int line, int s, int ve, int off, float per, boolean isEnd) {
         if (per < 0) return l.getPrimaryHorizontal(off);
+        TextPaint p = getPaint();
         int lead = s;
-        while (lead < off && text.charAt(lead) == '\u3000') lead++;
-        int gaps = 0;
-        for (int i = s + 1; i <= off && i < text.length(); i++) if (i > lead && breakBetween(text.charAt(i - 1), text.charAt(i))) gaps++;
-        return l.getParagraphLeft(line) + getPaint().measureText(text, s, off) + per * gaps;
+        while (lead < ve && text.charAt(lead) == '\u3000') lead++;
+        float x = l.getParagraphLeft(line);
+        int runStart = s;
+        for (int i = s + 1; i <= off; i++) {
+            boolean brk = i < ve && i > lead && breakBetween(text.charAt(i - 1), text.charAt(i));
+            if (i == off || brk) {
+                x += p.measureText(text, runStart, i);
+                if (brk && (i < off || !isEnd)) x += per;
+                runStart = i;
+            }
+        }
+        return x;
     }
 
     /**

@@ -58,6 +58,7 @@ public class HomeActivity extends Activity {
     // “恢复默认设置”交给宿主恢复默认的设置项（显示、手势、返回方式）
     static final String[] RESET_KEYS = { "KFB_SETTLE", "KFB_MODE", "KFB_FLASH", "KFB_CONTRAST", "KFB_DITHER", "KFB_INVERT", "KFB_LIGHTF", "KFB_DARKEN", "KFB_GESTURES",
         "RETURN_MODE", "KFB_ANIM_MODE", "KFB_ANIM_STEPS", "KFB_ANIM_DIR", "KFB_ANIM_MIN", "KFB_SMOOTH", "KFB_PACE", "KFB_HOLD", "KFB_CLEAN", "KFB_REAGL_MIN",
+        "KFB_SCROLLDU", "KFB_SCROLLWFM", "KFB_IMG", "IDLE_FREEZE", "SAVER_EXIT_H", "BG_FREEZE",
         "G_TL", "G_TR", "G_BL", "G_BR", "G_EDGE_BACK", "G_EDGE_PANEL", "G_TWO_TAP", "G_TWO_LONG", "G_TWO_BACK", "G_TWO_SLIDE", "G_BACK_EXCLUDE",
         "G_EDGE_THIRDS", "G_EB_L", "G_EB_M", "G_EB_R", "G_EB_HOLD", "G_EB_HOLD_MS" };
 
@@ -286,14 +287,22 @@ public class HomeActivity extends Activity {
 
     @Override protected void onStop() {
         super.onStop();
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        handler.removeCallbacks(prebuild);
+        dropWarm();
         if (standalone) return;   // 设置页开了个子页面（Wi-Fi、统计……）：回来时还在原来那一页
         BlocksCards.stopListening(this);
         // coming back (back gesture out of an app) should show the app grid, not whatever page we were on last
         if (inSettings) { tab = -1; showHome(); }
         else if (libPage != null && libPage.searching()) libPage.endSearch();
+        handler.removeCallbacks(prebuild);
+        dropWarm();
     }
 
     @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
+        handler.removeCallbacksAndMessages(null);
         try { unregisterReceiver(pkgReceiver); } catch (Exception ignored) { }
         Lib.removeListener(libListener);
         stopUploadWatch();
@@ -316,7 +325,11 @@ public class HomeActivity extends Activity {
         if (Blocks.on(this) && leftForApp && !standalone) { leftForApp = false; try { BlocksCards.captureLastApp(this); } catch (Throwable t) { android.util.Log.w("VeraHome", "lastapp: " + t); } }
         resumed = true;
         // 桌面到了前台：马上告诉宿主（换回默认密度、桌面的显示参数），不等任务栈通知——那个通知有时晚好几秒，偶尔整个漏掉
-        if (!standalone && AppProf.host()) HostService.foregroundHome();
+        if (!standalone) {
+            Stats.flushForeground(this);
+            Stats.maybeAutoSync(this);
+            if (AppProf.host()) HostService.foregroundHome();
+        }
         // 离开时密度被换过（多看），回来时宿主马上会换回默认（fg home）：等一会儿还不一样才重建（densityCheck）
         handler.removeCallbacks(densityCheck);
         if (getResources().getConfiguration().densityDpi != builtDpi) handler.postDelayed(densityCheck, 1500);
@@ -330,7 +343,7 @@ public class HomeActivity extends Activity {
                 try { imm.hideSoftInputFromWindow(tok, 0); } catch (Throwable ignored) { }
             } }, "hide-ime").start();
         } }, 1000);
-        StatusBarService.setSuppressed(true);
+        StatusBarService.suppress(this, true);
         StatusBarService.refresh(this);
         HostLink.cmd("status");
         long tv = Theme.version();
@@ -393,14 +406,13 @@ public class HomeActivity extends Activity {
     @Override protected void onPause() {
         super.onPause();
         resumed = false;
+        handler.removeCallbacks(prebuild);
+        dropWarm();
         if (Blocks.on(this) && !ownStart && !standalone) { leftForApp = true; BlocksCards.onLeaveHome(this); }
         ownStart = false;
         handler.removeCallbacks(tick);
         if (timeReceiverOn) { try { unregisterReceiver(timeReceiver); } catch (Throwable ignored) { } timeReceiverOn = false; }
-        if (!ReaderActivity.opening) {   // 打开自带阅读器时由阅读器在第一页画出来时放出状态栏
-            StatusBarService.setSuppressed(false);
-            StatusBarService.refresh(this);
-        }
+        // 抑止态改在 onStop 解除：桌面打开半屏 SwitcherActivity 或透明弹窗时仍可见，不让状态栏叠画到桌面顶栏上
     }
 
     @Override public void onBackPressed() {
@@ -722,6 +734,12 @@ public class HomeActivity extends Activity {
         boolean on = key == BlocksHome.HOME && !standalone && Theme.hasWallpaper();
         Blocks.veil = on ? Blocks.wallCardAlpha(this) : 255;
         applyWallpaper(on);
+    }
+
+    void onWallpaperChanged(int blocksKey) {
+        themeVer = Theme.version();
+        wallApplied = "";
+        blocksWall(blocksKey);
     }
 
     private void showHome() { if (standalone) { finish(); return; } showMain(mainTab); }
@@ -1432,7 +1450,7 @@ public class HomeActivity extends Activity {
     /** 改应用在桌面上显示的名字；留空就恢复原名。存在偏好 label_<包名>。 */
     private void renameDialog(final ResolveInfo ri) {
         final String pkg = ri.activityInfo.packageName;
-        final EditText input = new EditText(this);
+        final EditText input = Ui.editText(this);
         input.setText(labelFor(ri));
         input.setSingleLine(true);
         input.setTextSize(20);
@@ -1606,7 +1624,7 @@ public class HomeActivity extends Activity {
     }
 
     void textDialog(String title, String hint, final String key, String def, final int max) {
-        final EditText input = new EditText(this);
+        final EditText input = Ui.editText(this);
         input.setText(prefs.getString(key, def));
         input.setSingleLine(true);
         input.setTextSize(20);
@@ -1628,7 +1646,7 @@ public class HomeActivity extends Activity {
 
     /** 问题反馈：一段话 + 完整系统日志。文字先写到 ctl/feedback.txt，宿主的 feedback 命令把它放进诊断目录再一起上传。 */
     void feedbackDialog() {
-        final EditText input = new EditText(this);
+        final EditText input = Ui.editText(this);
         input.setHint("例如：打开某本书以后翻页没有反应");
         input.setHintTextColor(Color.BLACK);
         input.setTextColor(Color.BLACK);
@@ -1656,13 +1674,15 @@ public class HomeActivity extends Activity {
     }
 
     private static boolean writeFeedback(String text) {
+        java.io.FileOutputStream o = null;
         try {
             File tmp = new File(HostLink.CTL + "feedback.tmp");
-            java.io.FileOutputStream o = new java.io.FileOutputStream(tmp);
+            o = new java.io.FileOutputStream(tmp);
             o.write((text + "\n").getBytes("UTF-8"));
-            o.close();
+            o.close(); o = null;
             return tmp.renameTo(new File(HostLink.CTL + "feedback.txt"));
         } catch (Exception e) { return false; }
+        finally { if (o != null) try { o.close(); } catch (Exception ignored) { } }
     }
 
     private static final String UPLOAD_RESULT = "diag.upload.result";
@@ -1713,14 +1733,19 @@ public class HomeActivity extends Activity {
 
     /** 面板快捷按钮：点一下加入（按点的先后排序），再点一下拿掉；3 到 6 个。 */
     void quickDialog() {
+        final boolean btOk = BluetoothActivity.supported();
         final java.util.List<String> chosen = new java.util.ArrayList<String>();
-        for (String s : prefs.getString("quick", Panel.QUICK_DEFAULT).split(",")) if (s.trim().length() > 0) chosen.add(s.trim());
+        for (String s : prefs.getString("quick", Panel.QUICK_DEFAULT).split(",")) {
+            String k = s.trim();
+            if (k.length() > 0 && (btOk || !"bt".equals(k))) chosen.add(k);
+        }
         final LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         final TextView[] rows = new TextView[Panel.QUICK_ID.length];
         final Runnable paint = new Runnable() {
             @Override public void run() {
                 for (int i = 0; i < rows.length; i++) {
+                    if (rows[i] == null) continue;
                     int at = chosen.indexOf(Panel.QUICK_ID[i]);
                     rows[i].setText((at >= 0 ? "［" + (at + 1) + "］ " : "［  ］ ") + Panel.QUICK_NAME[i]);
                     rows[i].setTypeface(null, at >= 0 ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
@@ -1729,6 +1754,7 @@ public class HomeActivity extends Activity {
         };
         for (int i = 0; i < rows.length; i++) {
             final String id = Panel.QUICK_ID[i];
+            if (!btOk && "bt".equals(id)) continue;
             TextView r = text("", 18, false);
             r.setPadding(dp(8), dp(9), dp(8), dp(9));
             r.setOnClickListener(new View.OnClickListener() {
@@ -1757,7 +1783,7 @@ public class HomeActivity extends Activity {
     }
 
     private void titleDialog() {
-        final EditText input = new EditText(this);
+        final EditText input = Ui.editText(this);
         input.setText(prefs.getString("name", "VeraDroid"));
         input.setSingleLine(true);
         input.setTextSize(20);
@@ -1780,7 +1806,7 @@ public class HomeActivity extends Activity {
     }
 
     private void bindDialog() {
-        final EditText input = new EditText(this);
+        final EditText input = Ui.editText(this);
         input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         input.setHint("6 位绑定码");
         input.setSingleLine(true);
@@ -1946,7 +1972,7 @@ public class HomeActivity extends Activity {
     private int prebuildNext = -1;
     private final Runnable prebuild = new Runnable() {
         @Override public void run() {
-            if (inSettings || isFinishing()) { dropWarm(); return; }
+            if (!resumed || inSettings || isFinishing()) { dropWarm(); return; }
             if (page.getWidth() == 0) { prebuildSettingsSoon(); return; }   // 开机时主页还没排版：等一会儿再搭
             // 预搭一页要在主线程上占几百毫秒（单核机型上更久）：手指按着或刚点过就先不搭，免得点按要排在它后面等
             if (touching() || android.os.SystemClock.uptimeMillis() - Perf.start < 2000) { handler.postDelayed(this, 1000); return; }
@@ -2199,10 +2225,28 @@ public class HomeActivity extends Activity {
                 @Override public void onClick(View v) {
                     try { pm.getPackageInfo("com.veradroid.ime", 0); }
                     catch (Exception e) { say("还没安装 Vera 输入法（VeraIME.apk）"); return; }
-                    Settings.Secure.putString(getContentResolver(), Settings.Secure.ENABLED_INPUT_METHODS,
-                        "com.veradroid.ime/.VeraImeService");
-                    Settings.Secure.putString(getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD,
-                        "com.veradroid.ime/.VeraImeService");
+                    final String veraIme = "com.veradroid.ime/.VeraImeService";
+                    String enabledRaw = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_INPUT_METHODS);
+                    java.util.LinkedHashSet<String> enabled = new java.util.LinkedHashSet<String>();
+                    boolean hasVera = false;
+                    if (enabledRaw != null && enabledRaw.length() > 0) {
+                        for (String part : enabledRaw.split(":")) {
+                            String entry = part.trim();
+                            if (entry.length() == 0) continue;
+                            enabled.add(entry);
+                            int semi = entry.indexOf(';');
+                            String base = semi >= 0 ? entry.substring(0, semi) : entry;
+                            if (veraIme.equals(base)) hasVera = true;
+                        }
+                    }
+                    if (!hasVera) enabled.add(veraIme);
+                    StringBuilder sb = new StringBuilder();
+                    for (String entry : enabled) {
+                        if (sb.length() > 0) sb.append(':');
+                        sb.append(entry);
+                    }
+                    Settings.Secure.putString(getContentResolver(), Settings.Secure.ENABLED_INPUT_METHODS, sb.toString());
+                    Settings.Secure.putString(getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD, veraIme);
                     InputMethodManager im = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
                     if (im != null) im.showInputMethodPicker();
                     say("已启用 Vera 输入法；点输入框试试");
@@ -2636,7 +2680,10 @@ public class HomeActivity extends Activity {
         for (int i = 0; i < values.length; i++) if (values[i].equals(cur)) idx = i;
         if (bs) {
             ((LinearLayout) r.getTag()).addView(bStepper(labels, idx, new Blocks.Stepper.Listener() {
-                @Override public void onStep(int i) { if (!HostLink.settings(key + "=" + values[i] + "\n")) say("保存失败"); }
+                @Override public void onStep(int i) {
+                    String body = "KFB_MODE".equals(key) ? "KFB_SMOOTH=0\n" + key + "=" + values[i] + "\n" : key + "=" + values[i] + "\n";
+                    if (!HostLink.settings(body)) say("保存失败");
+                }
             }));
             return;
         }
@@ -2646,7 +2693,8 @@ public class HomeActivity extends Activity {
             @Override public void onClick(View v) {
                 at[0] = (at[0] + 1) % values.length;
                 b.setText(labels[at[0]]);
-                if (!HostLink.settings(key + "=" + values[at[0]] + "\n")) say("保存失败");
+                String body = "KFB_MODE".equals(key) ? "KFB_SMOOTH=0\n" + key + "=" + values[at[0]] + "\n" : key + "=" + values[at[0]] + "\n";
+                if (!HostLink.settings(body)) say("保存失败");
             }
         });
         ((LinearLayout) r.getTag()).addView(b);

@@ -14,6 +14,7 @@ status_write() {
     [ -n "$lan" ] || lan=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
     [ -n "$lan" ] || lan=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p')
     inv=$(sed -n 's/^KFB_INVERT=//p' $X/settings 2>/dev/null)
+    _sp=$$; read -r _sp _ < /proc/self/stat 2>/dev/null || true
     {
         echo "battery=${bat:-0}"; echo "charging=${chg:-0}"
         echo "light=${fl:-0}"; echo "lightmax=${flmax:-24}"; echo "warmth=${warm:-0}"
@@ -33,10 +34,12 @@ status_write() {
         [ -n "$warm" ] && echo "haswarmth=1" || echo "haswarmth=0"
         [ -n "$slp" ] && echo "hassleeptime=1" || echo "hassleeptime=0"
         [ -n "$fl" ] && echo "haslight=1" || echo "haslight=0"
+        if [ "$(cat "$SYS/model" 2>/dev/null)" = cs ] || [ "$(cat /sys/class/graphics/fb0/bits_per_pixel 2>/dev/null)" = 32 ]; then echo "hascolor=1"; else echo "hascolor=0"; fi
         # 自动亮度：powerd 有 flAuto，而且机器上真有光线传感器才显示这个开关。
         # 传感器的判断：iio 设备里有 in_illuminance*，或者输入设备 / sensors 类里有名字带 als / lux / light 的。
         # （PW6 普通版实测没有传感器：flAuto 属性在，但没有任何这类设备。签名版 / Scribe 没有真机验证过。）
         fla=$(lipc-get-prop $p flAuto 2>/dev/null); als=
+        [ "$fla" = 1 ] && [ -n "${W:-}" ] && rm -f "$W/fl.auto_off"
         ls /sys/bus/iio/devices/*/in_illuminance* >/dev/null 2>&1 && als=1
         # powerd 自己的读数：alsLux >= 0 = 有传感器（没有传感器时是 -1，PW5 5.16.2 模拟器实测）
         [ -z "$als" ] && ls_l=$(lipc-get-prop $p alsLux 2>/dev/null) && [ "$ls_l" -ge 0 ] 2>/dev/null && als=1
@@ -49,5 +52,5 @@ status_write() {
         # Wi-Fi 省电现在的状态（on / off，读不到就不写）和设置
         ps=$(type wifi_ps_state >/dev/null 2>&1 && wifi_ps_state); [ -n "$ps" ] && echo "wifips=$ps"
         echo "wifipsmode=${WIFI_PS:-auto}"
-    } > $X/ctl/status.tmp && mv -f $X/ctl/status.tmp $X/ctl/status
+    } > "$X/ctl/status.tmp.$_sp" && mv -f "$X/ctl/status.tmp.$_sp" $X/ctl/status
 }

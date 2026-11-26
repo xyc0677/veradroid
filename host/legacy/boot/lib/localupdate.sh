@@ -39,16 +39,17 @@ ver_gt() { # $1 比 $2 新
         END { n = n1 > n2 ? n1 : n2; for (i = 1; i <= n; i++) { x = a[i] + 0; y = b[i] + 0; if (x > y) exit 0; if (x < y) exit 1 } exit 1 }'
 }
 cur_version() { cat "$VD/version" 2>/dev/null || cat "$SYS/version" 2>/dev/null || echo 0; }
-# 这台机器该用哪个变体：5.x 内核 = pw6，4.x = k49，3.0 内核的老机型 = legacy（veradroid-legacy-<版本>.tar.gz）
-my_variant() { case "$(uname -r)" in 5.*) echo pw6 ;; 4.*) echo k49 ;; 3.*) echo legacy ;; *) echo "" ;; esac; }
-# 文件名 -> 变体 版本
+# 这台机器该用哪个变体：5.x 内核 = pw6，4.9 = k49，3.x / 4.1 内核的老机型 = legacy（veradroid-legacy-<版本>.tar.gz）
+my_variant() { case "$(uname -r)" in 5.*) echo pw6 ;; 4.9.*) echo k49 ;; 3.*|4.1.*) echo legacy ;; *) echo "" ;; esac; }
+# 文件名 -> 变体|版本
 name_info() { # basename
     case "$1" in
-        veradroid-pw6-*.tar.gz) v=${1#veradroid-pw6-}; echo "pw6 ${v%.tar.gz}" ;;
-        veradroid-k49-*.tar.gz) v=${1#veradroid-k49-}; echo "k49 ${v%.tar.gz}" ;;
-        veradroid-legacy-*.tar.gz) v=${1#veradroid-legacy-}; echo "legacy ${v%.tar.gz}" ;;
-        VeraDroid-Offline-Experimental*.zip) echo "k49 ?" ;;
-        VeraDroid-Offline*.zip) echo "pw6 ?" ;;
+        veradroid-pw6-*.tar.gz) v=${1#veradroid-pw6-}; printf 'pw6|%s\n' "${v%.tar.gz}" ;;
+        veradroid-k49-*.tar.gz) v=${1#veradroid-k49-}; printf 'k49|%s\n' "${v%.tar.gz}" ;;
+        veradroid-legacy-*.tar.gz) v=${1#veradroid-legacy-}; printf 'legacy|%s\n' "${v%.tar.gz}" ;;
+        VeraDroid-Offline-Legacy*.zip) printf 'legacy|?\n' ;;
+        VeraDroid-Offline-Experimental*.zip) printf 'k49|?\n' ;;
+        VeraDroid-Offline*.zip) printf 'pw6|?\n' ;;
     esac
 }
 valid_ver() { case "$1" in ''|*[!0-9.]*|.*|*.) return 1 ;; esac; return 0; }
@@ -65,26 +66,37 @@ reject() { # file reason
     result result=rejected "file=${1##*/}" "from=$(cur_version)" "reason=$2"
 }
 
-# 候选：update/ 里每个包一行“文件 变体 版本 状态”（状态 ok = 可以装；其余是不装的原因）
+# 候选：update/ 里每个包一行“变体|版本|状态|文件”（状态 ok = 可以装；文件名放末列兼容含空格文件名）
 scan() {
     mv_=$(my_variant); cur=$(cur_version)
     for f in "$UPD"/veradroid-*-*.tar.gz "$UPD"/VeraDroid-Offline*.zip; do
         [ -f "$f" ] || continue
-        set -- $(name_info "${f##*/}"); var=$1; ver=$2
-        case "$f" in *.zip) b=$(zip_bundle "$f"); [ -n "$b" ] && { set -- $(name_info "$b"); var=$1; ver=$2; } ;; esac
+        bn=${f##*/}
+        ni=$(name_info "$bn")
+        var=${ni%%|*}; ver=${ni#*|}
+        [ "$ni" = "$var" ] && ver=
+        case "$f" in
+            *.zip)
+                b=$(zip_bundle "$f")
+                if [ -n "$b" ]; then
+                    ni=$(name_info "$b")
+                    var=${ni%%|*}; ver=${ni#*|}
+                    [ "$ni" = "$var" ] && ver=
+                fi ;;
+        esac
         st=ok
         if [ -z "$mv_" ]; then st=unsupported-kernel
         elif [ "$var" != "$mv_" ]; then st=wrong-variant
         elif ! valid_ver "$ver"; then st=bad-name
         elif ! ver_gt "$ver" "$cur"; then st=not-newer
         fi
-        echo "${f##*/} $var $ver $st"
+        printf '%s|%s|%s|%s\n' "${var:-?}" "${ver:-?}" "$st" "$bn"
     done
 }
 
 if [ "$MODE" = check ]; then
     echo "installed=$(cur_version)"; echo "variant=$(my_variant)"
-    scan | while read -r n v ver st; do echo "candidate=$n $v $ver $st"; done
+    scan | while IFS='|' read -r v ver st n; do echo "candidate=$n $v $ver $st"; done
     [ -f "$UPD/result.txt" ] && sed 's/^/last./' "$UPD/result.txt"
     exit 0
 fi
@@ -103,7 +115,7 @@ trap 'rm -rf $W/localupdate.lock' EXIT
 # 1. 只按名字挑：先把不合格的改名（不再重试），在合格的里挑最新的
 best=; bestver=
 scan > $W/localupdate.scan
-while read -r n v ver st; do
+while IFS='|' read -r v ver st n; do
     if [ "$st" != ok ]; then
         case "$st" in
             not-newer) reject "$UPD/$n" "版本 $ver 不比已安装的 $(cur_version) 新（不会降级）" ;;
@@ -128,12 +140,13 @@ fail() { # reason（一行：tar 的错误信息可能有好几行）
     result result=failed "file=$best" "from=$CUR" "to=$bestver" "reason=$(printf '%s' "$1" | tr '\n' ' ')"
     [ -f "$SRC" ] && mv -f "$SRC" "$SRC.failed" 2>/dev/null
     # 只删暂存的安装包；keep/（用户的 update 目录）放不回去时还留在这里
-    rm -rf "$STAGE/x" "$STAGE/zip" "$STAGE/bootstrap.sh" "$STAGE"/veradroid-*.tar.gz "$STAGE/tar.err"
+    rm -rf "$STAGE/x" "$STAGE/zip" "$STAGE/bootstrap.sh" "$STAGE"/veradroid-*.tar.gz "$STAGE/tar.err" "$STAGE/tar.list"
     rmdir "$STAGE" 2>/dev/null
     eips 1 3 "VeraDroid：离线更新没有安装（$1）" >/dev/null 2>&1 || true
     exit 1
 }
-rm -rf "$STAGE"; mkdir -p "$STAGE/x" || fail "无法创建暂存目录"
+rm -rf "$STAGE/x" "$STAGE/zip" "$STAGE/bootstrap.sh" "$STAGE"/veradroid-*.tar.gz "$STAGE/tar.err" "$STAGE/tar.list"
+mkdir -p "$STAGE/x" || fail "无法创建暂存目录"
 B=$STAGE/veradroid-$VAR-$bestver.tar.gz
 case "$SRC" in
     *.zip)
@@ -152,6 +165,17 @@ for s in "$SRC.sha256" "$UPD/veradroid-$VAR-$bestver.tar.gz.sha256"; do
     [ "$want" = "$got" ] || fail "SHA-256 不对（$s）"
     lg "outer sha256 ok"; break
 done
+# 预检归档条目：拒绝以 / 开头、含 .. 路径段或非 veradroid-pw6/ 越界成员（防路径穿越/软链覆写）
+tar -tzf "$B" > "$STAGE/tar.list" 2>"$STAGE/tar.err" || fail "安装包损坏（$(head -c 100 "$STAGE/tar.err")）"
+[ -s "$STAGE/tar.list" ] || fail "安装包为空"
+while IFS= read -r te; do
+    case "$te" in
+        ''|/*|..|../*|*/..|*/../*) fail "安装包包含非法路径（$te）" ;;
+        veradroid-pw6|veradroid-pw6/*) ;;
+        *) fail "安装包包含越界路径（$te）" ;;
+    esac
+done < "$STAGE/tar.list"
+rm -f "$STAGE/tar.list"
 # 包里的小文件（除了 rootfs.tar.gz 都很小）解到 x/，顺便整读一遍 gzip（CRC 错就失败）
 tar -xzf "$B" -C "$STAGE/x" --exclude veradroid-pw6/rootfs.tar.gz 2>$STAGE/tar.err || fail "安装包损坏（$(head -c 100 $STAGE/tar.err)）"
 P=$STAGE/x/veradroid-pw6

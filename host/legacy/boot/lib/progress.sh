@@ -430,8 +430,9 @@ vp_netdiag() { # 输出文件 [服务器根地址]
         return 0
     fi
     vp_kvw "$nf" state=running step=speed "line1=正在测下载速度（用真实的安装包下 6 秒）…" "lines=$NC_LINES" "start=$t0"
-    case "$(uname -r)" in 3.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/api/bootstrap" ;; esac
+    case "$(uname -r)" in 3.*|4.1.*) m="$nb/static/bootstrap-legacy.json?t=$t0" ;; 4.*) m="$nb/static/bootstrap-k49.json?t=$t0" ;; *) m="$nb/static/bootstrap-pw6.json?t=$t0" ;; esac
     u=$(curl_do -fsSL --max-time 15 "$m" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p')
+    [ -z "$u" ] && case "$m" in */bootstrap-pw6.json*) u=$(curl_do -fsSL --max-time 15 "$nb/api/bootstrap" 2>/dev/null | sed -n 's/.*"url": *"\([^"]*\)".*/\1/p') ;; esac
     sp=0
     [ -n "$u" ] && sp=$(curl_do -s -o /dev/null --connect-timeout 10 --max-time 6 -w '%{speed_download}' "$u" 2>/dev/null | cut -d. -f1)
     case "$sp" in ''|*[!0-9]*) sp=0 ;; esac

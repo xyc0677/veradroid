@@ -2,10 +2,12 @@
 package com.veradroid.home;
 
 import android.app.Activity;
+import android.app.Application;
 import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -16,12 +18,24 @@ import android.widget.TextView;
 
 /** Custom black-on-white toast; AOSP's Toast is not used anywhere in VeraDroid. */
 final class VeraToast {
+    private static final Handler H = new Handler(Looper.getMainLooper());
+    private static Runnable activeCleanup;
+
     private VeraToast() { }
 
-    static void show(Context c, String msg) {
+    static void show(final Context c, final String msg) {
+        if (c == null || msg == null) return;
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            H.post(new Runnable() {
+                @Override public void run() { show(c, msg); }
+            });
+            return;
+        }
         if (!(c instanceof Activity)) { overlay(c, msg); return; }
         final Activity a = (Activity) c;
         if (a.isFinishing() || a.isDestroyed()) return;
+        if (activeCleanup != null) activeCleanup.run();
+
         final Dialog d = new Dialog(a);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
         d.setCanceledOnTouchOutside(true);
@@ -36,6 +50,20 @@ final class VeraToast {
         }
         t.setMaxLines(4);
         d.setContentView(t);
+        // 在 show() 之前设好无焦点、透传点击与不压暗背景，避免焦点闪断与拦截底部点击
+        Window w = d.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setWindowAnimations(0);
+            w.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+            // 不压暗背景：墨水屏上压暗 = 整屏变灰再变回来，两次全屏重绘
+            w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            w.setLayout(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            w.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            WindowManager.LayoutParams lp = w.getAttributes();
+            lp.y = Ui.dp(a, 82);   // 悬浮在底部导航栏和翻页条上方，不遮挡按键
+            w.setAttributes(lp);
+        }
         try {
             d.show();
         } catch (android.view.WindowManager.BadTokenException e) {
@@ -43,22 +71,35 @@ final class VeraToast {
         } catch (Throwable e) {
             return;
         }
-        Window w = d.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            w.setWindowAnimations(0);
-            w.setLayout(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            w.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            WindowManager.LayoutParams lp = w.getAttributes();
-            lp.y = Ui.dp(a, 82);   // 悬浮在底部导航栏和翻页条上方，不遮挡按键
-            w.setAttributes(lp);
-            w.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
-            // 不压暗背景：墨水屏上压暗 = 整屏变灰再变回来，两次全屏重绘
-            w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        final Application app = a.getApplication();
+        final boolean[] done = new boolean[1];
+        final Runnable[] cleanup = new Runnable[1];
+        final Application.ActivityLifecycleCallbacks lc = new Application.ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(Activity act, Bundle b) { }
+            @Override public void onActivityStarted(Activity act) { }
+            @Override public void onActivityResumed(Activity act) { }
+            @Override public void onActivityPaused(Activity act) { if (act == a && act.isFinishing()) cleanup[0].run(); }
+            @Override public void onActivityStopped(Activity act) { if (act == a && act.isFinishing()) cleanup[0].run(); }
+            @Override public void onActivitySaveInstanceState(Activity act, Bundle b) { }
+            @Override public void onActivityDestroyed(Activity act) { if (act == a) cleanup[0].run(); }
+        };
+        cleanup[0] = new Runnable() {
+            @Override public void run() {
+                if (done[0]) return;
+                done[0] = true;
+                H.removeCallbacks(cleanup[0]);
+                if (activeCleanup == cleanup[0]) activeCleanup = null;
+                if (app != null) {
+                    try { app.unregisterActivityLifecycleCallbacks(lc); } catch (Throwable ignored) { }
+                }
+                try { if (d.isShowing()) d.dismiss(); } catch (Throwable ignored) { }
+            }
+        };
+        activeCleanup = cleanup[0];
+        if (app != null) {
+            try { app.registerActivityLifecycleCallbacks(lc); } catch (Throwable ignored) { }
         }
-        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-            @Override public void run() { try { if (d.isShowing() && !a.isFinishing()) d.dismiss(); } catch (Throwable ignored) { } }
-        }, 2200);
+        H.postDelayed(cleanup[0], 2200);
     }
 
     /**

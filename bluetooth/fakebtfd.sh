@@ -85,19 +85,30 @@ setprop() {   # prop value
 }
 
 waitev() {    # [-m] [-s N] source events
-    multi=; secs=1000000
-    while [ $# -gt 0 ]; do case "$1" in -m) multi=1 ;; -s) secs=$2; shift ;; -*) ;; *) break ;; esac; shift; done
-    src=$1; evs=$2
-    [ "$src" = $BTF ] || exec $F/real/lipc-wait-event ${multi:+-m} -s $secs "$src" "$evs"
+    multi=; secs=1000000; src=; evs=; skip=
+    for x in "$@"; do
+        if [ -n "$skip" ]; then secs=$x; skip=; continue; fi
+        case "$x" in
+            -m) multi=1 ;;
+            -s) skip=1 ;;
+            -*) ;;
+            *) if [ -z "$src" ]; then src=$x; elif [ -z "$evs" ]; then evs=$x; fi ;;
+        esac
+    done
+    [ "$src" = "$BTF" ] || exec $F/real/lipc-wait-event "$@"
     n0=$(wc -l < $F/events); end=$(( $(date +%s) + secs ))
     while [ $(date +%s) -lt $end ]; do
         n=$(wc -l < $F/events)
         if [ $n -gt $n0 ]; then
-            sed -n "$((n0 + 1)),${n}p" $F/events | while read -r e a; do
-                case ",$evs," in *",$e,"*) echo "$e $a" ;; esac
-            done
+            matched=$(sed -n "$((n0 + 1)),${n}p" $F/events | awk -v evs=",$evs," '{ if (index(evs, "," $1 ",")) print }')
             n0=$n
-            [ -z "$multi" ] && exit 0
+            if [ -n "$matched" ]; then
+                if [ -z "$multi" ]; then
+                    printf '%s\n' "$matched" | head -n 1
+                    exit 0
+                fi
+                printf '%s\n' "$matched"
+            fi
         fi
         usleep 300000
     done
@@ -105,9 +116,10 @@ waitev() {    # [-m] [-s N] source events
 
 case "$me" in
 lipc-get-prop|lipc-set-prop|lipc-hash-prop)
-    a=; for x in "$@"; do case "$x" in -*) ;; *) a="$a${a:+ }$x" ;; esac; done
-    set -- $a
-    if [ "$1" != $BTF ]; then exec $F/real/$me "$@"; fi
+    src=
+    for x in "$@"; do case "$x" in -*) ;; *) src=$x; break ;; esac; done
+    if [ "$src" != "$BTF" ]; then exec $F/real/$me "$@"; fi
+    while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
     case "$me" in
         lipc-get-prop) case "$2" in BTstate) cat $F/on ;; BTconnectedDevName) m=$(head -1 $F/conn 2>/dev/null); [ -n "$m" ] && dname $m || echo ;; *) echo 0 ;; esac ;;
         lipc-set-prop) shift; p=$1; shift; setprop "$p" "$*" ;;

@@ -15,10 +15,43 @@ PURGE=${VD_PURGE:-0}
 [ "$PURGE" = 1 ] && ULOG=/tmp/veradroid-uninstall.log
 exec >>$ULOG 2>&1
 echo "== $(date) uninstall"
-say() { command -v eips >/dev/null 2>&1 && eips 1 ${2:-4} "$1" >/dev/null 2>&1; t "uninstall: $1"; }
+UN_FB=; UN_FB_TMP=
+for _c in "$FBINK" "$(command -v fbink 2>/dev/null)" /var/local/kmc/bin/fbink /mnt/us/libkh/bin/fbink /mnt/us/koreader/fbink /mnt/base-us/veradroid/bin/fbink; do
+    [ -n "$_c" ] && [ -x "$_c" ] && "$_c" -e >/dev/null 2>&1 && { UN_FB=$_c; break; }
+done
+case "$UN_FB" in "$VD"/*|/mnt/base-us/veradroid/*)
+    if cp "$UN_FB" /tmp/vd-uninstall-fbink 2>/dev/null && chmod +x /tmp/vd-uninstall-fbink 2>/dev/null; then
+        UN_FB=/tmp/vd-uninstall-fbink; UN_FB_TMP=$UN_FB
+        trap 'rm -f "$UN_FB_TMP"' EXIT
+    fi ;;
+esac
+UN_FONT=
+for _f in /usr/java/lib/fonts/STHeitiMedium.ttf /usr/java/lib/fonts/STSongMedium.ttf /usr/java/lib/fonts/MYingHeiSMedium.ttf; do
+    [ -f "$_f" ] && { UN_FONT=$_f; break; }
+done
+# say <中文> [纯ASCII英文回退] [eips行号]：优先用 fbink 显示中文，回退 eips 时仅输出 ASCII 英文（eips 不支持中文）
+say() {
+    _zh=$1; _en=${2:-VeraDroid uninstall (see logs/uninstall.log)}; _row=${3:-4}
+    t "uninstall: $_zh"
+    if [ -n "$UN_FB" ] && [ -x "$UN_FB" ] && [ -n "$UN_FONT" ]; then
+        _sw=$("$UN_FB" -e 2>/dev/null | tr ';' '\n' | sed -n 's/^viewWidth=//p' | head -1)
+        case "$_sw" in ''|*[!0-9]*) _sw=1272 ;; esac
+        _px=$((26 * _sw / 1272)); [ "$_px" -ge 20 ] || _px=20
+        if _fe=$("$UN_FB" -q -c -t regular="$UN_FONT",px=$_px,top=$((40 * _sw / 1272)),left=30,right=30 "$_zh" 2>&1 >/dev/null); then
+            case "$_fe" in
+                *Unidentified*|*SEND_UPDATE*|*rror*|*ailed*) ;;
+                *) return 0 ;;
+            esac
+        fi
+    fi
+    if command -v eips >/dev/null 2>&1; then
+        eips -c >/dev/null 2>&1 || true
+        eips 1 "$_row" "$_en" >/dev/null 2>&1 || true
+    fi
+}
 # 卸载停止时：本次从 loop 系统盘拷出来的书（KEEP）只是副本，原件还在镜像里 → 删掉副本，否则下次重试会因为 KEEP 已存在而永远停住
 MADEKEEP=0
-fail() { if [ "$MADEKEEP" = 1 ] && [ -d "$SYS/data/media" ] && [ -d "$KEEP" ]; then rm -rf /mnt/base-us/veradroid/backup/media-keep; t "uninstall: 已删掉本次的书副本 $KEEP（原件仍在系统盘里）"; fi; say "卸载停止：$1（什么都没删）" 5; exit 1; }
+fail() { if [ "$MADEKEEP" = 1 ] && [ -d "$SYS/data/media" ] && [ -d "$KEEP" ]; then rm -rf /mnt/base-us/veradroid/backup/media-keep; t "uninstall: 已删掉本次的书副本 $KEEP（原件仍在系统盘里）"; fi; say "卸载停止：$1（什么都没删）" "Uninstall stopped: ${2:-see uninstall.log} (nothing deleted)" 5; exit 1; }
 KEEP=/mnt/base-us/veradroid/backup/media-keep
 sleep 1
 cd /                                   # 自己的工作目录也不能在 $SYS 里
@@ -71,16 +104,16 @@ while [ $i -lt 6 ]; do
     if [ $i -lt 4 ]; then kill $h 2>/dev/null; else kill -9 $h 2>/dev/null; fi
     sleep 1; i=$((i + 1))
 done
-say '正在卸载 VeraDroid，保留书和账号…'
-[ -e "$KEEP" ] && fail "$KEEP 已存在（上一次卸载留下的书还在那里）"
-[ -e /mnt/base-us/veradroid-media-keep ] && fail "/mnt/base-us/veradroid-media-keep 已存在（上一次卸载留下的书还在那里）"   # root-legacy
+say '正在卸载 VeraDroid，保留书和账号…' 'Uninstalling VeraDroid (keeping books and data)...' 4
+[ -e "$KEEP" ] && fail "$KEEP 已存在（上一次卸载留下的书还在那里）" "media-keep already exists"
+[ -e /mnt/base-us/veradroid-media-keep ] && fail "/mnt/base-us/veradroid-media-keep 已存在（上一次卸载留下的书还在那里）" "veradroid-media-keep already exists"   # root-legacy
 LOOPIMG=0
 if [ -f "$SYSTEM_IMG" ]; then
     LOOPIMG=1
-    storage_mount || fail "系统盘挂不上"
-    grep -q " $SYS " /proc/mounts || fail "系统盘没有挂上"
+    storage_mount || fail "系统盘挂不上" "cannot mount system image"
+    grep -q " $SYS " /proc/mounts || fail "系统盘没有挂上" "system image not mounted"
 fi
-mounts_under "$SYS/rootfs" 1 && fail "$SYS/rootfs 下面还有挂载"
+mounts_under "$SYS/rootfs" 1 && fail "$SYS/rootfs 下面还有挂载" "rootfs still has mounts"
 if [ "$PURGE" != 1 ] && [ -d "$SYS/data/media" ]; then
     if [ "$LOOPIMG" = 1 ]; then
         # 系统盘里的 data/media 和 /mnt/base-us 不是同一个文件系统：先完整拷出来，核对，再删镜像
@@ -90,30 +123,30 @@ if [ "$PURGE" != 1 ] && [ -d "$SYS/data/media" ]; then
             # 空间不够拷：只删系统部分，镜像（里面有书）留下
             rm -rf "$SYS/rootfs" "$SYS/data/dalvik-cache" 2>/dev/null
             storage_umount
-            mounts_under "$VD" 1 && fail "$VD 下面有挂载"
+            mounts_under "$VD" 1 && fail "$VD 下面有挂载" "veradroid still has mounts"
             un_clean
-            say "空间不够把书拷出来：系统已删除，书和账号还在 veradroid-sys.img 里（重新安装会接着用）" 5
+            say "空间不够把书拷出来：系统已删除，书和账号还在 veradroid-sys.img 里（重新安装会接着用）" "Uninstalled (low space: books kept in veradroid-sys.img)" 5
             exit 0
         fi
         rm -rf "$KEEP.partial" 2>/dev/null
         # vfat 用户存储（KT5、PW5 等，pw5b-5192 模拟器实测）不能 chown：busybox cp -a 照样把文件全拷过去，只是报
         # "can't preserve ownership" 并返回 1，以前卸载因此总是停在“拷贝书失败”。只有这一种报错时不算失败（下面还要核对数量）。
         if ! cp -a "$SYS/data/media" "$KEEP.partial" 2>/tmp/vd-uninstall-cp.err; then
-            if grep -v "preserve ownership" /tmp/vd-uninstall-cp.err | grep -q .; then rm -rf "$KEEP.partial"; fail "拷贝书失败"; fi
+            if grep -v "preserve ownership" /tmp/vd-uninstall-cp.err | grep -q .; then rm -rf "$KEEP.partial"; fail "拷贝书失败" "failed to copy books"; fi
             t "uninstall: 用户存储不能保留文件属主（vfat），书照样拷完了"
         fi
         rm -f /tmp/vd-uninstall-cp.err
         n1=$(find "$SYS/data/media" | wc -l); n2=$(find "$KEEP.partial" | wc -l)
-        [ "$n1" = "$n2" ] || { rm -rf "$KEEP.partial"; fail "拷贝核对失败 ($n1/$n2)"; }
-        mv "$KEEP.partial" "$KEEP" || fail "无法保存书"
+        [ "$n1" = "$n2" ] || { rm -rf "$KEEP.partial"; fail "拷贝核对失败 ($n1/$n2)" "copy verify mismatch ($n1/$n2)"; }
+        mv "$KEEP.partial" "$KEEP" || fail "无法保存书" "failed to move books"
         MADEKEEP=1
     else
-        mv "$SYS/data/media" "$KEEP" || fail "无法保存书"
+        mv "$SYS/data/media" "$KEEP" || fail "无法保存书" "failed to move books"
     fi
 fi
 storage_umount
-mounts_under "$SYS" 1 && fail "$SYS 还挂着（或下面有挂载）"
-mounts_under "$VD" 1 && fail "$VD 下面有挂载"
+mounts_under "$SYS" 1 && fail "$SYS 还挂着（或下面有挂载）" "system still mounted"
+mounts_under "$VD" 1 && fail "$VD 下面有挂载" "veradroid still has mounts"
 un_clean
 [ "$LOOPIMG" = 1 ] && rm -f "$SYSTEM_IMG"
 rm -rf "$SYS" 2>/dev/null
@@ -157,7 +190,7 @@ vd_retire_uninstall_entry() {
 vd_retire_uninstall_entry
 uK=/mnt/us/extensions/VeraDroid
 if [ -d "$uK" ] && [ ! -L "$uK" ] && grep -q 'veradroid' "$uK/start.sh" 2>/dev/null; then
-    rm -f "$uK/start.sh" "$uK/install.sh" "$uK/config.xml" "$uK/menu.json"; rmdir "$uK" 2>/dev/null && t "uninstall: 已删除 KUAL 菜单 $uK"
+    rm -f "$uK/start.sh" "$uK/install.sh" "$uK/restore-entry.sh" "$uK/config.xml" "$uK/menu.json"; rmdir "$uK" 2>/dev/null && t "uninstall: 已删除 KUAL 菜单 $uK"
 fi
 if [ "$PURGE" = 1 ]; then
     # 内核模块（只是内存里的，重启也会消失）：能卸就卸
@@ -184,12 +217,12 @@ if [ "$PURGE" = 1 ]; then
         # 根目录里老版本的：只删安装器按时间起名的那些，用户改过名的（KEEP 等）不动   root-legacy
         rm -f /mnt/base-us/veradroid-user-backup-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].tgz /mnt/base-us/veradroid-user-backup.partial /mnt/base-us/veradroid-docs-manifest /mnt/base-us/veradroid-docs-manifest.checked 2>/dev/null   # root-legacy
         rmdir /mnt/base-us/veradroid/logs /mnt/base-us/veradroid/state /mnt/base-us/veradroid/backup /mnt/base-us/veradroid 2>/dev/null   # 空了就连文件夹一起拿掉
-        sync; say 'VeraDroid 已完全卸载（书库一个文件都没少，备份已删除）。' 5
+        sync; say 'VeraDroid 已完全卸载（书库一个文件都没少，备份已删除）。' 'VeraDroid completely uninstalled (all books intact).' 5
     else
-        sync; say "VeraDroid 已卸载。书库比安装前少了 $miss 个文件：安装前的备份留在 veradroid/backup/ 里" 5
+        sync; say "VeraDroid 已卸载。书库比安装前少了 $miss 个文件：安装前的备份留在 veradroid/backup/ 里" "VeraDroid uninstalled ($miss files missing, backup kept)." 5
     fi
     exit 0
 fi
-say 'VeraDroid 已卸载，书和账号保留。可随时重新安装。' 5
+say 'VeraDroid 已卸载，书和账号保留。可随时重新安装。' 'VeraDroid uninstalled (books and data kept).' 5
 exit 0
 }

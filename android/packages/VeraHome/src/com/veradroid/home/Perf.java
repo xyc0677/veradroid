@@ -74,12 +74,21 @@ final class Perf {
         listen(root, what, built, from);
     }
 
+    private static final java.util.WeakHashMap<View, ViewTreeObserver.OnDrawListener> PENDING = new java.util.WeakHashMap<View, ViewTreeObserver.OnDrawListener>();
+
     private static void listen(final View root, final String what, final long built, final long from) {
-        root.getViewTreeObserver().addOnDrawListener(new ViewTreeObserver.OnDrawListener() {
+        synchronized (PENDING) {
+            ViewTreeObserver.OnDrawListener old = PENDING.remove(root);
+            if (old != null) {
+                try { root.getViewTreeObserver().removeOnDrawListener(old); } catch (Throwable ignored) { }
+            }
+        }
+        final ViewTreeObserver.OnDrawListener l = new ViewTreeObserver.OnDrawListener() {
             private boolean done;
             @Override public void onDraw() {
                 if (done) return;
                 done = true;
+                synchronized (PENDING) { PENDING.remove(root); }
                 long now = SystemClock.uptimeMillis();
                 Log.i("VeraPerf", what + ": build->draw " + (now - built) + " ms"
                     + (from > 0 && now - from < 10000 ? ", input->draw " + (now - from) + " ms" : ""));
@@ -88,6 +97,8 @@ final class Perf {
                     try { root.getViewTreeObserver().removeOnDrawListener(self); } catch (Throwable ignored) { }
                 } });
             }
-        });
+        };
+        synchronized (PENDING) { PENDING.put(root, l); }
+        root.getViewTreeObserver().addOnDrawListener(l);
     }
 }

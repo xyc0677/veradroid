@@ -39,8 +39,15 @@ screen() { # 多行文字，整屏显示。优先 fbink + Kindle 自带中文字
     # 动态链接的 fbink 在老固件（armel）上也起不来：失败就接着试下一个，最后用 eips 写英文
     if [ -n "$ft" ]; then
         for fb in "$(command -v fbink 2>/dev/null)" /mnt/base-us/veradroid/bin/fbink /var/local/kmc/bin/fbink /mnt/us/libkh/bin/fbink /mnt/us/koreader/fbink; do
-            [ -n "$fb" ] && [ -x "$fb" ] || continue
-            "$fb" -q -c -t regular="$ft",px=$px,top=40,left=30,right=30 "$txt" >/dev/null 2>&1 && return 0
+            [ -n "$fb" ] && [ -x "$fb" ] && "$fb" -e >/dev/null 2>&1 || continue
+            if fe=$("$fb" -q -c -t regular="$ft",px=$px,top=40,left=30,right=30 "$txt" 2>&1 >/dev/null); then
+                case "$fe" in
+                    *Unidentified*|*SEND_UPDATE*|*rror*|*ailed*)
+                        echo "screen: fbink cannot refresh here ($(printf '%s' "$fe" | head -2 | tr '\n' ' ')), eips"
+                        eips -c >/dev/null 2>&1 || true ;;
+                    *) return 0 ;;
+                esac
+            fi
         done
     fi
     r=1; printf '%s\n' "${EN:-$txt}" | tr '|' '\n' | while IFS= read -r l; do eips 1 $r "$l" >/dev/null 2>&1 || true; r=$((r + 2)); done
@@ -66,14 +73,18 @@ if [ -n "$EMU" ]; then
         echo "emulator-only model ($EMU, fw $fwv): warning shown, waiting for the second tap"
         echo "install $bid $now" > "$CF"; sync
         i=0
-        EN="VeraDroid: OLD Kindle model, TEST build|$EMU_EN, firmware ${fwv:-?}|Only tested in emulators, never on a real|device. It may not start; a failed start|returns to the Kindle by itself (~15 min).|The Kindle system partition is not changed.|Copy important books to a PC (USB) first!|Uninstall: tap 'VeraDroid 卸载' in Library.|-----------------------------------------|To INSTALL: tap this script again in|10 s .. 2 min. To cancel: do nothing."
+        EN="VeraDroid: OLD Kindle model, TEST build|$EMU_EN, firmware ${fwv:-?}|Only tested in emulators, never on a real|device. It may not start; a failed start|returns to the Kindle by itself (~15 min).|The Kindle system partition is not changed.|Copy important books to a PC (USB) first!|Uninstall: Android Settings -> Device & Update -> Uninstall.|-----------------------------------------|To INSTALL: tap this script again in|10 s .. 2 min. To cancel: do nothing."
         while [ $i -lt 4 ]; do   # 书库界面可能会盖住：40 秒里重画几次
+            [ -f "$CF" ] || break
             screen "VeraDroid 实验机型 · 测试版" "这台：$EMU，固件 ${fwv:-?}" "-------------------------------" \
                 "这个机型只在模拟器上跑过，" "没有在真机上验证。可能无法启动；" "启动失败会自动回到 Kindle（最多约 15 分钟）。" \
                 "不会改动 Kindle 系统分区，只在用户存储里放文件。" "安装前会记下书库清单并备份小文件。" \
                 "请先用 USB 把重要的书拷到电脑！" "卸载：Android 设置→设备与更新→卸载 VeraDroid。" "-------------------------------" \
                 "确认安装：10 秒后、2 分钟内再点一次本脚本。" "不想装：什么都不用做。"
-            sleep 10; i=$((i + 1))
+            [ -f "$CF" ] || break
+            sleep 10
+            [ -f "$CF" ] || break
+            i=$((i + 1))
         done
         exit 0
     fi
@@ -82,8 +93,17 @@ say "VeraDroid：正在下载安装器…" "VeraDroid: downloading the installer
 # 只在模拟器上验证过的机型用老机型自己的安装器（static/bootstrap-legacy.sh，publish-legacy.sh 发布）：
 # 和 PW6 / PW5 / KT5 / KT6 共用的 bootstrap.sh 分开，发布老机型时不动它们的安装器
 BS_URL="$BASE/bootstrap.sh"; [ -n "$EMU" ] && BS_URL="$BASE/static/bootstrap-legacy.sh"
-curl -fsSL --retry 3 --connect-timeout 20 "$BS_URL?t=$(date +%s)" -o /tmp/vd-bootstrap.sh \
-    || fail "VeraDroid：连不上服务器，请检查 Wi-Fi；国内网络可改用离线整包" "VeraDroid: cannot reach the server (Wi-Fi?)"
+BS_ALT="https://dl.wenjin.jp/bootstrap.sh"; [ -n "$EMU" ] && BS_ALT="https://dl.wenjin.jp/static/bootstrap-legacy.sh"
+dl_bs() {
+    rm -f /tmp/vd-bootstrap.sh
+    for u in "$BS_URL?t=$(date +%s)" "$BS_ALT?t=$(date +%s)"; do
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 120 "$u" -o /tmp/vd-bootstrap.sh && [ -s /tmp/vd-bootstrap.sh ] && sh -n /tmp/vd-bootstrap.sh 2>/dev/null && return 0
+        echo "dl_bs: failed or truncated from $u"
+        rm -f /tmp/vd-bootstrap.sh
+    done
+    return 1
+}
+dl_bs || fail "VeraDroid：下载安装器失败或不完整，请检查 Wi-Fi；国内网络可改用离线整包" "VeraDroid: installer download failed or truncated (Wi-Fi?)"
 VD_INSTALLER="$0" sh /tmp/vd-bootstrap.sh
 rc=$?
 rm -f /tmp/vd-bootstrap.sh

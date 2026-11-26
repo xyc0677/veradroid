@@ -12,7 +12,7 @@ sec=0 last=
 for a in "$@"; do
     case "$a" in
     --zip-fd=*) sec=0; break ;;
-    --dex-file=/data/*) sec=1 ;;
+    --dex-file=/data/*|--dex-file=/storage/*|--dex-file=/sdcard/*|--dex-file=/mnt/*) sec=1 ;;
     --compiler-filter=*) last=${a#--compiler-filter=} ;;
     esac
 done

@@ -79,6 +79,8 @@ procstats 里 `:push` 常驻、`:smp` 也出现过。512 MB 机型上这些常�
 | 豆瓣阅读 6.1.1（516） | 15：:pushservice（个推 / 各厂商推送） | 关（用户可开） | 仅浏览：1 个进程，PSS 173 MB（这一轮被系统杀了一次，内存不够） | 1 个进程，PSS 241 MB；引导页、手机号登录页（获取短信验证码按钮）正常；书城没测到 |
 | 多看阅读墨水屏版 1.2.8 | 3：:pushservice（小米推送） | 关 | 没有免同意模式 | 能起到隐私页；之后没测 |
 | 欧路词典 10.1.4（27959） | 9 个（本机 6 个生效）：:pushservice、:lqRemote（客服长连接）、:widgetProvider | 关 | 没有免同意模式 | 能起到隐私页（+20 s）；之后没测 |
+| 长佩阅读 2.8.11（352） | 53 个 + 动态广告插件目录阻断：:pushcore（极光/小米）、:pushservice、:bytelive/:downloader/:kssdk_remote/:qysdk_simd、近十家广告 SDK 初始化 Provider、冷启动抢主线程的 MusicService | 开 | 未瘦身时 :pushcore（百度加固重复拆 12 DEX）必然 ANR 并因 DataProvider 依赖连带杀掉主进程；同意协议后并发初始化广告 SDK 与动态 dex2oat 还会把主线程 MusicService 拖到 20s ANR 闪退 | 单进程稳定进入 CpHomeActivity（书城/书架/鱼塘/我的），可用内存 173–220 MB，无 ANR / 闪退 |
+| 京东读书 4.70.3（32 位）/ 京东读书专业版 4.40.3（32 位） | 25 / 18 个：:jdpush（京东/小米推送）、:pushservice（华为推送）、:bytelive/:push/:downloader 及各厂商推送接收器 | 开 | 配合系统以太网改为上报 `TYPE_WIFI` 后联网正常；未瘦身时额外起无用推送/直播/广告下载后台 | 偏好页、书城、我的/账号登录与专业版机构认证/CARSI 认证均正常，`nt=WiFi` 无网络报错 |
 
 没有加清单（已经很轻，或者另开的进程是功能本身）：微信读书墨水屏版（:seg 是阅读器的分词服务，:patch 只在热更新时起）、
 掌阅精选（:hotfix 只在热更新时起）、读库（:u_heap 友盟内存监控，没测）、Anki（:acra 只在崩溃时起）、Librera（:djvu 是 DjVu 渲染）、

@@ -10,7 +10,7 @@
 #   install.sh experimental  旧菜单项的名字（升级前装的 menu.json 还在用），和 online 一样
 # 同一个文件在 host/pw6、host/k49、host/legacy 的 kual/ 里，也是官网 static/veradroid-kual.zip 里的那份（两条线共用）。
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH; export PATH
-trap '' PIPE
+trap '' PIPE HUP
 BASE=${VD_BASE:-https://veradroid.wenjin.jp}
 LOG=/mnt/us/veradroid/logs/install.log
 mkdir -p /mnt/us/veradroid/logs 2>/dev/null
@@ -42,7 +42,24 @@ fail() {
     fi
     sleep 10; exit 1
 }
+if [ "$(id -u 2>/dev/null)" != 0 ] && [ -z "${VD_SU_TRIED:-}" ]; then
+    case "$mode" in online|offline|experimental) ;; *) fail "未知的菜单项：$mode" "Unknown menu item: $mode" ;; esac
+    SELF=$0
+    case "$SELF" in /*) ;; *) SELF="$(pwd)/$SELF" ;; esac
+    for su in /var/local/kmc/bin/su /usr/bin/su /bin/su; do
+        [ -x "$su" ] || continue
+        echo "KUAL install.sh: not root (uid=$(id -u 2>/dev/null)), retrying through $su"
+        exec "$su" -c "VD_SU_TRIED=1 VD_INSTALL_BG=${VD_INSTALL_BG:-} sh '$SELF' '$mode'" </dev/null
+    done
+fi
 [ "$(id -u 2>/dev/null)" = 0 ] || fail "VeraDroid：需要越狱后的 root 权限" "VeraDroid: needs root (is the jailbreak active?)"
+if [ -z "${VD_TEST_UNAME:-}" ] && [ -z "${VD_INSTALL_BG:-}" ] && command -v setsid >/dev/null 2>&1; then
+    SELF=$0
+    case "$SELF" in /*) ;; *) SELF="$(pwd)/$SELF" ;; esac
+    cd /
+    VD_INSTALL_BG=1 setsid sh "$SELF" "$mode" </dev/null >/dev/null 2>&1 &
+    exit 0
+fi
 case "$mode" in
     offline)
         for d in /mnt/us/documents /mnt/base-us/documents; do
@@ -79,12 +96,16 @@ if [ -n "$EMU" ]; then
         i=0
         EN="VeraDroid: OLD Kindle model, TEST build|$EMU_EN, firmware ${fwv:-?}|Only tested in emulators, never on a real|device. It may not start; a failed start|returns to the Kindle by itself (~15 min).|The Kindle system partition is not changed.|Back up your books first.||To install: open KUAL again and tap|this menu item again after 10 s (within 2 min).|To cancel: do nothing."
         while [ $i -lt 4 ]; do   # 书库界面可能会盖住：40 秒里重画几次
+            [ -f "$CF" ] || break
             screen "VeraDroid 实验机型 · 测试版" "这台：$EMU，固件 ${fwv:-?}" "-------------------------------" \
                 "这个机型只在模拟器上跑过，" "没有在真机上验证。可能无法启动；" "启动失败会自动回到 Kindle（最多约 15 分钟）。" \
                 "不会改动 Kindle 系统分区，只在用户存储里放文件。" "安装前会记下书库清单并备份小文件。" \
                 "请先用 USB 把重要的书拷到电脑！" "卸载：Android 设置→设备与更新→卸载 VeraDroid。" "-------------------------------" \
                 "确认安装：10 秒后、2 分钟内在 KUAL 里再点一次这一项。" "不想装：什么都不用做。"
-            sleep 10; i=$((i + 1))
+            [ -f "$CF" ] || break
+            sleep 10
+            [ -f "$CF" ] || break
+            i=$((i + 1))
         done
         exit 0
     fi

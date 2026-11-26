@@ -92,10 +92,40 @@ class PageScrollView extends ScrollView {
         layoutGen++;
         // 内容变了（设置页“应用预编译”那一行状态字变长 / 变短）时 ScrollView 自己会挪滚动位置（夹到新的底边、或者让刚点过的按钮
         // 离开上边的渐隐区），翻好的页就错开半行，页顶露出上一条的下半截（测试机 VeraHome 88：点“立即优化”以后）。翻页翻到哪就停在哪。
-        if (getChildCount() > 0 && pageY >= 0 && getScrollY() != pageY) {
-            int max = Math.max(0, getChildAt(0).getHeight() - getHeight());
-            int y = Math.min(pageY, max);
-            if (y != getScrollY()) super.scrollTo(0, y);
+        if (getChildCount() > 0) {
+            android.view.View ch = getChildAt(0);
+            int h = getHeight();
+            int realH = Math.max(0, ch.getHeight() - tailPad);
+            int realMax = Math.max(0, realH - h);
+            if (realMax == 0) {
+                if (tailPad > 0) {
+                    ch.setPadding(ch.getPaddingLeft(), ch.getPaddingTop(), ch.getPaddingRight(), Math.max(0, ch.getPaddingBottom() - tailPad));
+                    tailPad = 0;
+                }
+                pageY = 0;
+                if (getScrollY() != 0) super.scrollTo(0, 0);
+                return;
+            }
+            if (pageY >= realH) {
+                if (tailPad > 0) {
+                    ch.setPadding(ch.getPaddingLeft(), ch.getPaddingTop(), ch.getPaddingRight(), Math.max(0, ch.getPaddingBottom() - tailPad));
+                    tailPad = 0;
+                }
+                pageY = realMax;
+            } else if (tailPad > 0) {
+                int needPad = Math.max(0, pageY - realMax);
+                if (tailPad > needPad) {
+                    int drop = tailPad - needPad;
+                    ch.setPadding(ch.getPaddingLeft(), ch.getPaddingTop(), ch.getPaddingRight(), Math.max(0, ch.getPaddingBottom() - drop));
+                    tailPad = needPad;
+                }
+            }
+            int max = Math.max(0, realMax + tailPad);
+            if (pageY > max) pageY = max;
+            if (pageY >= 0 && getScrollY() != pageY) {
+                int y = Math.min(pageY, max);
+                if (y != getScrollY()) super.scrollTo(0, y);
+            }
         }
     }
 
@@ -184,8 +214,6 @@ class PageScrollView extends ScrollView {
         return true;
     }
 
-    private final boolean blocks = Blocks.on(getContext());
-
     /**
      * 条目（内容坐标的 [上, 下]），按从上到下：内容的每个子控件；比七成屏幕还高的竖排分组（LinearLayout，设置页的长分组）
      * 再拆成它里面的每一行。矮一些的卡片（首页的天气、日历）整张算一条，不会被拆开、丢了框的下边。
@@ -215,7 +243,7 @@ class PageScrollView extends ScrollView {
      */
     @Override protected void dispatchDraw(android.graphics.Canvas c) {
         int cut = -1;
-        if (blocks && getChildCount() > 0) {
+        if (Blocks.on(getContext()) && getChildCount() > 0) {
             int y = getScrollY(), h = getHeight();
             if (getChildAt(0).getHeight() > h) {
                 for (int[] it : leaves()) {
@@ -239,7 +267,7 @@ class PageScrollView extends ScrollView {
         if (!inLayout) pageY = getScrollY();
         if (y == 0 && tailPad > 0 && getChildCount() > 0) {
             android.view.View ch = getChildAt(0);
-            ch.setPadding(ch.getPaddingLeft(), ch.getPaddingTop(), ch.getPaddingRight(), ch.getPaddingBottom() - tailPad);
+            ch.setPadding(ch.getPaddingLeft(), ch.getPaddingTop(), ch.getPaddingRight(), Math.max(0, ch.getPaddingBottom() - tailPad));
             tailPad = 0;
         }
     }

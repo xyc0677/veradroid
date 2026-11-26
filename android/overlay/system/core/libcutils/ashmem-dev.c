@@ -77,11 +77,14 @@ int ashmem_create_region(const char *name, size_t size)
     return fd;
 }
 
-/* The protection mask is advisory here: callers that ask for read-only still get a normal fd. */
+/* Record prot in the file mode (01000 | (prot & 7)), matching vdshim.c's VD_MASK_SET contract. */
 int ashmem_set_prot_region(int fd, int prot)
 {
-    (void)fd;
-    (void)prot;
+    struct stat st;
+    if (fd >= 0 && TEMP_FAILURE_RETRY(fstat(fd, &st)) == 0) {
+        mode_t m = (st.st_mode & 0770) | 01000 | (mode_t)(prot & 7);
+        TEMP_FAILURE_RETRY(fchmod(fd, m));
+    }
     return 0;
 }
 

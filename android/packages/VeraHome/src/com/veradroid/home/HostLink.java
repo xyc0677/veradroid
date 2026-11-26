@@ -83,14 +83,49 @@ final class HostLink {
         }
     }
 
+    /** Write data atomically into a world-writable dir using a unique tmp name without following symlinks. */
+    static boolean writeAtomic(File target, byte[] data) {
+        File parent = target.getParentFile();
+        File tmp = new File(parent, target.getName() + ".tmp." + android.os.Process.myPid() + "." + System.nanoTime());
+        java.io.FileDescriptor fd = null;
+        boolean written = false;
+        try {
+            fd = android.system.Os.open(tmp.getPath(),
+                    android.system.OsConstants.O_WRONLY
+                            | android.system.OsConstants.O_CREAT
+                            | android.system.OsConstants.O_EXCL
+                            | android.system.OsConstants.O_NOFOLLOW,
+                    0644);
+            int off = 0;
+            while (off < data.length) {
+                int w = android.system.Os.write(fd, data, off, data.length - off);
+                if (w <= 0) return false;
+                off += w;
+            }
+            written = true;
+        } catch (Throwable e) {
+            return false;
+        } finally {
+            if (fd != null) try { android.system.Os.close(fd); } catch (Throwable ignored) { }
+            if (!written) tmp.delete();
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete();
+            return false;
+        }
+        return true;
+    }
+
     /** Hand new settings to the host and make it apply them now. */
     static synchronized boolean settings(String lines) {
         // 同步 + 合并：界面线程和传书网页的线程会同时改设置。以前两次共用一个 settings.tmp，后一次改名失败（网页得到 ok:false），
         // 或者后一次把宿主还没取走的 settings.new 整个盖掉，前一次的改动就丢了。现在宿主没取走的那份留着，新的行接在后面（后面的优先）。
         try {
-            File tmp = new File(CTL + "settings.tmp");
             String pending = "";
-            File cur = new File(CTL + "settings.new");
+            File homeDir = new File(KFB + "home");
+            File cur = (homeDir.isDirectory() && homeDir.canWrite())
+                    ? new File(homeDir, "settings.new")
+                    : new File(CTL + "settings.new");
             if (cur.isFile()) {
                 try {
                     byte[] b = HostReq.read(cur, 65536);
@@ -98,10 +133,8 @@ final class HostLink {
                     if (pending.length() > 0 && !pending.endsWith("\n")) pending += "\n";
                 } catch (Exception ignored) { pending = ""; }
             }
-            FileWriter w = new FileWriter(tmp);
-            w.write(pending + lines);
-            w.close();
-            if (!tmp.renameTo(new File(CTL + "settings.new"))) return false;
+            if (!writeAtomic(cur, (pending + lines).getBytes("UTF-8"))) return false;
+            synchronized (KV_CACHE) { KV_CACHE.remove(KFB + "settings"); }
             cmd("apply");
             return true;
         } catch (Exception e) {
@@ -113,7 +146,7 @@ final class HostLink {
      * 宿主的状态文件和显示设置文件（status / settings）：搭一页时、预搭时、签名里一再读同一个文件（开机时一秒里几十次）。
      * 一秒半之内、文件的修改时间和大小都没变就用刚读过的那份（给调用方一份拷贝）。别的文件每次都读。
      */
-    private static final class Kv { long at, mtime, len; Map<String, String> m; }
+    private static final class Kv { long at, mtime, len, ino; Map<String, String> m; }
     private static final Map<String, Kv> KV_CACHE = new HashMap<String, Kv>();
 
     /**
@@ -121,48 +154,84 @@ final class HostLink {
      * 宿主只在被问时写 status（打开桌面、面板时），桌面一直在前台时文件里的电量会停在几小时前
      * （PW6 1.03 用户“电量显示不同步”：一台测试机充满 100 % 时桌面顶栏还是 78 %）。读不到 Android 的就照旧用文件里的。
      */
+    private static volatile boolean battRegistered = false;
+    private static volatile int cachedBattPct = -1;
+    private static volatile int cachedBattChg = -1;
+
+    private static void parseBatteryIntent(android.content.Intent b) {
+        if (b == null || !b.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true)) return;
+        int lv = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
+        if (lv >= 0 && sc > 0) {
+            cachedBattPct = Math.min(100, lv * 100 / sc);
+            cachedBattChg = b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_CHARGING ? 1 : 0;
+        }
+    }
+
+    static void initBattery(android.content.Context c) {
+        if (battRegistered || c == null) return;
+        synchronized (HostLink.class) {
+            if (battRegistered) return;
+            try {
+                android.content.Intent b = c.getApplicationContext().registerReceiver(
+                    new android.content.BroadcastReceiver() {
+                        @Override public void onReceive(android.content.Context ctx, android.content.Intent intent) {
+                            parseBatteryIntent(intent);
+                        }
+                    },
+                    new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+                parseBatteryIntent(b);
+                battRegistered = true;
+            } catch (Throwable ignored) { }
+        }
+    }
+
     static Map<String, String> status(android.content.Context c) {
         Map<String, String> st = new HashMap<String, String>(kv(CTL + "status"));
-        try {
-            android.content.Intent b = c.getApplicationContext().registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
-            if (b != null && b.getBooleanExtra(android.os.BatteryManager.EXTRA_PRESENT, true)) {
-                int lv = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
-                if (lv >= 0 && sc > 0) {
-                    st.put("battery", String.valueOf(lv * 100 / sc));
-                    st.put("charging", b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) == android.os.BatteryManager.BATTERY_STATUS_CHARGING ? "1" : "0");
-                }
-            }
-        } catch (Throwable ignored) { }
+        initBattery(c);
+        int pct = cachedBattPct, chg = cachedBattChg;
+        if (pct >= 0) {
+            st.put("battery", String.valueOf(pct));
+            st.put("charging", chg == 1 ? "1" : "0");
+        }
         return st;
     }
 
     static Map<String, String> kv(String path) {
         boolean hot = path.equals(CTL + "status") || path.equals(KFB + "settings");
         if (!hot) return kv0(path);
-        java.io.File f = new java.io.File(path);
-        long now = android.os.SystemClock.uptimeMillis(), mt = f.lastModified(), len = f.length();
+        long now = android.os.SystemClock.uptimeMillis(), mt = 0, len = 0, ino = -1;
+        try {
+            android.system.StructStat st = android.system.Os.stat(path);
+            mt = st.st_mtime; len = st.st_size; ino = st.st_ino;
+        } catch (Throwable ignored) {
+            java.io.File f = new java.io.File(path);
+            mt = f.lastModified(); len = f.length();
+        }
         synchronized (KV_CACHE) {
             Kv k = KV_CACHE.get(path);
-            if (k != null && now - k.at < 1500 && k.mtime == mt && k.len == len) return new HashMap<String, String>(k.m);
+            if (k != null && now - k.at < 1500 && k.mtime == mt && k.len == len && k.ino == ino) return new HashMap<String, String>(k.m);
         }
         Map<String, String> m = kv0(path);
         Kv k = new Kv();
-        k.at = now; k.mtime = mt; k.len = len; k.m = new HashMap<String, String>(m);
+        k.at = now; k.mtime = mt; k.len = len; k.ino = ino; k.m = new HashMap<String, String>(m);
         synchronized (KV_CACHE) { KV_CACHE.put(path, k); }
         return m;
     }
 
     private static Map<String, String> kv0(String path) {
         Map<String, String> m = new HashMap<String, String>();
+        BufferedReader r = null;
         try {
-            BufferedReader r = new BufferedReader(new FileReader(path));
+            r = new BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(path), "UTF-8"));
             String line;
             while ((line = r.readLine()) != null) {
                 int eq = line.indexOf('=');
                 if (eq > 0) m.put(line.substring(0, eq).trim(), line.substring(eq + 1).trim());
             }
-            r.close();
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {
+        } finally {
+            if (r != null) try { r.close(); } catch (Exception ignored) { }
+        }
         return m;
     }
 

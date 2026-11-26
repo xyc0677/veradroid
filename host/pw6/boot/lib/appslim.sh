@@ -178,14 +178,39 @@ appslim_apply() {
     return 0
 }
 
+# 修正由宿主创建的私有子目录属主（不能留 root:root 0755 阻塞应用写入合法插件）
+appslim_fix_dir() {
+    [ -n "$1" ] && [ -d "$1" ] && [ -n "$2" ] && [ -d "$2" ] || return 0
+    af_ug=$(stat -c '%u:%g' "$1" 2>/dev/null) || af_ug=
+    [ -n "$af_ug" ] || af_ug=$(ls -ldn "$1" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { print $3 ":" $4 }')
+    [ -n "$af_ug" ] && [ "$af_ug" != "0:0" ] || return 0
+    af_dug=$(stat -c '%u:%g' "$2" 2>/dev/null) || af_dug=
+    [ -n "$af_dug" ] || af_dug=$(ls -ldn "$2" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { print $3 ":" $4 }')
+    if [ "$3" = new ] || [ "$af_dug" = "0:0" ]; then
+        chown "$af_ug" "$2" 2>/dev/null && chmod 700 "$2" 2>/dev/null || true
+    fi
+}
+
 # 清理并只读阻断与阅读无关的动态下发大插件（不改 APK、不碰账号/书架/阅读核心；关掉瘦身时删掉占位文件即可恢复）
 appslim_bloat_plugins() {
-    [ "$1" = "com.dragon.read" ] || return 0
-    ab_root="$SYS/data/data/com.dragon.read/files"
+    case "$1" in
+        com.dragon.read)
+            ab_root="$SYS/data/data/com.dragon.read/files"
+            ab_mk="plugins"
+            ab_list="plugins/com.dragon.read.plugin.awemeim plugins/com.dragon.read.plugin.appbrand plugins/com.dragon.read.plugin.clientai plugins/com.dragon.read.plugin.ecomsearch plugins/com.dragon.read.plugin.player plugins/com.dragon.read.plugin.offlinetts plugins/com.dragon.read.plugin.awemevideo plugins/com.dragon.read.plugin.im luckycat_gecko_root_dir" ;;
+        net.cpwxw.cpfiction)
+            ab_root="$SYS/data/data/net.cpwxw.cpfiction"
+            ab_mk="files"
+            ab_list="app_baidu_sdk_remote app_e_qq_com_dex app_e_qq_com_plugin app_qm app_sodler ksad_dynamic kwad_ex files/p_plugins files/lywm files/__xadsdk__remote__final__running__.dex" ;;
+        *) return 0 ;;
+    esac
     [ -d "$ab_root" ] || return 0
-    ab_list="plugins/com.dragon.read.plugin.awemeim plugins/com.dragon.read.plugin.appbrand plugins/com.dragon.read.plugin.clientai plugins/com.dragon.read.plugin.ecomsearch plugins/com.dragon.read.plugin.player plugins/com.dragon.read.plugin.offlinetts plugins/com.dragon.read.plugin.awemevideo plugins/com.dragon.read.plugin.im luckycat_gecko_root_dir"
     if [ "$2" = on ]; then
-        mkdir -p "$ab_root/plugins" 2>/dev/null || return 0
+        if [ -n "$ab_mk" ]; then
+            ab_new=
+            [ -d "$ab_root/$ab_mk" ] || { mkdir -p "$ab_root/$ab_mk" 2>/dev/null && ab_new=new; }
+            appslim_fix_dir "$ab_root" "$ab_root/$ab_mk" "$ab_new"
+        fi
         ab_n=0
         for ab_rel in $ab_list; do
             ab_t="$ab_root/$ab_rel"
@@ -194,12 +219,18 @@ appslim_bloat_plugins() {
                 touch "$ab_t" 2>/dev/null && chmod 000 "$ab_t" 2>/dev/null && ab_n=$((ab_n + 1))
             fi
         done
-        [ "$ab_n" -gt 0 ] && t "appslim: com.dragon.read blocked $ab_n non-reading dynamic plugins"
+        if [ "$1" = "net.cpwxw.cpfiction" ]; then
+            for ab_t in "$ab_root"/app_e_qq_com_*; do
+                [ -d "$ab_t" ] && rm -rf "$ab_t" 2>/dev/null && ab_n=$((ab_n + 1))
+            done
+        fi
+        [ "$ab_n" -gt 0 ] && t "appslim: $1 blocked $ab_n non-reading dynamic plugins"
     else
         for ab_rel in $ab_list; do
             ab_t="$ab_root/$ab_rel"
             [ -f "$ab_t" ] && [ ! -s "$ab_t" ] && rm -f "$ab_t" 2>/dev/null
         done
+        [ -n "$ab_mk" ] && appslim_fix_dir "$ab_root" "$ab_root/$ab_mk"
     fi
     return 0
 }
@@ -241,7 +272,7 @@ appslim_knobs() {
         ak_n=0; [ -s "$APPSLIM_DIR/$ak_p.list" ] && ak_n=$(grep -c . "$APPSLIM_DIR/$ak_p.list")
         if [ "$ak_n" -gt 0 ]; then ak_st="现在停用了 $ak_n 个"; else ak_st="现在没有停用"; fi
         ak_df=关; [ "$ak_d" = on ] && ak_df=开
-        echo "$ak_p SLIM|后台瘦身：停掉推送、保活、日志上传等自己另开进程的后台部件，省内存、少占 CPU（不改应用本身；$ak_st；跟随 = 本机默认$ak_df）|开=1,关（恢复原样）=0"
+        echo "$ak_p SLIM|后台瘦身：停掉推送、保活、日志上传等自己另开进程的后台部件，省内存、少占 CPU（不改应用本身；${ak_st}；跟随 = 本机默认${ak_df}）|开=1,关（恢复原样）=0"
     done > $X/appknobs.pkg.tmp 2>/dev/null
     chmod 644 $X/appknobs.pkg.tmp 2>/dev/null; mv -f $X/appknobs.pkg.tmp $X/appknobs.pkg 2>/dev/null
     return 0
@@ -252,7 +283,8 @@ appslim_cmd() {
     case "$1" in
         all) appslim_all cmd ;;
         restore)
-            for ar_p in $(ls "$APPSLIM_DIR" 2>/dev/null | sed -n 's/\.list$//p'); do APPSLIM_FORCE_OFF=1; appslim_apply "$ar_p" restore; APPSLIM_FORCE_OFF=0; done ;;
+            for ar_p in $(ls "$APPSLIM_DIR" 2>/dev/null | sed -n 's/\.list$//p'); do APPSLIM_FORCE_OFF=1; appslim_apply "$ar_p" restore; APPSLIM_FORCE_OFF=0; done
+            for ar_p in com.dragon.read net.cpwxw.cpfiction; do appslim_bloat_plugins "$ar_p" off; done ;;
         *) appslim_valid_pkg "$1" && appslim_apply "$1" cmd ;;
     esac
 }

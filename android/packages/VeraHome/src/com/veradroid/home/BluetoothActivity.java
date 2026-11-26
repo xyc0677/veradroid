@@ -170,7 +170,20 @@ public class BluetoothActivity extends Activity {
         handler.postDelayed(new Runnable() { @Override public void run() { renderStatus(true); } }, 5000);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
         if (watch != null) CtlWatch.remove(watch);
         handler.removeCallbacksAndMessages(null);
         super.onDestroy();
@@ -335,6 +348,7 @@ public class BluetoothActivity extends Activity {
         if (p.length > 1 && !MAC.matcher(p[1]).matches()) { status.setText("设备地址不对"); return; }
         busy = true; busySince = System.currentTimeMillis(); busySecs = "scan".equals(p[0]) ? 18 : 45;
         busyOp = p[0]; busyName = name == null ? "" : name;
+        lastResult = null;
         status.setText(msg);
         HostLink.cmd("bt " + cmd);
         tick();
@@ -360,14 +374,16 @@ public class BluetoothActivity extends Activity {
 
     private void result() {
         Map<String, String> r = HostLink.kv(HostLink.CTL + "bt.result");
+        if (r.isEmpty()) return;
         String key = new java.util.TreeMap<String, String>(r).toString();
         if (key.equals(lastResult)) return;
         lastResult = key;
         String op = r.get("op") == null ? "" : r.get("op");
         String name = nameOf(r.get("mac"));
         if ("running".equals(r.get("state"))) {
-            // 宿主开始做了（也可能是进页面前别人发起的）：按宿主给的预计时长等
-            if (!busy) { busy = true; busySince = System.currentTimeMillis(); busyOp = op; status.setText(opName(op) + "中…"); }
+            // 宿主开始做了（或切到下一阶段，如配对后自动连接）：同步刷新计时起点与预计时长
+            if (!busy) { busy = true; busyOp = op; status.setText(opName(op) + "中…"); }
+            busySince = System.currentTimeMillis();
             busySecs = HostLink.num(r, "secs", busySecs);
             tick();
             return;
@@ -383,7 +399,10 @@ public class BluetoothActivity extends Activity {
         else if ("unsupported".equals(e)) msg = "这台 Kindle 没有蓝牙。";
         else if ("lipc".equals(e)) msg = "Kindle 的蓝牙服务没有响应，请稍后再试；一直不行就回 Kindle 的设置里关开一次蓝牙。";
         else if ("badmac".equals(e)) msg = "设备地址不对。";
-        else if ("scan".equals(op)) msg = ok ? "扫描完成：找到 " + devices.size() + " 个设备。没看到翻页器就让它重新进入配对模式再扫一次。" : "扫描失败。";
+        else if ("scan".equals(op)) {
+            if (ok) renderList(read("bt.list"));
+            msg = ok ? "扫描完成：找到 " + devices.size() + " 个设备。没看到翻页器就让它重新进入配对模式再扫一次。" : "扫描失败。";
+        }
         else if ("bond".equals(op)) {
             if (ok) msg = "已配对并连接：" + name + "。打开阅读应用按翻页器试试。";
             else if ("notconnected".equals(e)) msg = "已配对：" + name + "。按一下翻页器的键让它连上。";
@@ -396,6 +415,7 @@ public class BluetoothActivity extends Activity {
         else if ("power".equals(op)) msg = ok ? ("1".equals(r.get("on")) ? "蓝牙已打开。" : "蓝牙已关闭。") : "蓝牙开关没有响应，请回 Kindle 的设置里试试。";
         else msg = "";
         status.setText(msg);
+        if (busy) tick();
         HostLink.cmd("status");
     }
 
@@ -421,9 +441,10 @@ public class BluetoothActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         try {
             BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(HostLink.CTL + name), "UTF-8"));
-            String l;
-            while ((l = r.readLine()) != null) sb.append(l).append('\n');
-            r.close();
+            try {
+                String l;
+                while ((l = r.readLine()) != null) sb.append(l).append('\n');
+            } finally { r.close(); }
         } catch (Exception ignored) { }
         return sb.toString();
     }

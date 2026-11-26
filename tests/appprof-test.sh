@@ -50,7 +50,7 @@ out=$(VD=$T/vd SYS=$T/sys W=$T/w X=$T/w/kfb sh -c '
 ')
 expect() { printf '%s\n' "$out" | grep -qxF "$1" || fail "expected '$1' in:
 $out"; }
-expect "A KFB_MODE=1;KFB_FLASH=6;"
+expect "A KFB_SMOOTH=3;KFB_FLASH=6;"
 expect "B 0"
 expect "C KFB_SCROLLDU=300;"
 expect "D global"

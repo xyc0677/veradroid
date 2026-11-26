@@ -40,8 +40,11 @@ wa_request() { # 编号
     verb=${l1%% *}; arg=
     [ "$verb" = "$l1" ] || arg=${l1#* }
     mkdir -p $WA_OUT && chown 0:0 $WA_OUT && chmod 711 $WA_OUT || return 1
-    # 只留最近的 12 个结果（截屏一张两兆，放在内存盘里）
-    ls -t $WA_OUT 2>/dev/null | tail -n +13 | while read -r o; do case "$o" in *[!0-9a-f.outmp]*) ;; *) rm -f "$WA_OUT/$o" ;; esac; done
+    # 只留最近的 12 个已完成结果（只清理 *.out，不碰正在写的 .tmp；截屏一张两兆，放在内存盘里）
+    ls -t "$WA_OUT"/*.out 2>/dev/null | tail -n +13 | while read -r o; do
+        b=${o##*/}
+        case "${b%.out}" in ''|*[!0-9a-f]*) ;; *) [ "${b%.out}.out" = "$b" ] && rm -f "$WA_OUT/$b" ;; esac
+    done
     ( exec 3>&- 3<&- 2>&1; wa_do "$n" "$u" "$verb" "$arg" "$l2" ) </dev/null &
 }
 
@@ -74,7 +77,7 @@ wa_do() { # 编号 uid 动词 参数 数据
     backups)  { if type vb_info >/dev/null 2>&1; then echo "ok=1"; vb_info; else echo "error=unknown"; fi; } | wa_put "$n" "$u" ;;
     backupdel) { if type vb_del >/dev/null 2>&1; then echo "ok=1"; vb_del "$arg"; vb_info; else echo "error=unknown"; fi; } | wa_put "$n" "$u" ;;
     storage)  { echo "ok=1"; st_info; } | wa_put "$n" "$u" ;;
-    storageresize) case "$arg" in ''|*[!0-9]*) echo "error=nan" ;; *) st_request "$arg" ;; esac | wa_put "$n" "$u" ;;
+    storageresize) case "$arg" in ''|*[!0-9]*) echo "error=nan" ;; *) st_request "$arg"; st_cmd info >/dev/null 2>&1 ;; esac | wa_put "$n" "$u" ;;
     storageauto) case "$arg" in 0|1) st_cmd auto "$arg" >/dev/null 2>&1; echo "ok=1"; st_info ;; *) echo "error=bad value" ;; esac | wa_put "$n" "$u" ;;
     libput)   wa_libput "$arg" "$u" "$data" | wa_put "$n" "$u" ;;
     wifipsk)  { type wifi_psk_put >/dev/null 2>&1 && wifi_psk_put "$arg" "$data" || echo "error=unknown"; } | wa_put "$n" "$u" ;;   # 新 Wi-Fi 的密码（cmd.sh wifi_connect）
@@ -106,16 +109,22 @@ wa_libput() { # 编号 uid 文件名
     sz=$(stat -c %s "$src" 2>/dev/null); free=$(df -kP "$WA_LIBDIR" 2>/dev/null | awk 'NR==2 { print $4 }')
     if [ -n "$free" ] && [ $(( (${sz:-0} / 1024) + 1024 )) -gt "$free" ]; then echo "error=space"; rm -f "$src"; return 0; fi
     tmp=$WA_LIBDIR/.vd-$id.part
-    if ! cat "$src" > "$tmp" 2>/dev/null; then
-        e=$(cat "$src" 2>&1 > "$tmp" | head -1)
-        rm -f "$tmp"; rm -f "$src"
+    errf=$W/.libput-$id.err
+    if ! cat "$src" > "$tmp" 2>"$errf"; then
+        e=$(head -1 "$errf" 2>/dev/null)
+        rm -f "$errf" "$tmp" "$src"
         wa_log "wa: libput $id: write failed: $e ($(grep -c fscrypt /proc/keys 2>/dev/null) fscrypt keys visible)"
         echo "error=write"; return 0
     fi
+    rm -f "$errf"
     sync
     final=$name; base=${name%.*}; ext=; [ "$base" != "$name" ] && ext=.${name##*.}; k=2
     while ! ln "$tmp" "$WA_LIBDIR/$final" 2>/dev/null; do
-        [ -e "$WA_LIBDIR/$final" ] || { rm -f "$tmp" "$src"; wa_log "wa: libput $id: link failed"; echo "error=link"; return 0; }
+        if [ ! -e "$WA_LIBDIR/$final" ]; then
+            # vfat/FAT32 does not support hardlinks (EPERM): fall back to mv only after verifying destination does not exist
+            mv "$tmp" "$WA_LIBDIR/$final" 2>/dev/null && break
+            rm -f "$tmp" "$src"; wa_log "wa: libput $id: link/mv failed"; echo "error=link"; return 0
+        fi
         [ $k -gt 99 ] && { rm -f "$tmp" "$src"; echo "error=exists"; return 0; }
         final="$base ($k)$ext"; k=$((k + 1))
     done
@@ -181,6 +190,7 @@ wa_sysinfo() {
 # 占用：慢（几秒到几十秒），按需算，结果留在 $W/wa.du 里给 sysinfo 用
 wa_dusum() { du -sk "$@" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
 wa_du() {
+    _dp=$$; read -r _dp _ < /proc/self/stat 2>/dev/null || true
     {
         echo "du.system=$(wa_dusum $R/system)"
         echo "du.apps=$(wa_dusum $SYS/data/app $SYS/data/app-lib $SYS/data/dalvik-cache)"
@@ -196,7 +206,7 @@ wa_du() {
         echo "du.program=$(wa_dusum $VD)"
         echo "du.kindledocs=$(wa_dusum /mnt/base-us/documents)"
         echo "du.time=$(date +%s)"
-    } > $W/wa.du.tmp && mv -f $W/wa.du.tmp $W/wa.du
+    } > "$W/wa.du.tmp.$_dp" && mv -f "$W/wa.du.tmp.$_dp" $W/wa.du
     echo "ok=1"; cat $W/wa.du
 }
 
@@ -319,7 +329,7 @@ wa_sshstop() {
         if [ -n "$ps" ]; then
             kill $ps 2>/dev/null; sleep 1; ps=$(wa_ssh_pids); [ -z "$ps" ] || kill -9 $ps 2>/dev/null
             [ -f $WA_SSHRUN/iptables-rule ] && iptables -D INPUT -i wlan0 -p tcp --dport 2222 -j ACCEPT 2>/dev/null
-            [ -f $WA_SSHRUN/keep-awake ] && { lipc-set-prop com.lab126.powerd preventScreenSaver 0 2>/dev/null; iwconfig wlan0 power on 2>/dev/null; }
+            [ -f $WA_SSHRUN/keep-awake ] && { lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 2>/dev/null; iwconfig wlan0 power on 2>/dev/null; }
             rm -rf $WA_SSHRUN
         fi
     fi
@@ -460,7 +470,17 @@ wa_adbkeydel() { # 第几把（adb.key= 的编号）
     ln=$(wa_adb_validkeys | sed -n "${1}p" | cut -f1)
     [ -n "$ln" ] || { echo "adb.error=nokey"; return 1; }
     awk -v n="$ln" 'NR != n' "$kf" > "$kf.tmp" && mv -f "$kf.tmp" "$kf" && sync
-    # 开着时马上生效：Android 里那份也换掉
-    [ -f $SYS/data/misc/adb/adb_keys ] && { wa_adb_validkeys | cut -f2 > $SYS/data/misc/adb/adb_keys; }
+    # 开着时马上生效：删光最后一把公钥直接停掉 ADB；还有剩余公钥则原子写回并重启 adbd 吊销内存态公钥
+    if [ -z "$(wa_adb_validkeys)" ]; then
+        wa_adbstop keydel >/dev/null
+    elif [ -f $SYS/data/misc/adb/adb_keys ] || wa_adb_on; then
+        d=$SYS/data/misc/adb
+        [ -L $d/adb_keys ] && rm -f $d/adb_keys
+        if wa_adb_validkeys | cut -f2 > $d/adb_keys.tmp && chown 1000:2000 $d/adb_keys.tmp && chmod 640 $d/adb_keys.tmp && mv -f $d/adb_keys.tmp $d/adb_keys; then
+            adb_sh_t 10 "setprop ctl.stop adbd; setprop service.adb.tcp.port $WA_ADBPORT; setprop ctl.start adbd" >/dev/null 2>&1
+        else
+            rm -f $d/adb_keys.tmp; wa_adbstop fail >/dev/null
+        fi
+    fi
     echo "adb.msg=deleted"; wa_log "adb: key $1 deleted"
 }

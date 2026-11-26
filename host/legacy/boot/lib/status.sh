@@ -6,11 +6,15 @@ status_write() {
     chg=$(lipc-get-prop $p isCharging 2>/dev/null)
     fl=$(lipc-get-prop $p flIntensity 2>/dev/null)
     flmax=$(lipc-get-prop $p flMaxIntensity 2>/dev/null)
-    warm=$(lipc-get-prop $p currentAmberLevel 2>/dev/null)
-    wifi=$(lipc-get-prop com.lab126.cmd wirelessEnable 2>/dev/null)
+    if [ "${FL_WARM:-lipc}" != none ]; then warm=$(lipc-get-prop $p currentAmberLevel 2>/dev/null); else warm=; fi
+    wifi=$(wifi_state)
     slp=$(lipc-get-prop $p screenSaverTimeout 2>/dev/null)
     lan=$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    # QEMU/USB-net and some jailbreaks expose eth0 instead of wlan0.
+    [ -n "$lan" ] || lan=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+    [ -n "$lan" ] || lan=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p')
     inv=$(sed -n 's/^KFB_INVERT=//p' $X/settings 2>/dev/null)
+    _sp=$$; read -r _sp _ < /proc/self/stat 2>/dev/null || true
     {
         echo "battery=${bat:-0}"; echo "charging=${chg:-0}"
         echo "light=${fl:-0}"; echo "lightmax=${flmax:-24}"; echo "warmth=${warm:-0}"
@@ -30,10 +34,12 @@ status_write() {
         [ -n "$warm" ] && echo "haswarmth=1" || echo "haswarmth=0"
         [ -n "$slp" ] && echo "hassleeptime=1" || echo "hassleeptime=0"
         [ -n "$fl" ] && echo "haslight=1" || echo "haslight=0"
+        echo "hasanim=0"
         # 自动亮度：powerd 有 flAuto，而且机器上真有光线传感器才显示这个开关。
         # 传感器的判断：iio 设备里有 in_illuminance*，或者输入设备 / sensors 类里有名字带 als / lux / light 的。
         # （PW6 普通版实测没有传感器：flAuto 属性在，但没有任何这类设备。签名版 / Scribe 没有真机验证过。）
         fla=$(lipc-get-prop $p flAuto 2>/dev/null); als=
+        [ "$fla" = 1 ] && [ -n "${W:-}" ] && rm -f "$W/fl.auto_off"
         ls /sys/bus/iio/devices/*/in_illuminance* >/dev/null 2>&1 && als=1
         # powerd 自己的读数：alsLux >= 0 = 有传感器（没有传感器时是 -1，PW5 5.16.2 模拟器实测）
         [ -z "$als" ] && ls_l=$(lipc-get-prop $p alsLux 2>/dev/null) && [ "$ls_l" -ge 0 ] 2>/dev/null && als=1
@@ -49,9 +55,13 @@ status_write() {
         # 机型（models/*.conf）：前光控制方式，给桌面的冷 / 暖光步进器。flcold = /sys/class/backlight 下的名字，
         # flcoldmax = 它的 max_brightness，flwarm = none | lipc，fllipc0off = 0 表示 powerd 的 0 档仍然亮（关灯另写 sysfs）
         echo "model=${MODEL_SUB:-}"
+        if [ "$(cat $VD/tested 2>/dev/null)" = emulator-only ]; then
+            echo "tested=emulator-only"
+            if [ "${KLIB_BIND:-0}" != 1 ] && [ "${KLIB_BIND:-0}" != ro ]; then echo "klibskip=1"; else echo "klibskip=0"; fi
+        fi
         if [ -n "$FL_COLD" ]; then
             echo "flcold=$FL_COLD"; echo "flcoldmax=$(cat /sys/class/backlight/$FL_COLD/max_brightness 2>/dev/null)"
             echo "flwarm=${FL_WARM:-none}"; [ "${FL_LIPC0_DIM:-0}" = 1 ] && echo "fllipc0off=0" || echo "fllipc0off=1"
         fi
-    } > $X/ctl/status.tmp && mv -f $X/ctl/status.tmp $X/ctl/status
+    } > "$X/ctl/status.tmp.$_sp" && mv -f "$X/ctl/status.tmp.$_sp" $X/ctl/status
 }

@@ -225,9 +225,14 @@ int mapFrameBufferLocked(struct private_module_t* module)
         module->numBuffers = NUM_BUFFERS;
         module->bufferMask = 0;
         void* vaddr = mmap(0, vbSize, PROT_READ|PROT_WRITE, MAP_SHARED, vfd, 0);
+        int saved_errno = errno;
+        close(vfd);
         if (vaddr == MAP_FAILED) {
-            ALOGE("Error mapping %s (%s)", KFB_FILE, strerror(errno));
-            return -errno;
+            ALOGE("Error mapping %s (%s)", KFB_FILE, strerror(saved_errno));
+            close(module->framebuffer->fd);
+            delete module->framebuffer;
+            module->framebuffer = NULL;
+            return -saved_errno;
         }
         module->framebuffer->base = intptr_t(vaddr);
         // white; with one page only page 0 is touched (and ever used)

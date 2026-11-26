@@ -43,7 +43,9 @@ final class UserDict {
     private final HashMap<String, Entry> phrases = new HashMap<String, Entry>();
     private final HashMap<String, Entry> pairs = new HashMap<String, Entry>();
     private int clock;
-    boolean dirty;
+    int rev;
+    volatile boolean dirty;
+    private boolean batching, needRebuild;
 
     // derived by rebuild()
     private final HashMap<String, ArrayList<Entry>> own = new HashMap<String, ArrayList<Entry>>();
@@ -64,6 +66,16 @@ final class UserDict {
         return new String(c);
     }
 
+    void beginBatch() { batching = true; }
+
+    void endBatch() {
+        batching = false;
+        if (needRebuild) {
+            needRebuild = false;
+            rebuild();
+        }
+    }
+
     /** A phrase was committed with these syllables. */
     void learn(int[] syls, String text) {
         if (syls == null || syls.length == 0 || syls.length != text.length() || text.length() > MAX_CHARS) return;
@@ -78,7 +90,9 @@ final class UserDict {
         e.stamp = ++clock;
         if (phrases.size() > MAX_PHRASES) trim(phrases, MAX_PHRASES);
         dirty = true;
-        rebuild();
+        rev++;
+        if (batching) needRebuild = true;
+        else rebuild();
     }
 
     /** next was committed right after prev. */
@@ -91,7 +105,9 @@ final class UserDict {
         e.stamp = ++clock;
         if (pairs.size() > MAX_PAIRS) trim(pairs, MAX_PAIRS);
         dirty = true;
-        rebuild();
+        rev++;
+        if (batching) needRebuild = true;
+        else rebuild();
     }
 
     void clear() {
@@ -99,6 +115,8 @@ final class UserDict {
         pairs.clear();
         clock = 0;
         dirty = true;
+        rev++;
+        needRebuild = false;
         rebuild();
     }
 

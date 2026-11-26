@@ -20,7 +20,7 @@ FWD=$W/fw
 # 不管哪种方式都不碰：powerd、lipc / dbus、appmgrd、wifid / wifim / cmd（Wi-Fi）、lab126_gui、X。
 # 恢复只有一个入口 framework_start（stop.sh、冻结返回、容器意外退出后看门狗调的 stop.sh 都走它）：
 # 它按 $FWD 里记下的东西恢复，不依赖当时的设置，所以中途改设置或脚本被杀都不会留下冻着 / 停着的 Kindle 界面。
-FW_BASE="mtp stored webreader kfxreader kfxview todo tmd rcm archive scanner"
+FW_BASE="mtp stored webreader kfxreader kfxview todo tmd rcm archive scanner stackdumpd"
 # freeze 名单只放实测过“冻着也没人等它”的进程（KT5 模拟器，按一下电源键到 powerd 进屏保的时间）：
 #   什么都不冻 0.7 秒；冻 KPPMainApp 0.6 秒（可以冻）；冻 fastmetrics 64 秒、期间 powerd 自己的 lipc 属性全部超时（不能冻：
 #   powerd 同步给它报指标）；冻 cvm 46 秒以上没反应（不能冻）。

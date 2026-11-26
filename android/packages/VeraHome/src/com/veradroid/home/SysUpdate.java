@@ -1,6 +1,7 @@
 package com.veradroid.home;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.Handler;
@@ -48,7 +49,7 @@ final class SysUpdate {
     private static final String VD = "/mnt/base-us/veradroid";
     static final String[] MODE_L = { "自动安装", "只提醒", "关闭" };
     static final String[] MODE_V = { "1", "notify", "0" };
-    private static volatile boolean busy;
+    private static final java.util.concurrent.atomic.AtomicBoolean BUSY = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private SysUpdate() { }
 
@@ -77,15 +78,33 @@ final class SysUpdate {
     static String line() {
         String k = System.getProperty("os.version", "");
         if (k.startsWith("3.") || k.startsWith("4.1.")) return "legacy";
-        if (k.startsWith("4.")) return "k49";
+        if (k.startsWith("4.9.") || k.startsWith("4.")) return "k49";
         return "pw6";
     }
 
-    private static String metaUrl(String line) {
+    private static String appendAuth(String url, Context ctx) {
+        if (ctx == null) return url;
+        try {
+            StringBuilder sb = new StringBuilder(url);
+            String did = Update.deviceId(ctx);
+            if (did != null && did.length() > 0) {
+                sb.append(sb.indexOf("?") >= 0 ? "&device_id=" : "?device_id=").append(StoreNet.enc(did));
+            }
+            String tok = Token.get(ctx);
+            if (tok != null && tok.length() > 0) {
+                sb.append(sb.indexOf("?") >= 0 ? "&token=" : "?token=").append(StoreNet.enc(tok));
+            }
+            return sb.toString();
+        } catch (Throwable ignored) {
+            return url;
+        }
+    }
+
+    private static String metaUrl(Context ctx, String line) {
         long t = System.currentTimeMillis() / 1000;
-        if ("legacy".equals(line)) return base() + "/static/bootstrap-legacy.json?t=" + t;
-        if ("k49".equals(line)) return base() + "/static/bootstrap-k49.json?t=" + t;
-        return base() + "/api/bootstrap";
+        if ("legacy".equals(line)) return appendAuth(base() + "/static/bootstrap-legacy.json?t=" + t, ctx);
+        if ("k49".equals(line)) return appendAuth(base() + "/static/bootstrap-k49.json?t=" + t, ctx);
+        return appendAuth(base() + "/api/bootstrap?t=" + t, ctx);
     }
 
     /** 点分版本号：a 比 b 新。 */
@@ -100,43 +119,93 @@ final class SysUpdate {
         return false;
     }
 
-    private static String get(String url) throws Exception {
+    private static String get(Context ctx, String url) throws Exception {
         HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
         h.setConnectTimeout(15000); h.setReadTimeout(20000);
         h.setRequestProperty("User-Agent", "VeraDroid/SysUpdate");
+        InputStream in = null;
         try {
-            if (h.getResponseCode() >= 400) return null;
-            InputStream in = h.getInputStream();
+            int code = h.getResponseCode();
+            in = code >= 400 ? h.getErrorStream() : h.getInputStream();
             java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
             byte[] b = new byte[8192]; int n;
-            while ((n = in.read(b)) > 0 && bo.size() < 512 * 1024) bo.write(b, 0, n);
-            in.close();
-            return bo.toString("UTF-8");
-        } finally { h.disconnect(); }
+            while (in != null && (n = in.read(b)) > 0 && bo.size() < 512 * 1024) bo.write(b, 0, n);
+            String raw = bo.toString("UTF-8");
+            if (code == 401 || code == 403) {
+                JSONObject j = null;
+                try { j = new JSONObject(raw); } catch (Throwable ignored) { }
+                String ec = j != null ? j.optString("code", "") : "";
+                String em = j != null ? j.optString("error", BindGate.OTA_REASON_TEXT) : BindGate.OTA_REASON_TEXT;
+                if ("ip_blocked".equals(ec)) throw new Exception(em);
+                if ("bind_required".equals(ec) || "token_invalid".equals(ec) || code == 401) {
+                    if (ctx != null) Token.clear(ctx);
+                    throw new BindGate.BindRequiredException(em);
+                }
+                throw new Exception(em);
+            }
+            if (code >= 400) return null;
+            return raw;
+        } finally {
+            if (in != null) try { in.close(); } catch (Exception ignored) { }
+            h.disconnect();
+        }
     }
 
     static final class Info {
-        String current, latest, line, error;
+        String current, latest, line, error, bindError;
         List<JSONObject> entries;   // null = 服务器还没有 /api/changelog 或读不到
     }
 
+    /** 后台线程：仅查最新系统版本号（不拉 changelog），供 WebAdmin.updateInfo() 复用一致的 imageclass + 内核线路逻辑。 */
+    static String latestVersion(Context ctx) {
+        String icJson = null, famJson = null;
+        String ic = st("imageclass");
+        if (ic.matches("[A-Za-z0-9_-]{1,32}")) {
+            try { icJson = get(ctx, appendAuth(base() + "/static/bootstrap-" + ic + ".json?t=" + System.currentTimeMillis() / 1000, ctx)); }
+            catch (Throwable ignored) { }
+        }
+        try { famJson = get(ctx, metaUrl(ctx, line())); }
+        catch (Throwable ignored) { }
+        String icVer = "", famVer = "";
+        if (icJson != null) try { icVer = new JSONObject(icJson).optString("version", ""); } catch (Throwable ignored) { }
+        if (famJson != null) try { famVer = new JSONObject(famJson).optString("version", ""); } catch (Throwable ignored) { }
+        if (icVer.length() > 0 && (famVer.length() == 0 || !newer(famVer, icVer))) return icVer;
+        return famVer.length() > 0 ? famVer : null;
+    }
+
     /** 后台线程：最新版本 + 两版之间的更新内容。 */
-    static Info fetch() {
+    static Info fetch(Context ctx) {
         Info i = new Info();
         i.current = current();
         i.line = line();
         try {
-            String json = null;
+            String icJson = null, famJson = null;
+            BindGate.BindRequiredException bindReq = null;
             String ic = st("imageclass");
-            if (ic.matches("[A-Za-z0-9_-]{1,32}")) json = get(base() + "/static/bootstrap-" + ic + ".json?t=" + System.currentTimeMillis() / 1000);
-            if (json == null) json = get(metaUrl(i.line));
-            if (json == null) { i.error = "连不上更新服务器"; return i; }
-            i.latest = new JSONObject(json).optString("version", "");
+            if (ic.matches("[A-Za-z0-9_-]{1,32}")) {
+                try { icJson = get(ctx, appendAuth(base() + "/static/bootstrap-" + ic + ".json?t=" + System.currentTimeMillis() / 1000, ctx)); }
+                catch (BindGate.BindRequiredException be) { bindReq = be; }
+                catch (Throwable ignored) { }
+            }
+            try { famJson = get(ctx, metaUrl(ctx, i.line)); }
+            catch (BindGate.BindRequiredException be) { bindReq = be; }
+            catch (Throwable ignored) { }
+            String icVer = "", famVer = "";
+            if (icJson != null) try { icVer = new JSONObject(icJson).optString("version", ""); } catch (Throwable ignored) { }
+            if (famJson != null) try { famVer = new JSONObject(famJson).optString("version", ""); } catch (Throwable ignored) { }
+            if (icJson == null && famJson == null) {
+                if (bindReq != null) { i.bindError = bindReq.getMessage(); return i; }
+                i.error = "连不上更新服务器";
+                return i;
+            }
+            // 同时核对按类别清单与家族清单，取版本更新者，避免类别清单滞后导致误报“已是最新版本”
+            if (icVer.length() > 0 && (famVer.length() == 0 || !newer(famVer, icVer))) i.latest = icVer;
+            else i.latest = famVer;
             if (i.latest.length() == 0) { i.error = "服务器没有给出版本号"; return i; }
             if (i.current != null && !newer(i.latest, i.current)) return i;
             if (i.current == null) return i;   // 老宿主不报版本：只能给出最新版本号
             try {
-                String cl = get(base() + "/api/changelog?line=" + i.line + "&since=" + java.net.URLEncoder.encode(i.current, "UTF-8"));
+                String cl = get(ctx, appendAuth(base() + "/api/changelog?line=" + i.line + "&since=" + java.net.URLEncoder.encode(i.current, "UTF-8"), ctx));
                 if (cl != null) {
                     JSONArray a = new JSONObject(cl).optJSONArray("entries");
                     if (a != null) {
@@ -154,15 +223,23 @@ final class SysUpdate {
 
     /** “检查系统更新”：查完再弹对话框（有新版本：更新内容 + 更新 / 以后再说；没有：说一声）。 */
     static void check(final Activity a) {
-        if (busy) { VeraToast.show(a, "正在检查更新…"); return; }
         if (running()) { progress(a, null); return; }   // 已经在更新：不再查一遍、不再开第二个安装器，直接看进度
-        busy = true;
+        if (!BindGate.ensureBound(a, "系统更新", BindGate.OTA_REASON_TEXT, new Runnable() {
+            @Override public void run() { check(a); }
+        })) return;
+        if (!BUSY.compareAndSet(false, true)) { VeraToast.show(a, "正在检查更新…"); return; }
         VeraToast.show(a, "正在检查系统更新…");
         new Thread(new Runnable() { @Override public void run() {
-            final Info i = fetch();
-            busy = false;
+            final Info i;
+            try { i = fetch(a.getApplicationContext()); } finally { BUSY.set(false); }
             new Handler(Looper.getMainLooper()).post(new Runnable() { @Override public void run() {
-                if (a.isFinishing()) return;
+                if (a.isFinishing() || (android.os.Build.VERSION.SDK_INT >= 17 && a.isDestroyed())) return;
+                if (i.bindError != null) {
+                    BindGate.showBindDialog(a, "系统更新", i.bindError, new Runnable() {
+                        @Override public void run() { check(a); }
+                    });
+                    return;
+                }
                 if (i.error != null) { VeraToast.show(a, i.error); return; }
                 if (i.current != null && !newer(i.latest, i.current)) {
                     new VeraDialog.Builder(a).title("已是最新版本").message("现在装的是 " + i.current + "，服务器上最新的也是 " + i.latest + "。").positive("好", null).show();
@@ -176,15 +253,16 @@ final class SysUpdate {
     /** 自动更新选了“只提醒”、宿主发现了新版本：回到桌面时弹一次（同一个版本点过“以后再说”就不再弹）。 */
     static void maybeNotify(final Activity a) {
         final String v = st("update_available"), cur = current();
-        if (v.length() == 0 || cur == null || busy || !newer(v, cur) || !"notify".equals(st("autoupdate"))) return;
+        if (v.length() == 0 || cur == null || !newer(v, cur) || !"notify".equals(st("autoupdate"))) return;
         final SharedPreferences p = Store.prefs(a, "home");
         if (v.equals(p.getString("sysupdate_later", ""))) return;
-        busy = true;
+        if (!BUSY.compareAndSet(false, true)) return;
         new Thread(new Runnable() { @Override public void run() {
-            final Info i = fetch();
-            busy = false;
+            final Info i;
+            try { i = fetch(a.getApplicationContext()); } finally { BUSY.set(false); }
             new Handler(Looper.getMainLooper()).post(new Runnable() { @Override public void run() {
-                if (a.isFinishing() || i.error != null || i.latest == null || i.current == null || !newer(i.latest, i.current)) return;
+                if (a.isFinishing() || (android.os.Build.VERSION.SDK_INT >= 17 && a.isDestroyed())
+                    || i.bindError != null || i.error != null || i.latest == null || i.current == null || !newer(i.latest, i.current)) return;
                 if (i.latest.equals(p.getString("sysupdate_later", ""))) return;
                 show(a, i);
             } });
@@ -241,6 +319,13 @@ final class SysUpdate {
                 Store.prefs(a, "home").edit().putString("sysupdate_later", i.latest).apply();
             } })
             .positive("更新", new Runnable() { @Override public void run() {
+                if (!BindGate.ensureBound(a, "系统更新", BindGate.OTA_REASON_TEXT, new Runnable() {
+                    @Override public void run() {
+                        if (a.isFinishing() || (android.os.Build.VERSION.SDK_INT >= 17 && a.isDestroyed())) return;
+                        HostLink.cmd("fullupdate");
+                        progress(a, i.latest);
+                    }
+                })) return;
                 HostLink.cmd("fullupdate");
                 progress(a, i.latest);
             } }).show();
@@ -290,10 +375,13 @@ final class SysUpdate {
             byte[] r = HostReq.run(a, "autoupdate", MODE_V[idx], null, 15000);
             final boolean ok = r != null && new String(r).contains("ok=1");
             new Handler(Looper.getMainLooper()).post(new Runnable() { @Override public void run() {
-                VeraToast.show(a, ok ? "自动更新：" + MODE_L[idx] : "没能改自动更新设置（宿主没有回应）");
+                VeraToast.show(a.getApplicationContext(), ok ? "自动更新：" + MODE_L[idx] : "没能改自动更新设置（宿主没有回应）");
                 HostLink.cmd("status");
-                if (done != null) { new Handler(Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() { done.onClick(null); } }, 1200); return; }
-                if (done != null) done.onClick(null);
+                if (done != null) {
+                    new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                        @Override public void run() { if (!a.isFinishing()) done.onClick(null); }
+                    }, 1200);
+                }
             } });
         } }, "sysupdate-mode").start();
     }

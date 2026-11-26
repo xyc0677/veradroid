@@ -45,6 +45,7 @@ vinput_reset() {
 }
 android_freeze() {
     freezer_setup || return 1
+    _nhp=$(cat $W/netheal.pid 2>/dev/null); [ -n "$_nhp" ] && { kill "$_nhp" 2>/dev/null; rm -f $W/netheal.pid; }
     vinput_reset freeze
     rm -f $W/idlefz        # 空闲冻结（idle.sh）中：从这里起归屏保 / 返回 Kindle 管
     sync
@@ -94,7 +95,7 @@ android_thaw() {
 # 解法：解冻前把名为 watchdog 的那个线程单独放进自冻结的子组 $FZ/wd，先解冻其余线程，
 # 4 秒后各 Handler 已经跑完积压的检查消息（mCompleted=true），再把它放回去。stop.sh 停 Android 时不分步（要尽快杀掉）。
 # 兜底日志：freeze.sh 也会被 stop.sh / sleep.sh 单独 source，那时 common.sh 的 t() 未必已定义
-type t >/dev/null 2>&1 || t() { echo "[$(date +%H:%M:%S) up=$(cut -d' ' -f1 /proc/uptime)] $*" >> /mnt/base-us/system/veradroid/veradroid.log 2>/dev/null; }
+type t >/dev/null 2>&1 || t() { echo "[$(date +%H:%M:%S) up=$(cut -d' ' -f1 /proc/uptime)] $*" >> "${LOG:-/mnt/base-us/system/veradroid/veradroid.log}" 2>/dev/null; }
 wd_hold() {
     case "$0" in *stop.sh) return 0 ;; esac
     [ -d $FZ/wd ] && return 0
@@ -122,7 +123,7 @@ wd_release() {
 }
 wd_release_later() {
     [ -d $FZ/wd ] || return 0
-    ( sleep 4; wd_release; t "thaw: watchdog thread released" ) </dev/null >>/mnt/base-us/system/veradroid/veradroid.log 2>&1 &
+    ( sleep 4; wd_release; t "thaw: watchdog thread released" ) </dev/null >>"${LOG:-/mnt/base-us/system/veradroid/veradroid.log}" 2>&1 &
 }
 freezer_cleanup() {
     wd_release 2>/dev/null
@@ -134,4 +135,25 @@ freezer_cleanup() {
     fi
     rmdir $W/freezer 2>/dev/null
     rm -f $W/fzmode
+}
+# 安装 APK / dex2oat / patchoat / 后台预编译期间禁止空闲冻结与屏保冻结，避免 540s 预编译超时强杀或 Watchdog 杀 system_server
+pkg_busy() {
+    alive $W/installing && return 0
+    alive $W/compile.pid && return 0
+    alive $W/aot.pid && return 0
+    [ "$(sed -n 's/^state=//p' $X/ctl/compile.status 2>/dev/null)" = running ] && return 0
+    type compile_held >/dev/null 2>&1 && compile_held && return 0
+    if type compile_session_pending >/dev/null 2>&1; then
+        compile_session_pending && return 0
+    else
+        pb_now=$(date +%s)
+        for pb_d in $SYS/data/app/vmdl*.tmp; do
+            [ -d "$pb_d" ] || continue
+            pb_m=$(stat -c %Y "$pb_d" 2>/dev/null) || continue
+            [ $((pb_now - pb_m)) -lt ${COMPILE_SESSION_S:-600} ] && return 0
+        done
+    fi
+    pgrep -x dex2oat >/dev/null 2>&1 && return 0
+    pgrep -x patchoat >/dev/null 2>&1 && return 0
+    return 1
 }

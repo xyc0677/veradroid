@@ -81,7 +81,7 @@ final class Theme {
         return v;
     }
 
-    static void touched() { bump++; }
+    static void touched() { bump++; SwitcherActivity.ICONS.clear(); }
 
     static File wallFile() {
         for (String n : WALL_NAMES) {
@@ -477,17 +477,27 @@ final class Theme {
     }
 
     /** Import an uploaded file. Returns a short message for the web page. */
-    static String importFile(File f) {
-        String n = f.getName().toLowerCase(Locale.US);
+    static String importFile(File f) { return importFile(app, f); }
+
+    static String importFile(Context c, File f) {
+        if (c != null && app == null) app = c.getApplicationContext();
+        String n = f.getName();
         // uniqueFile() may have added "(1)" etc.; strip it again
-        n = n.replaceAll("\\s*\\(\\d+\\)(?=\\.[a-z0-9]+$)", "");
+        n = n.replaceAll("\\s*\\(\\d+\\)(?=\\.[A-Za-z0-9]+$)", "");
+        boolean[] sbChanged = { false };
         try {
             String r;
-            if (n.endsWith(".zip")) r = importZip(f);
-            else {
-                r = place(n, new FileInputStream(f), f.length());
+            boolean changed = false;
+            if (n.toLowerCase(Locale.US).endsWith(".zip")) {
+                r = importZip(f, sbChanged);
+                changed = !r.contains("没有可用");
+            } else {
+                r = place(n, new FileInputStream(f), f.length(), sbChanged);
                 if (r == null) return "不认识这个文件：请用 wallpaper.jpg、icon-包名.png、statusbar.json 或 .zip 主题包";
+                changed = true;
             }
+            if (changed) touched();
+            if (sbChanged[0] && app != null) StatusBarService.refresh(app);
             // 网页换了壁纸：趁这会儿在后台处理好，回到主页时只是读一张缓存
             if (app != null && hasWallpaper()) prepareAsync(app, null);
             return r;
@@ -498,7 +508,7 @@ final class Theme {
         }
     }
 
-    private static String importZip(File f) throws Exception {
+    private static String importZip(File f, boolean[] sbChanged) throws Exception {
         int ok = 0;
         ZipInputStream z = new ZipInputStream(new FileInputStream(f));
         try {
@@ -507,9 +517,10 @@ final class Theme {
                 if (e.isDirectory()) continue;
                 String name = e.getName().replace('\\', '/');
                 if (name.contains("..")) continue;                 // no path traversal
-                String base = name.substring(name.lastIndexOf('/') + 1).toLowerCase(Locale.US);
-                if (name.toLowerCase(Locale.US).startsWith("icons/") || name.toLowerCase(Locale.US).contains("/icons/")) base = "icon-" + base;
-                if (place(base, z, -1) != null) ok++;
+                String base = name.substring(name.lastIndexOf('/') + 1);
+                String lowerPath = name.toLowerCase(Locale.US);
+                if (lowerPath.startsWith("icons/") || lowerPath.contains("/icons/")) base = "icon-" + base;
+                if (place(base, z, -1, sbChanged) != null) ok++;
             }
         } finally { z.close(); }
         return ok == 0 ? "主题包里没有可用的文件" : "主题已导入（" + ok + " 个文件）";
@@ -517,13 +528,19 @@ final class Theme {
 
     /** Store one recognised file; null if the name is not part of a theme. Does not close {@code in} for zips. */
     private static String place(String name, InputStream in, long size) throws Exception {
+        return place(name, in, size, null);
+    }
+
+    private static String place(String name, InputStream in, long size, boolean[] sbChanged) throws Exception {
+        String lower = name.toLowerCase(Locale.US);
         File dest; String msg;
-        if (name.matches("wallpaper\\.(png|jpg|jpeg|webp)")) {
-            dest = new File(dir(), name); msg = "壁纸已更换";
-        } else if (name.matches("icon-[a-z0-9_.]+\\.png")) {
+        if (lower.matches("wallpaper\\.(png|jpg|jpeg|webp)")) {
+            dest = new File(dir(), lower); msg = "壁纸已更换";
+        } else if (lower.startsWith("icon-") && lower.endsWith(".png")) {
             String pkg = name.substring(5, name.length() - 4);
+            if (!pkg.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) { if (size >= 0) in.close(); return null; }
             dest = new File(icons(), pkg + ".png"); msg = "已替换 " + pkg + " 的图标";
-        } else if (name.equals("statusbar.json")) {
+        } else if (lower.equals("statusbar.json")) {
             dest = new File(dir(), "statusbar.json"); msg = "状态栏设置已更新";
         } else { if (size >= 0) in.close(); return null; }   // size >= 0：调用方交过来的是文件流，由这里关（以前不认识的名字 / 太大时漏一个 fd）
         if (size > MAX_FILE) { in.close(); throw new Exception("文件太大（最大 8 MB）"); }
@@ -539,11 +556,12 @@ final class Theme {
             }
         } catch (Exception e) { out.close(); tmp.delete(); throw e;
         } finally { out.close(); if (size >= 0) in.close(); }
-        if (name.equals("statusbar.json")) new JSONObject(new String(readAll(tmp), "UTF-8"));   // must be valid JSON
+        if (lower.equals("statusbar.json")) new JSONObject(new String(readAll(tmp), "UTF-8"));   // must be valid JSON
         // 新壁纸到了才删掉别的扩展名的旧壁纸（以前先删再写，写失败就没有壁纸了）
-        if (name.startsWith("wallpaper.")) for (String o : WALL_NAMES) if (!o.equals(name)) new File(dir(), o).delete();
+        if (lower.startsWith("wallpaper.")) for (String o : WALL_NAMES) if (!o.equals(lower)) new File(dir(), o).delete();
         if (!tmp.renameTo(dest)) throw new Exception("保存失败");
         dest.setReadable(true, false);
+        if (lower.equals("statusbar.json") && sbChanged != null) sbChanged[0] = true;
         return msg;
     }
 
@@ -560,9 +578,11 @@ final class Theme {
         File d = new File(DIR);
         File[] ic = new File(d, "icons").listFiles();
         if (ic != null) for (File f : ic) f.delete();
-        for (String n : new String[] { "wallpaper.png", "wallpaper.jpg", "wallpaper.jpeg", "wallpaper.webp", "statusbar.json" }) new File(d, n).delete();
+        clearWallpaper();
+        new File(d, "statusbar.json").delete();
         new File(d, ".reset").delete();
         try { new FileOutputStream(new File(dir(), ".reset")).close(); } catch (Exception ignored) { }   // bumps version()
         touched();
+        if (app != null) StatusBarService.refresh(app);
     }
 }

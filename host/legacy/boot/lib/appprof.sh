@@ -13,7 +13,10 @@
 # 命令（cmd.sh）：
 #   fg <pkg>|home              前台变了
 #   appset <pkg>|<spec>        存用户的设置（spec 空 = 删掉这一行，回到内置推荐 / 全局；"-" = 全跟随）；"appset *|" 全部清掉
-APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN)=[0-9.]{1,6}$'
+# SLIM 不是显示参数：后台瘦身（appslim.sh，停用 / 恢复应用的后台组件），不发给显示桥
+# KEEPALIVE / BGSTOP 不是显示参数：保持后台 / 离开后几分钟自动停止（memkeep.sh 读合并表 $X/appprof），不发给显示桥
+# OEC_* 不是显示桥的参数：系统镜像（feat/fw-oec，ro.vd.oec=1）里每个应用进程自己读 $X/appoec（见下面 appprof_oec_publish）
+APPPROF_RE='^KFB_(CONTRAST|DITHER|FLASH|INVERT|LIGHTF|DARKEN|MODE|SETTLE|HOLD|SMOOTH|PACE|CLEAN|REAGL_MIN|SETTLE2|SCROLLDU|IMG|SCROLLDELAY|SCROLLSTYLE|SCROLLWFM|GCN|NEWWIN|MONO|MAXDEFER|FLIPINPUT|TURNHOLD|ANIM_MODE|ANIM_DIR|ANIM_STEPS|ANIM_MIN|COLOR)=[0-9.]{1,6}$|^(KEEPALIVE|BGSTOP)=[0-9]{1,4}$|^SLIM=[01]$|^OEC_(DPI|FLING|SMOOTH|PAGEKEY|TOAST|LIGHTBAR|DLGBORDER|WBOLD|WBLACK|WFONT|WCSS)=[0-9]{1,3}$'
 
 appprof_valid_pkg() { case "$1" in ''|*[!A-Za-z0-9._]*) return 1 ;; esac; [ ${#1} -le 200 ]; }
 
@@ -33,7 +36,7 @@ appprof_publish() {
         "$@" 2>/dev/null > $X/appprof.tmp
     chmod 644 $X/appprof.tmp 2>/dev/null; mv -f $X/appprof.tmp $X/appprof
     # “应用优化”页（VeraHome）认的开关：KEY|标题|选项=值,...（页面自己加“跟随”；同名的盖掉页面内置的那一项）。
-    # 每个模块写自己那一份 $X/appknobs.d/<模块>，这里合成 $X/appknobs。显示桥的是 appknobs.d/epd
+    # 每个模块写自己那一份 $X/appknobs.d/<模块>（显示桥的是 appknobs.d/epd），下面 appprof_oec_publish 里的 appknobs_join 合成 $X/appknobs
     mkdir -p $X/appknobs.d
     printf '%s\n' \
         'KFB_SCROLLSTYLE|滚动方式|跟手快刷=1,停下再刷=2' \
@@ -42,12 +45,18 @@ appprof_publish() {
         'KFB_GCN|界面残影定时全刷|关=0,每 20 次刷新=20,每 30 次刷新=30,每 50 次刷新=50' \
         'KFB_NEWWIN|打开时整屏刷新|关=0,开=1' \
         'KFB_MONO|快刷黑白分明|关=0,开=128' \
-        'KFB_MAXDEFER|画面最长等待|0.6 秒=600,1.2 秒=1200,不限=0' > $X/appknobs.d/epd.tmp 2>/dev/null \
+        'KFB_MAXDEFER|画面最长等待|0.6 秒=600,1.2 秒=1200,不限=0' \
+        'KFB_TURNHOLD|翻页动画合并（应用自己有翻页动画时只刷最后一帧）|关=0,0.1 秒=100,0.15 秒=150,0.25 秒=250' > $X/appknobs.d/epd.tmp 2>/dev/null \
         && mv -f $X/appknobs.d/epd.tmp $X/appknobs.d/epd
-    cat $X/appknobs.d/* 2>/dev/null | grep -v '^[[:space:]]*$' > $X/appknobs.tmp; chmod 644 $X/appknobs.tmp 2>/dev/null; mv -f $X/appknobs.tmp $X/appknobs
     # 要换显示密度的包（内置表里带 DENSITY 的规则，可以以 * 结尾）：桌面打开它们之前等宿主换好密度（/dev/kfb/density.apps）
-    awk '/^[ \t]*(#|$)/ { next } { sub(/[ \t]*#.*/, "") } $2 ~ /(^|;)DENSITY=/ { print $1 }' "$VD/boot/appprofiles.conf" > $X/density.apps.tmp 2>/dev/null
+    # 系统镜像自己按应用换密度（appprof_oec_density）时，宿主不换、桌面也不用等：表是空的
+    if appprof_oec_density; then : > $X/density.apps.tmp
+    else awk '/^[ \t]*(#|$)/ { next } { sub(/[ \t]*#.*/, "") } $2 ~ /(^|;)DENSITY=/ { print $1 }' "$VD/boot/appprofiles.conf" > $X/density.apps.tmp 2>/dev/null; fi
     chmod 644 $X/density.apps.tmp 2>/dev/null; mv -f $X/density.apps.tmp $X/density.apps
+    # 桌面“应用优化”页上宿主管的选项：每个模块写自己的一份 $X/appknobs.d/<模块>（memkeep.sh 的 mem_knobs = appknobs.d/mem，
+    # 下面的 appprof_oec_publish = appknobs.d/oec），appknobs_join 拼成 $X/appknobs（格式见 VeraHome AppDisplayActivity.Knob）
+    type mem_knobs >/dev/null 2>&1 && mem_knobs
+    appprof_oec_publish
 }
 
 # 这个包现在该用的 spec（没有 = 空）：用户的精确匹配 > 内置精确匹配 > 内置前缀匹配（最长的前缀）
@@ -74,6 +83,7 @@ appprof_fg() {
     ap_pkg=$1
     [ "$ap_pkg" = com.veradroid.home ] && ap_pkg=home
     [ "$ap_pkg" = home ] || appprof_valid_pkg "$ap_pkg" || return 0
+    type mem_fg >/dev/null 2>&1 && mem_fg "$ap_pkg"     # 后台时间 / 桌面不换出（memkeep.sh）
     # 同一个包：显示参数不动；密度照样核对一次（返回 Kindle 时换回了默认，解冻后再打开同一个应用要换回去；没变化就什么都不做）
     [ "$ap_pkg" = "$(cat $W/appprof.pkg 2>/dev/null)" ] && { appprof_density_fg "$ap_pkg"; appprof_ack "$ap_pkg"; return 0; }
     echo "$ap_pkg" > $W/appprof.pkg
@@ -81,7 +91,7 @@ appprof_fg() {
     appprof_density_fg "$ap_pkg"
     appprof_ack "$ap_pkg"
     ap_spec=; [ "$ap_pkg" = home ] || ap_spec=$(appprof_spec "$ap_pkg")
-    ap_new=$(appprof_lines "$ap_spec")
+    ap_new=$(appprof_lines "$ap_spec" | grep -v '^KEEPALIVE=\|^BGSTOP=\|^OEC_\|^SLIM=')
     # 用户在全局里明确选了“不全刷”（settings.conf 里 KFB_FLASH=0）：内置推荐不能替他打开按页数全刷（0.96 用户反馈“更新后会黑屏全刷”）。
     # 用户自己给这个应用存的设置（u / ub）照旧生效。
     if [ -n "$ap_new" ] && grep -qx 'KFB_FLASH=0' "$SYS/settings.conf" 2>/dev/null && [ "$(appprof_src "$ap_pkg")" = b ]; then
@@ -111,8 +121,9 @@ NEWWIN"
 appprof_send() {
     settings_load 2>/dev/null || true
     [ -p $X/epd.fifo ] && alive $W/epd.pid || return 0
-    ap_msg=$({ echo "SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}"
-      echo "ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN"
+    ap_msg=$({ echo "ANIM $KFB_ANIM_MODE $KFB_ANIM_DIR $KFB_ANIM_STEPS $KFB_ANIM_MIN"
+      echo "SET $KFB_CONTRAST $KFB_DITHER $KFB_FLASH $KFB_INVERT $KFB_MODE $KFB_SETTLE ${KFB_LIGHTF:-0} ${KFB_DARKEN:-0}"
+      echo "COLOR ${KFB_COLOR:-1}"
       echo "HOLD ${KFB_HOLD:-70}"
       # 桌面在前台时不数页（桌面换页、切标签不是读书翻页，用不着按页数全刷）
       [ -n "$ap_pkg" ] && { [ "$ap_pkg" = home ] && echo "FLIPCOUNT 0" || echo "FLIPCOUNT 1"; }
@@ -122,9 +133,9 @@ appprof_send() {
       if type epd_send_smooth >/dev/null 2>&1; then
           echo "PACE ${KFB_PACE:-0}"; echo "CLEAN ${KFB_CLEAN:-0}"; echo "REAGL ${KFB_REAGL_MIN:-35}"
           echo "SETTLE2 ${KFB_SETTLE2:-40}"; echo "SCROLLDU ${KFB_SCROLLDU:-0}"; echo "IMG ${KFB_IMG:-0}"
-          echo "SCROLLDELAY ${KFB_SCROLLDELAY:-500}"; echo "SCROLLSTYLE ${KFB_SCROLLSTYLE:-1}"; echo "GCN ${KFB_GCN:-0}"; echo "MONO ${KFB_MONO:-0}"; echo "MAXDEFER ${KFB_MAXDEFER:-1200}"; echo "FLIPINPUT ${KFB_FLIPINPUT:-1000}"
+          echo "SCROLLDELAY ${KFB_SCROLLDELAY:-500}"; echo "SCROLLSTYLE ${KFB_SCROLLSTYLE:-1}"; echo "SCROLLWFM ${KFB_SCROLLWFM:-0}"; echo "GCN ${KFB_GCN:-0}"; echo "MONO ${KFB_MONO:-0}"; echo "MAXDEFER ${KFB_MAXDEFER:-1200}"; echo "FLIPINPUT ${KFB_FLIPINPUT:-1000}"; echo "TURNHOLD ${KFB_TURNHOLD:-0}"
       elif type epd_scroll_lines >/dev/null 2>&1; then
-          epd_scroll_lines      # legacy：触摸滚动这几条它的显示桥也认（SCROLLWFM a2 / du 只有它有）
+          epd_scroll_lines
       fi; })
     # 显示桥在上面的检查和这次写之间退出时，打开 FIFO 写会一直等读者：和 epd_send 一样限 3 秒（vd_timeout，common.sh），
     # 不让命令监听（fg / appset）卡死。没有 vd_timeout 的老宿主照旧直接写。
@@ -132,21 +143,51 @@ appprof_send() {
     else printf '%s\n' "$ap_msg" > $X/epd.fifo; fi
 }
 
+# 合并表里这个包的 SLIM=（后台瘦身的选择；没有 = 空）
+appprof_slimval() { awk -v p="$1" '$1 == p { print $3 }' $X/appprof 2>/dev/null | tr ';' '\n' | grep '^SLIM='; }
+
 appprof_set() {
     ap_p=${1%%|*}; ap_s=${1#*|}; [ "$ap_s" = "$1" ] && ap_s=
     touch $SYS/settings.apps
-    if [ "$ap_p" = '*' ]; then : > $SYS/settings.apps.tmp
+    _ap=$$; [ -r /proc/self/stat ] && read -r _ap _ < /proc/self/stat 2>/dev/null || true
+    if [ "$ap_p" = '*' ]; then : > "$SYS/settings.apps.tmp.$_ap"
     else
         appprof_valid_pkg "$ap_p" || return 0
-        awk -v p="$ap_p" '$1 != p' $SYS/settings.apps > $SYS/settings.apps.tmp 2>/dev/null
-        if [ "$ap_s" = - ]; then echo "$ap_p -" >> $SYS/settings.apps.tmp
+        awk -v p="$ap_p" '$1 != p' $SYS/settings.apps > "$SYS/settings.apps.tmp.$_ap" 2>/dev/null
+        if [ "$ap_s" = - ]; then echo "$ap_p -" >> "$SYS/settings.apps.tmp.$_ap"
         elif [ -n "$ap_s" ]; then
             ap_c=$(appprof_lines "$ap_s" | tr '\n' ';'); ap_c=${ap_c%;}
-            echo "$ap_p ${ap_c:--}" >> $SYS/settings.apps.tmp
+            echo "$ap_p ${ap_c:--}" >> "$SYS/settings.apps.tmp.$_ap"
         fi
     fi
-    mv -f $SYS/settings.apps.tmp $SYS/settings.apps
+    mv -f "$SYS/settings.apps.tmp.$_ap" $SYS/settings.apps
+    ap_dpi0=$(appprof_oec_dpi "$ap_p")
+    ap_dpi_all0=; [ "$ap_p" = '*' ] && appprof_oec && ap_dpi_all0=$(appprof_oec_dpi_all)
+    ap_slim0=; [ "$ap_p" != '*' ] && ap_slim0=$(appprof_slimval "$ap_p")
     appprof_publish
+    # 后台瘦身的选择变了（appslim.sh）：后台按新的选择停用 / 恢复这个应用的组件（"*" = 全部清掉：清单里的应用都按默认再做一遍）
+    if type appslim_apply >/dev/null 2>&1; then
+        if [ "$ap_p" = '*' ]; then ( appslim_all appset ) </dev/null >>$LOG 2>&1 &
+        elif [ "$ap_slim0" != "$(appprof_slimval "$ap_p")" ]; then ( appslim_apply "$ap_p" appset ) </dev/null >>$LOG 2>&1 &
+        fi
+    fi
+    # 应用进程只在启动时取密度：密度变了就停掉它（下次打开按新的密度；"*" 全部恢复默认时也对比曾改过 OEC_DPI / DENSITY 的包）
+    if [ "$ap_p" = '*' ] && appprof_oec && type adb_sh >/dev/null 2>&1; then
+        ap_dpi_all1=$(appprof_oec_dpi_all)
+        ap_dpis=$( { printf '%s\n' "$ap_dpi_all0"; printf '%s\n' "$ap_dpi_all1"; } | awk 'NF >= 1 { print $1 }' | sort -u )
+        for ap_dp in $ap_dpis; do
+            appprof_valid_pkg "$ap_dp" || continue
+            ap_d0=$(printf '%s\n' "$ap_dpi_all0" | awk -v p="$ap_dp" '$1 == p { print $2; exit }')
+            ap_d1=$(printf '%s\n' "$ap_dpi_all1" | awk -v p="$ap_dp" '$1 == p { print $2; exit }')
+            if [ "$ap_d0" != "$ap_d1" ]; then
+                if type adb_sh_t >/dev/null 2>&1; then adb_sh_t 15 "am force-stop $ap_dp"; else adb_sh "am force-stop $ap_dp"; fi >/dev/null 2>&1
+                t "app density changed: $ap_dp stopped"
+            fi
+        done
+    elif [ "$ap_p" != '*' ] && appprof_oec && [ "$ap_dpi0" != "$(appprof_oec_dpi "$ap_p")" ] && type adb_sh >/dev/null 2>&1; then
+        if type adb_sh_t >/dev/null 2>&1; then adb_sh_t 15 "am force-stop $ap_p"; else adb_sh "am force-stop $ap_p"; fi >/dev/null 2>&1
+        t "app density changed: $ap_p stopped"
+    fi
     # 正在前台的就是它：马上换上（不用等下次切换）
     ap_cur=$(cat $W/appprof.pkg 2>/dev/null); rm -f $W/appprof.pkg
     [ -n "$ap_cur" ] && appprof_fg "$ap_cur"
@@ -183,6 +224,7 @@ appprof_wm() { type vd_in >/dev/null 2>&1 || return 1; ad_in=$(vd_in) || return 
 
 # 这个包要的密度（数字）；空 = 默认。auto1080 = 320 × 屏宽 / 1080 舍去小数（屏宽取 Android 的原始显示宽度，开机后算一次）
 appprof_density_want() {
+    appprof_oec_density && return 0      # 系统镜像按进程换密度（OEC_DPI / DENSITY，OecConfig），全局密度不动
     ad_r=; [ "$1" = home ] || ad_r=$(appprof_density_rule "$1")
     case "$ad_r" in
         auto1080)
@@ -241,3 +283,103 @@ appprof_density_scrub() {
     return 0
 }
 appprof_density_boot() { appprof_density_scrub; }
+
+# ---- 系统镜像里的每应用设置（feat/fw-oec：framework 的 com.android.internal.vd.OecConfig）----
+# 镜像带 ro.vd.oec=1 时，每个应用进程启动时自己读 $X/appoec（容器里 /dev/kfb/appoec），恢复到前台时文件变了再读一次：
+#   每应用密度（不再全局 wm density：切换不重排、桌面图标不变大）、惯性滑动 / 平滑滚动动画关掉、Toast 黑字白底、
+#   系统栏浅色、对话框描边、翻页键当音量键 / 滑动、WebView 加粗 / 黑字 / 字号 / 自定义 CSS。
+# 表的格式："<包名>[*] KEY=v;KEY=v"，"*" 一行 = 全局（settings.conf 里的 OEC_* 键）。查找：全局 → 最长前缀 → 精确，逐键覆盖。
+# 每个包：内置表（appprofiles.conf）里的 OEC_* / DENSITY，再用用户的（settings.apps）逐键盖掉（“跟随”= 用户没存这个键 = 内置的）。
+# DENSITY_HOST=1（settings.conf）：不管镜像，照旧由宿主换全局密度（排查用）。
+# 自定义 CSS（OEC_WCSS=1）：$SYS/oec/<包名>.css（用户的）或 $VD/boot/oec/<包名>.css（内置），发布到 $X/oec/。
+appprof_oec() {
+    if [ -z "${APPPROF_OEC:-}" ]; then
+        APPPROF_OEC=0
+        grep -q '^ro.vd.oec=[1-9]' "$R/system/build.prop" 2>/dev/null && ! grep -qx 'DENSITY_HOST=1' "$SYS/settings.conf" 2>/dev/null && APPPROF_OEC=1
+    fi
+    [ "$APPPROF_OEC" = 1 ]
+}
+
+# 内置表里的 DENSITY（多看）交给镜像按进程换，还是照旧由宿主换全局密度。ro.vd.oec=2 起的镜像才交给镜像：
+# ro.vd.oec=1（1.00 的 pw6-a8ffca4）只换了 Resources / Display，进程的默认密度（ActivityThread.mCurDefaultDisplayDpi ->
+# DisplayMetrics.DENSITY_DEVICE、Bitmap 的默认密度）还是 300。多看把正文画进按默认密度建的 Bitmap、再贴到 376 的画布上：
+# 整页放大 376 / 300 = 1.25 倍，下面几行压到页脚、出了屏幕（测试机实测；1.00 用户反馈“多看排版有问题”）。
+# 这种镜像上带 DENSITY 的内置规则仍由宿主换全局密度（和 0.99 一样：density.apps 有它、appoec 里不带 DENSITY），其它 OEC_* 照旧。
+# 用户自己在“应用优化”里选的 OEC_DPI 照旧给镜像（宿主的全局切换只认内置表）。
+appprof_oec_density() {
+    appprof_oec || return 1
+    if [ -z "${APPPROF_OECD:-}" ]; then
+        APPPROF_OECD=0
+        ap_v=$(sed -n 's/^ro\.vd\.oec=\([0-9][0-9]*\)$/\1/p' "$R/system/build.prop" 2>/dev/null | head -1)
+        [ "${ap_v:-0}" -ge 2 ] 2>/dev/null && APPPROF_OECD=1
+    fi
+    [ "$APPPROF_OECD" = 1 ]
+}
+
+# 合并后的表里这个包的 OEC_DPI / DENSITY（精确的包名行；比较前后用）
+appprof_oec_dpi() { awk -v p="$1" '$1 == p { n = split($2, a, ";"); for (i = 1; i <= n; i++) if (a[i] ~ /^(OEC_DPI|DENSITY)=/) printf "%s;", a[i] }' $X/appoec 2>/dev/null; }
+appprof_oec_dpi_all() { awk '$1 !~ /\*/ { d = ""; n = split($2, a, ";"); for (i = 1; i <= n; i++) if (a[i] ~ /^(OEC_DPI|DENSITY)=/) d = d a[i] ";"; if (d != "") print $1, d }' $X/appoec 2>/dev/null; }
+
+appprof_oec_publish() {
+    if ! appprof_oec; then rm -f $X/appoec $X/appknobs.d/oec; appknobs_join; return 0; fi
+    set --; for ap_f in "$VD/boot/appprofiles.conf" "$SYS/settings.apps"; do [ -f "$ap_f" ] && set -- "$@" "$ap_f"; done
+    { grep -E '^OEC_[A-Z]+=[0-9]{1,3}$' "$SYS/settings.conf" 2>/dev/null | tr '\n' ';' | sed 's/;$//; s/^./* &/; /^\* /!d'; echo
+      ap_nod=1; appprof_oec_density && ap_nod=0
+      [ $# -gt 0 ] && awk -v nod=$ap_nod 'FNR == 1 { src = (FILENAME ~ /settings\.apps$/) ? "u" : "b" }
+         /^[ \t]*(#|$)/ { next }
+         { sub(/[ \t]*#.*/, ""); p = $1; s = $2; if (!(p in seen)) { seen[p] = 1; ord[++n] = p }
+           if (src == "u") {
+               dens = (s != "-" && !nod && ((p, "DENSITY") in has)) ? val[p, "DENSITY"] : ""
+               if (keys[p] != "") {
+                   c = split(substr(keys[p], 2), ks, " ")
+                   for (j = 1; j <= c; j++) { delete val[p, ks[j]]; delete has[p, ks[j]] }
+                   keys[p] = ""
+               }
+               if (dens != "") { val[p, "DENSITY"] = dens; has[p, "DENSITY"] = 1; keys[p] = " DENSITY" }
+               u_set[p] = 1
+               if (s == "-" || s == "") { u_dash[p] = 1; next }
+           }
+           m = split(s, a, ";")
+           for (i = 1; i <= m; i++) if (a[i] ~ /^(OEC_[A-Z]+=[0-9]+|DENSITY=[0-9a-z]+)$/) {
+               k = a[i]; sub(/=.*/, "", k); v = substr(a[i], length(k) + 2)
+               if (k == "DENSITY" && (src == "u" || nod)) continue
+               val[p, k] = v; if (!((p, k) in has)) { has[p, k] = 1; keys[p] = keys[p] " " k } } }
+         END { for (i = 1; i <= n; i++) { p = ord[i]
+               if (keys[p] == "") { if (u_set[p] || u_dash[p]) print p, "-"; continue }
+               c = split(substr(keys[p], 2), ks, " "); out = ""
+               for (j = 1; j <= c; j++) { sep = (out == "" ? "" : ";"); out = out sep ks[j] "=" val[p, ks[j]] }
+               print p, out } }' "$@" 2>/dev/null; } | grep -v '^$' > $X/appoec.tmp
+    chmod 644 $X/appoec.tmp 2>/dev/null; mv -f $X/appoec.tmp $X/appoec
+    # 自定义 CSS：内置的先放，用户的同名盖掉
+    mkdir -p $X/oec.tmp && rm -f $X/oec.tmp/*.css
+    for ap_d in "$VD/boot/oec" "$SYS/oec"; do [ -d "$ap_d" ] && for ap_f in "$ap_d"/*.css; do
+        [ -f "$ap_f" ] && [ "$(wc -c < "$ap_f")" -le 16384 ] && cp "$ap_f" $X/oec.tmp/ 2>/dev/null; done; done
+    chmod 755 $X/oec.tmp; chmod 644 $X/oec.tmp/*.css 2>/dev/null; rm -rf $X/oec; mv -f $X/oec.tmp $X/oec
+    # “应用优化”页（VeraHome）的选项：KEY|标题|标签=值,...（页面自己加“跟随”）
+    mkdir -p $X/appknobs.d
+    printf '%s\n' \
+        'OEC_DPI|显示大小（只对这个应用）|系统=0,自动（多看算法）=1,小 260=260,中 300=300,大 340=340,特大 380=380' \
+        'OEC_FLING|惯性滑动|有动画=0,直接跳到停止位置=1' \
+        'OEC_SMOOTH|平滑滚动动画|有=0,关（直接跳）=1' \
+        'OEC_PAGEKEY|翻页键|翻页键=0,当音量键=1,模拟滑动=2' \
+        'OEC_TOAST|提示框（Toast）黑字白底|关=0,开=1' \
+        'OEC_LIGHTBAR|系统栏浅色|关=0,开=1' \
+        'OEC_DLGBORDER|对话框加黑边|关=0,开=1' \
+        'OEC_WBOLD|网页文字加粗|关=0,开=1' \
+        'OEC_WBLACK|网页文字纯黑|关=0,开=1' \
+        'OEC_WFONT|网页字号|100%=100,115%=115,130%=130,150%=150,175%=175' \
+        'OEC_WCSS|网页自定义样式（oec/包名.css）|关=0,开=1' > $X/appknobs.d/oec.tmp && mv -f $X/appknobs.d/oec.tmp $X/appknobs.d/oec
+    appknobs_join
+}
+
+# 桌面“应用优化”页的宿主选项由几个模块各自声明：每个模块写 $X/appknobs.d/<模块>，这里合成 $X/appknobs（桌面只读这一个文件）。
+# 还直接写 $X/appknobs 的模块（老写法）的行留着，同一个键以 appknobs.d 里的为准；OEC_* 只来自 appknobs.d/oec。
+appknobs_join() {
+    [ -f $X/appknobs ] || [ -d $X/appknobs.d ] || return 0
+    mkdir -p $X/appknobs.d
+    awk -F'|' 'FNR == 1 { inold = (FILENAME == old) }
+               /^[ \t]*(#|$)/ { next }
+               inold && $1 ~ /^OEC_/ { next }
+               !($1 in seen) { seen[$1] = 1; print }' old=$X/appknobs $X/appknobs.d/* $X/appknobs > $X/appknobs.tmp 2>/dev/null
+    chmod 644 $X/appknobs.tmp 2>/dev/null; mv -f $X/appknobs.tmp $X/appknobs
+}

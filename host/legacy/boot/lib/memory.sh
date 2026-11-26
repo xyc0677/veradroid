@@ -108,7 +108,7 @@ zram_grow() {
     want=$((256 * 1024 * 1024))
     [ "$(cat $Z/disksize 2>/dev/null)" -lt $want ] 2>/dev/null || return 0
     used=$(awk '$1 == "/dev/zram0" {print $4}' /proc/swaps)               # KB
-    avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    avail=$(awk '/^MemAvailable:/{a=$2} /^MemFree:/{f=$2} /^Buffers:/{b=$2} /^Cached:/{c=$2} END{if (a) print a; else if (f+b+c > 0) print f+b+c}' /proc/meminfo)
     [ -n "$used" ] && [ -n "$avail" ] && [ "$avail" -gt $((used + 80000)) ] || { t "zram: not enough free memory to resize (used ${used}kB, avail ${avail}kB)"; return 0; }
     prio=$(awk '$1 == "/dev/zram0" {print $5}' /proc/swaps)
     case "$prio" in ""|-*) prio=100 ;; esac      # 内核自动分配的负优先级 swapon -p 不接受
@@ -157,9 +157,11 @@ zram_on() {
         [ -f $W/wsf.state ] || cat /proc/sys/vm/watermark_scale_factor > $W/wsf.state
         echo "$VM_WATERMARK" > /proc/sys/vm/watermark_scale_factor 2>/dev/null
     fi
+    type zram_extra >/dev/null 2>&1 && zram_extra     # zram0 被占着、比 ZRAM_MB 小：再加一块（memkeep.sh）
     t "zram ${ZRAM_MB}MB on"
 }
 zram_restore() {
+    type mem_keep_off >/dev/null 2>&1 && mem_keep_off
     overcommit_restore
     lmk_kernel_restore
     tune_restore
@@ -257,8 +259,16 @@ swapfile_on() {
 }
 swapfile_off() {
     [ -f $W/swapfile.on ] || return 0
-    swapoff "$SWAPFILE" 2>/dev/null && t "swapfile: off" || t "swapfile: swapoff failed"
-    rm -f $W/swapfile.on
+    if ! grep -q "^$SWAPFILE " /proc/swaps 2>/dev/null; then
+        rm -f $W/swapfile.on
+        return 0
+    fi
+    if swapoff "$SWAPFILE" 2>/dev/null; then
+        rm -f $W/swapfile.on
+        t "swapfile: off"
+    else
+        t "swapfile: swapoff failed"
+    fi
 }
 
 # ---- 机型调优（models/<机型>.conf 的键，都可以在 settings.conf 里改；空 = 不动，和以前一样）----------------------------

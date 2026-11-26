@@ -10,11 +10,11 @@
       "description": "Install VeraDroid on a jailbroken Paperwhite 6.",
       "artifacts": [
         {
-          "url": "https://veradroid.wenjin.jp/kpm/veradroid_0.21.41_kindlehf.kpkg",
+          "url": "https://veradroid.wenjin.jp/kpm/veradroid_0.21.43_kindlehf.kpkg",
           "version": [
             0,
             21,
-            41
+            43
           ],
           "dependencies": [],
           "supported_platforms": [
@@ -29,11 +29,11 @@
       "description": "PW5 experimental: boots to VeraHome in eink-emulator (5.19.2); not verified on real hardware.",
       "artifacts": [
         {
-          "url": "https://veradroid.wenjin.jp/kpm/veradroid-pw5_0.1.4_kindlehf.kpkg",
+          "url": "https://veradroid.wenjin.jp/kpm/veradroid-pw5_0.1.6_kindlehf.kpkg",
           "version": [
             0,
             1,
-            4
+            6
           ],
           "dependencies": [],
           "supported_platforms": [
@@ -49,11 +49,11 @@
       "description": "KT6 experimental: boots to VeraHome in eink-emulator (5.19.2); not verified on real hardware.",
       "artifacts": [
         {
-          "url": "https://veradroid.wenjin.jp/kpm/veradroid-kt6_0.2.2_kindlehf.kpkg",
+          "url": "https://veradroid.wenjin.jp/kpm/veradroid-kt6_0.2.4_kindlehf.kpkg",
           "version": [
             0,
             2,
-            2
+            4
           ],
           "dependencies": [],
           "supported_platforms": [
@@ -69,11 +69,11 @@
       "description": "KT5 experimental: boots to VeraHome in eink-emulator (5.19.2); not verified on real hardware.",
       "artifacts": [
         {
-          "url": "https://veradroid.wenjin.jp/kpm/veradroid-kt5_0.2.2_kindlehf.kpkg",
+          "url": "https://veradroid.wenjin.jp/kpm/veradroid-kt5_0.2.4_kindlehf.kpkg",
           "version": [
             0,
             2,
-            2
+            4
           ],
           "dependencies": [],
           "supported_platforms": [
@@ -89,11 +89,11 @@
       "description": "Colorsoft experimental; color framebuffer is not handled by the PW6 display profile.",
       "artifacts": [
         {
-          "url": "https://veradroid.wenjin.jp/kpm/veradroid-cs_0.1.2_kindlehf.kpkg",
+          "url": "https://veradroid.wenjin.jp/kpm/veradroid-cs_0.1.4_kindlehf.kpkg",
           "version": [
             0,
             1,
-            2
+            4
           ],
           "dependencies": [],
           "supported_platforms": [
@@ -109,11 +109,11 @@
       "description": "Scribe experimental; rotation/stylus are not handled.",
       "artifacts": [
         {
-          "url": "https://veradroid.wenjin.jp/kpm/veradroid-ks_0.1.2_kindlehf.kpkg",
+          "url": "https://veradroid.wenjin.jp/kpm/veradroid-ks_0.1.4_kindlehf.kpkg",
           "version": [
             0,
             1,
-            2
+            4
           ],
           "dependencies": [],
           "supported_platforms": [

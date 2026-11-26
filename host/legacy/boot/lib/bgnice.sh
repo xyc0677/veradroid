@@ -12,9 +12,9 @@ bgnice_tick() {
     case "$bn" in ''|*[!0-9]*) bn=0 ;; esac
     case "$ba" in ''|*[!0-9]*) ba=500 ;; esac
     [ "$bn" -gt 19 ] && bn=19
-    [ "$bn" -gt 0 ] && BG_NICE_SET=$bn
+    bset=$(cat $W/bgnice.val 2>/dev/null)
+    case "$bset" in ''|*[!0-9]*) bset=${BG_NICE_SET:-10} ;; esac
     mkdir -p $W/bgnice 2>/dev/null || return 0
-    zy=; for zp in $(pidof zygote 2>/dev/null) $(pidof zygote64 2>/dev/null); do zy="$zy $zp"; done
     # 记过的进程：没了就删记录；adj 变小了（或关掉了）就放回
     for f in $W/bgnice/*; do
         [ -f "$f" ] || continue
@@ -23,18 +23,35 @@ bgnice_tick() {
         badj=$(cat /proc/$bp/oom_score_adj 2>/dev/null)
         if [ "$bn" = 0 ] || [ -z "$badj" ] || [ "$badj" -lt "$ba" ] 2>/dev/null; then
             while read -r bt bo; do [ "$bo" = - ] && continue; [ -d /proc/$bp/task/$bt ] && renice "$bo" -p "$bt" >/dev/null 2>&1; done < "$f" 2>/dev/null
-            # 降着的时候新开的线程继承了 BG_NICE，没有记录：放回 0。降的时候就在、本来就 >= BG_NICE 的线程（应用自己设的后台线程，
-            # 记成 “tid -”）不动：以前它们也没有记录，回到前台时被一起抬到 0，后台线程和界面线程抢 CPU（社区报告）
-            for tt in /proc/$bp/task/[0-9]*; do
-                [ -f "$f" ] || break
-                bt=${tt##*/}; grep -q "^$bt " "$f" 2>/dev/null && continue
-                { read -r ts < $tt/stat; } 2>/dev/null || continue
-                [ "$(echo "${ts##*) }" | awk '{print $17}')" = "${BG_NICE_SET:-10}" ] && renice 0 -p "$bt" >/dev/null 2>&1
-            done
+            # 降着的时候新开的线程继承了 BG_NICE，没有记录：仅在 bset != 10 时放回 0。
+            # Android 后台线程池显式设 THREAD_PRIORITY_BACKGROUND（nice 10）：若 bset == 10 则无法区分，不误提至 0。
+            if [ "$bset" != 10 ]; then
+                for tt in /proc/$bp/task/[0-9]*; do
+                    [ -f "$f" ] || break
+                    bt=${tt##*/}; grep -q "^$bt " "$f" 2>/dev/null && continue
+                    { read -r ts < $tt/stat; } 2>/dev/null || continue
+                    [ "$(echo "${ts##*) }" | awk '{print $17}')" = "$bset" ] && renice 0 -p "$bt" >/dev/null 2>&1
+                done
+            fi
             rm -f "$f"
         fi
     done
     [ "$bn" = 0 ] && return 0
+    BG_NICE_SET=$bn
+    echo "$bn" > $W/bgnice.val 2>/dev/null
+    zy=
+    for zp in $(pidof zygote 2>/dev/null) $(pidof zygote64 2>/dev/null) $(pidof app_process32 2>/dev/null) $(pidof app_process 2>/dev/null); do
+        zc=$(tr '\000' ' ' 2>/dev/null < /proc/$zp/cmdline) || continue
+        case " $zc " in *" zygote "*|*" zygote64 "*|*" --zygote "*)
+            case " $zy " in *" $zp "*) ;; *) zy="$zy $zp" ;; esac ;;
+        esac
+    done
+    if [ -z "$zy" ]; then
+        for zd in /proc/[0-9]*; do
+            zc=$(tr '\000' ' ' 2>/dev/null < $zd/cmdline) || continue
+            case " $zc " in *" zygote "*|*" zygote64 "*|*" --zygote "*) zy="$zy ${zd#/proc/}" ;; esac
+        done
+    fi
     [ -n "$zy" ] || return 0
     for d in /proc/[0-9]*; do
         bp=${d#/proc/}
@@ -58,4 +75,4 @@ bgnice_tick() {
     return 0
 }
 # 停止 / 冻结前：全部放回（BG_NICE=0 的那一次 tick）
-bgnice_restore() { BG_NICE=0 bgnice_tick; rm -rf $W/bgnice; }
+bgnice_restore() { BG_NICE=0 bgnice_tick; rm -rf $W/bgnice $W/bgnice.val; }

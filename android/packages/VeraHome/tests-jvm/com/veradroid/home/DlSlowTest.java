@@ -94,6 +94,48 @@ public class DlSlowTest {
             check(o2.length() == data.length && sh2[0] == 0, size + " B: one slow source is kept (" + ms2 + " ms, slow=" + sh2[0] + ")");
             mirror.stop(0); main.stop(0); only.stop(0);
         }
+        // Signed query forwarding: same-domain direct mirror (dl.wenjin.jp) preserves HMAC sig (avoids 403 probe waste),
+        // third-party mirrors strip query, and raw token= is never forwarded to any mirror.
+        String signedOrigin = "https://veradroid.wenjin.jp/api/fonts/download/18?uid=1&did=dev1&exp=9999999999&sig=abcdef0123";
+        List<String> ms = Arrays.asList("https://dl.wenjin.jp", "https://mirror.example.com", "https://cdn.wenjin.jp/f/{name}");
+        List<String> c1 = Dl.candidates(signedOrigin, "", ms);
+        check(c1.get(0).equals("https://dl.wenjin.jp/api/fonts/download/18?uid=1&did=dev1&exp=9999999999&sig=abcdef0123"), "same-domain mirror keeps signed query: " + c1.get(0));
+        check(c1.get(1).equals("https://mirror.example.com/api/fonts/download/18"), "third-party mirror strips signed query: " + c1.get(1));
+        check(c1.get(2).equals("https://cdn.wenjin.jp/f/18"), "template mirror keeps bare {name}: " + c1.get(2));
+        check(c1.get(3).equals(signedOrigin), "main site unchanged: " + c1.get(3));
+        List<String> c2 = Dl.candidates("https://veradroid.wenjin.jp/api/store/download/5", "device_id=d&token=SECRET", Arrays.asList("https://dl.wenjin.jp"));
+        check(c2.get(0).equals("https://dl.wenjin.jp/api/store/download/5"), "raw token query never forwarded to mirror: " + c2.get(0));
+        check(c2.get(1).equals("https://veradroid.wenjin.jp/api/store/download/5?device_id=d&token=SECRET"), "raw token kept on main site: " + c2.get(1));
+        // Segmented range() must surface HTTP 403/429 as Dl.HttpError with JSON code + error (not plain IOException).
+        HttpServer expSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final byte[] expData = new byte[3 << 20];
+        expSrv.createContext("/", (HttpExchange x) -> {
+            String r = x.getRequestHeaders().getFirst("Range");
+            if (r != null && r.equals("bytes=0-262143")) {
+                x.getResponseHeaders().set("Content-Range", "bytes 0-262143/" + expData.length);
+                x.sendResponseHeaders(206, 262144);
+                try (OutputStream o = x.getResponseBody()) { o.write(expData, 0, 262144); }
+            } else {
+                byte[] body = "{\"ok\":false,\"code\":\"sig_expired\",\"error\":\"下载链接已过期\"}".getBytes("UTF-8");
+                x.getResponseHeaders().set("Content-Type", "application/json");
+                x.sendResponseHeaders(403, body.length);
+                try (OutputStream o = x.getResponseBody()) { o.write(body); }
+            }
+        });
+        expSrv.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
+        expSrv.start();
+        File expOut = new File(dir, "exp.apk"); Dl.clear(expOut);
+        boolean gotHttpErr = false;
+        try {
+            Dl.fetchOnce(Arrays.asList("http://127.0.0.1:" + expSrv.getAddress().getPort() + "/api/store/download/9"), expOut, expData.length, null, null);
+        } catch (Dl.HttpError he) {
+            gotHttpErr = he.code == 403 && "sig_expired".equals(he.errCode) && "下载链接已过期".equals(he.getMessage());
+            check(gotHttpErr, "segmented 403 surfaces HttpError(403, sig_expired): code=" + he.code + " errCode=" + he.errCode + " msg=" + he.getMessage());
+        } catch (Throwable other) {
+            check(false, "segmented 403 should throw HttpError, got " + other);
+        }
+        if (!gotHttpErr) check(false, "segmented 403 did not throw expected HttpError");
+        expSrv.stop(0);
         System.out.println(fails == 0 ? "DlSlowTest: ok" : "DlSlowTest: " + fails + " failed");
         System.exit(fails == 0 ? 0 : 1);
     }

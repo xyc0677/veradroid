@@ -99,7 +99,7 @@ pack() { # flavour product-dir
     find "$ST" -type d -exec chmod 755 {} +
     find "$ST" -type f -perm /111 -exec chmod 755 {} +
     find "$ST" -type f ! -perm /111 -exec chmod 644 {} +
-    for f in "$A"/cacerts-extra/*.[0-9]; do b=${f##*/}; [ -e "$ST/system/etc/security/cacerts/$b" ] || cp "$f" "$ST/system/etc/security/cacerts/$b"; done
+    for f in "$A"/cacerts-extra/*.[0-9]; do [ -f "$f" ] || continue; b=${f##*/}; [ -e "$ST/system/etc/security/cacerts/$b" ] || cp "$f" "$ST/system/etc/security/cacerts/$b"; done
     chmod 644 "$ST"/system/etc/security/cacerts/*
     # the security-relevant files keep their usual modes
     [ "$(stat -c %a "$ST/init.kindle.rc")" = 644 ] || { echo "init.kindle.rc is not 644" >&2; exit 1; }
@@ -157,7 +157,7 @@ case "${1:-all}" in
     k49)
         [ -d "$O32" ] || nice -n 15 cp -a --reflink=auto "$O64" "$O32"
         [ -n "${VD_NOSYNC:-}" ] || sync_src
-        trap 'sed -i "s/^TARGET_USES_64_BIT_BINDER := false # k49$/TARGET_USES_64_BIT_BINDER := true/" "$BC"' EXIT
+        trap 'sed -i "s/^TARGET_USES_64_BIT_BINDER := false # k49$/TARGET_USES_64_BIT_BINDER := true/" "$BC"' INT TERM EXIT
         sed -i 's/^TARGET_USES_64_BIT_BINDER := true$/TARGET_USES_64_BIT_BINDER := false # k49/' "$BC"
         grep -q 'BINDER := false # k49' "$BC"
         build "$O32" "$A/log/build-big-k49.log"; pack k49 "$O32/target/product/kindle" ;;

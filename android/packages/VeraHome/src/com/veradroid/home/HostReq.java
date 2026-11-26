@@ -45,8 +45,8 @@ final class HostReq {
         } catch (Exception e) { tmp.delete(); return null; }
         HostLink.cmd("wa " + id);
         File out = new File(OUT + id + ".out");
-        long until = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < until) {
+        long until = android.os.SystemClock.uptimeMillis() + timeoutMs;
+        while (android.os.SystemClock.uptimeMillis() < until) {
             if (out.isFile()) {
                 try { return read(out, 16 << 20); } catch (Exception e) { return null; }
             }

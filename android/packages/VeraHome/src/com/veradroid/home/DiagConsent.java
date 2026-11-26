@@ -37,10 +37,9 @@ final class DiagConsent {
         return "always".equals(v) ? "总是上传" : "never".equals(v) ? "不上传" : "每次先问（还没选）";
     }
 
-    /** 在崩溃处理里调：只做最少的事。 */
+    /** 在崩溃处理里调：只做最少的事（同步写盘标记，交由重启后的 askIfPending 处理，避免异步线程被 killProcess 截断）。 */
     static void onCrash(Context c) {
         try {
-            if ("always".equals(choice(c))) { HostLink.cmd("diag-upload"); return; }
             if ("never".equals(choice(c))) return;
             priv(c).edit().putBoolean("crash_pending", true).commit();
         } catch (Throwable ignored) { }

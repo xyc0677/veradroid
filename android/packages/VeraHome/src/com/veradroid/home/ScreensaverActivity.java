@@ -53,14 +53,16 @@ public class ScreensaverActivity extends Activity {
     private Blocks.Pager pager;
     private int pageNo;
     private String mode, file;   // 当前选择
-    private int gen;             // 换页 / 重读时作废还在解码的上一批
+    private volatile int gen;    // 换页 / 重读时作废还在解码的上一批
 
     static final class Item {
         final String key;   // "kindle" | "sd/名字" | "vd/名字"
         final File f;       // 缩略图来源（Kindle 自带的预览可能没有）
         final String label;
+        final boolean cached;   // 已命中 .vd-cache 的 USB 图，无需再 check/convert
         volatile String why;   // 用不了的原因（null = 能用 / 还没查）
-        Item(String key, File f, String label) { this.key = key; this.f = f; this.label = label; }
+        Item(String key, File f, String label) { this(key, f, label, false); }
+        Item(String key, File f, String label, boolean cached) { this.key = key; this.f = f; this.label = label; this.cached = cached; }
     }
     private volatile String urgent;   // 刚选中的那张：转换线程先转它
     private int nSd, nVd;
@@ -125,14 +127,22 @@ public class ScreensaverActivity extends Activity {
         }
         readChoice();
         // 宿主把 veradroid/screensaver 的图拷出来（最多等 4 秒；宿主太旧就只显示 Android 里的图）
-        new File(HostLink.CTL + "saver.listed").delete();
+        final File lf = new File(HostLink.CTL + "saver.listed");
+        final boolean hadOld = lf.isFile();
+        final long oldMod = hadOld ? lf.lastModified() : 0L;
+        final boolean deletedOld = !hadOld || lf.delete();
         HostLink.cmd("saver list");
         handler.postDelayed(new Runnable() {
             int n = 0;
             boolean shown;
+            boolean sawGone = deletedOld;
             @Override public void run() {
                 if (isFinishing()) return;
-                if (new File(HostLink.CTL + "saver.listed").exists()) { load(); return; }
+                if (!lf.isFile()) {
+                    sawGone = true;
+                } else if (sawGone || lf.lastModified() != oldMod) {
+                    load(); return;
+                }
                 // 4 秒还没拷完（图多、图大）：先显示 Android 里的图，拷完再整页重读一次（最多再等 40 秒）
                 if (++n >= 20 && !shown) { shown = true; load(); }
                 if (n < 220) handler.postDelayed(this, 200);
@@ -140,7 +150,20 @@ public class ScreensaverActivity extends Activity {
         }, 200);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        StatusBarService.suppress(this, true);
+        StatusBarService.refresh(this);
+    }
+
+    @Override protected void onStop() {
+        StatusBarService.suppress(this, false);
+        StatusBarService.refresh(this);
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
+        StatusBarService.suppress(this, false);
         handler.removeCallbacksAndMessages(null);
         HostLink.cmd("saver done");
         super.onDestroy();
@@ -162,18 +185,38 @@ public class ScreensaverActivity extends Activity {
     }
 
     private void load() {
+        ++gen;
         items.clear();
         File kp = new File(VD_DIR, ".kindle-preview.png");
         items.add(new Item("kindle", kp.isFile() ? kp : null, "Kindle 自带"));
         nSd = 0; nVd = 0;
         for (File f : images(SD_DIR)) { items.add(new Item("sd/" + f.getName(), f, f.getName())); nSd++; }
-        for (File f : images(VD_DIR)) { items.add(new Item("vd/" + f.getName(), f, f.getName() + "（USB）")); nVd++; }
-        // 宿主没拷过来的（太大）：也列出来，说为什么用不了
+        java.util.Set<String> seenVd = new java.util.HashSet<String>();
+        for (File f : images(VD_DIR)) {
+            seenVd.add(f.getName());
+            items.add(new Item("vd/" + f.getName(), f, f.getName() + "（USB）")); nVd++;
+        }
+        // 已命中转换缓存的 USB 图：宿主不向 tmpfs 重复拷贝原图，直接复用 .vd-cache 缩略图
+        for (String[] l : tsv(new File(VD_DIR, ".cached"))) {
+            if (l.length < 1 || !isImage(l[0]) || seenVd.contains(l[0])) continue;
+            File cf = SaverImage.cacheFile("vd/" + l[0]);
+            if (cf == null || !cf.isFile()) continue;
+            seenVd.add(l[0]);
+            items.add(new Item("vd/" + l[0], cf, l[0] + "（USB）", true)); nVd++;
+        }
+        // 宿主没拷过来的：按原因区分（超张数 / 超总容量 / 单张过大）
         for (String[] l : tsv(new File(VD_DIR, ".skipped"))) {
             if (l.length < 2 || !isImage(l[0])) continue;
             Item it = new Item("vd/" + l[0], null, l[0] + "（USB）");
-            long mb = 0; try { mb = Long.parseLong(l[1]) >> 20; } catch (NumberFormatException e) { }
-            it.why = "太大（" + mb + " MB）：请缩小到 32 MB 以内再放进 veradroid/screensaver";
+            String reason = l.length >= 3 ? l[2] : "size";
+            if ("count".equals(reason)) {
+                it.why = "超出 60 张上限：当前最多显示 60 张 USB 屏保图";
+            } else if ("total".equals(reason)) {
+                it.why = "超出预览总容量上限：请分批放入或先打开本页生成缓存后再加新图";
+            } else {
+                long mb = 0; try { mb = Long.parseLong(l[1]) >> 20; } catch (NumberFormatException e) { }
+                it.why = "太大（" + mb + " MB）：请缩小到 32 MB 以内再放进 veradroid/screensaver";
+            }
             items.add(it); nVd++;
         }
         elsewhere = elsewhere();
@@ -219,8 +262,8 @@ public class ScreensaverActivity extends Activity {
         final boolean vdListed = new File(HostLink.CTL + "saver.listed").exists();
         new Thread(new Runnable() {
             @Override public void run() {
-                for (Item it : its) if (it.f != null && it.why == null && !it.key.equals("kindle")) it.why = SaverImage.check(it.f);
-                handler.post(new Runnable() { @Override public void run() { if (!isFinishing() && myPrep == prepGen) { showFound(); renderPage(); } } });
+                for (Item it : its) if (it.f != null && !it.cached && it.why == null && !it.key.equals("kindle")) it.why = SaverImage.check(it.f);
+                handler.post(new Runnable() { @Override public void run() { if (!isFinishing() && myPrep == prepGen) { showFound(); showMode(); renderPage(); } } });
                 if (myPrep != prepGen) return;
                 java.util.Set<String> keys = new java.util.HashSet<String>();
                 for (Item it : its) keys.add(it.key);
@@ -238,14 +281,14 @@ public class ScreensaverActivity extends Activity {
     }
 
     private void convertOne(final Item it, int[] p) {
-        if (it.f == null || it.why != null || it.key.equals("kindle")) return;
+        if (it.f == null || it.cached || it.why != null || it.key.equals("kindle")) return;
         final String why = SaverImage.convert(it.key, it.f, p[0], p[1]);
         if (why == null) return;
         it.why = why;
         handler.post(new Runnable() {
             @Override public void run() {
                 if (isFinishing()) return;
-                showFound();
+                showFound(); showMode();
                 int idx = items.indexOf(it);
                 if (idx >= pageNo * PER && idx < (pageNo + 1) * PER) renderPage();
             }
@@ -274,7 +317,11 @@ public class ScreensaverActivity extends Activity {
     private void showMode() {
         String s;
         if ("one".equals(mode) && file != null) s = "当前：只用一张（" + file.substring(file.indexOf('/') + 1) + "）";
-        else if ("rotate".equals(mode)) s = "当前：轮换全部图片（共 " + (items.size() - 1) + " 张，没有图片时用 Kindle 自带的）";
+        else if ("rotate".equals(mode)) {
+            int usable = 0;
+            for (Item it : items) if (!"kindle".equals(it.key) && it.why == null) usable++;
+            s = "当前：轮换全部图片（共 " + usable + " 张，没有图片时用 Kindle 自带的）";
+        }
         else s = "当前：Kindle 自带的屏保";
         modeText.setText(s);
     }
@@ -320,10 +367,12 @@ public class ScreensaverActivity extends Activity {
         if (pager != null) pager.set(pageNo + 1, pages);
         final int cw = Math.max(dp(80), (getResources().getDisplayMetrics().widthPixels - dp(32)) / COLS - dp(12));
         final int ch = cw * 4 / 3;
+        final File[] files = new File[to - from];
+        for (int i = from; i < to; i++) files[i - from] = items.get(i).f;
         new Thread(new Runnable() {
             @Override public void run() {
-                final Bitmap[] bm = new Bitmap[to - from];
-                for (int i = from; i < to && my == gen; i++) bm[i - from] = thumb(items.get(i).f, cw, ch);
+                final Bitmap[] bm = new Bitmap[files.length];
+                for (int i = 0; i < files.length && my == gen; i++) bm[i] = thumb(files[i], cw, ch);
                 handler.post(new Runnable() { @Override public void run() { if (my == gen && !isFinishing()) fill(from, to, bm, cw, ch); } });
             }
         }, "saver-thumbs").start();
@@ -421,7 +470,7 @@ public class ScreensaverActivity extends Activity {
             @Override public void run() {
                 final List<File> all = Theme.findImages();
                 final List<File> imgs = new ArrayList<File>();
-                for (File f : all) if (!f.getParent().equals(SD_DIR) && isImage(f.getName())) imgs.add(f);
+                for (File f : all) if (!SD_DIR.equals(f.getParent()) && isImage(f.getName())) imgs.add(f);
                 handler.post(new Runnable() {
                     @Override public void run() {
                         if (isFinishing()) return;
@@ -458,17 +507,28 @@ public class ScreensaverActivity extends Activity {
                     dir.mkdirs();
                     nm = src.getName().replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
                     File dst = new File(dir, nm);
-                    InputStream in = new FileInputStream(src);
-                    OutputStream out = new FileOutputStream(dst);
+                    File tmp = new File(dir, "." + nm + ".tmp");
                     try {
-                        byte[] buf = new byte[65536];
-                        int n;
-                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                    } finally { in.close(); out.close(); }
-                    dst.setReadable(true, false);
-                    int[] pn = SaverImage.panel(ScreensaverActivity.this);
-                    String why = SaverImage.convert("sd/" + nm, dst, pn[0], pn[1]);
-                    if (why != null) { dst.delete(); err = why; }
+                        InputStream in = new FileInputStream(src);
+                        try {
+                            OutputStream out = new FileOutputStream(tmp);
+                            try {
+                                byte[] buf = new byte[65536];
+                                int n;
+                                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                            } finally { out.close(); }
+                        } finally { in.close(); }
+                        tmp.setReadable(true, false);
+                        int[] pn = SaverImage.panel(ScreensaverActivity.this);
+                        String why = SaverImage.convert("sd/" + nm, tmp, pn[0], pn[1]);
+                        if (why != null) { err = why; }
+                        else {
+                            if (!tmp.renameTo(dst)) throw new java.io.IOException("rename failed");
+                            dst.setReadable(true, false);
+                        }
+                    } finally {
+                        if (tmp.exists()) tmp.delete();
+                    }
                 } catch (Exception e) { err = String.valueOf(e.getMessage()); }
                 final String e = err, name = nm;
                 handler.post(new Runnable() {

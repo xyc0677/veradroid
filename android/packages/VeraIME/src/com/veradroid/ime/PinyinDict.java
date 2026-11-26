@@ -28,16 +28,32 @@ final class PinyinDict {
     /** word id of "start of sentence" (context only) */
     final int start;
 
+    private static void checkRange(int off, long len, int cap, String what) {
+        if (off < 64 || len < 0 || off + len > cap) throw new IllegalArgumentException("bad " + what + " range");
+    }
+
     PinyinDict(ByteBuffer buf) {
         b = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-        if (b.capacity() < 64 || b.getInt(0) != 0x31595056 || b.getInt(4) != 1) throw new IllegalArgumentException("not a VPY1 dictionary");
+        int cap = b.capacity();
+        if (cap < 64 || b.getInt(0) != 0x31595056 || b.getInt(4) != 1) throw new IllegalArgumentException("not a VPY1 dictionary");
         nSyl = b.getInt(8); nNodes = b.getInt(12); nWords = b.getInt(16); maxLen = b.getInt(20);
         nBiA = b.getInt(24); nBi = b.getInt(28);
+        if (nSyl <= 0 || nSyl > 65535 || nNodes <= 0 || nNodes > (cap >>> 1)
+                || nWords < 0 || maxLen <= 0 || maxLen > 64 || nBiA < 0 || nBi < 0) {
+            throw new IllegalArgumentException("invalid VPY1 header counts");
+        }
         int oSyl = b.getInt(32);
         int oNodeSyl = b.getInt(36), oNodeChild = b.getInt(40), oNodeWord = b.getInt(44);
         int oLen = b.getInt(48);
         oWords = b.getInt(52); oBiA = b.getInt(56); oBiOff = oBiA + 4 * nBiA; oBi = b.getInt(60);
-        if (oBi + 4L * nBi > b.capacity()) throw new IllegalArgumentException("dictionary truncated");
+        checkRange(oSyl, 8L * nSyl, cap, "syl");
+        checkRange(oNodeSyl, 2L * nNodes, cap, "nodeSyl");
+        checkRange(oNodeChild, 4L * (nNodes + 1L), cap, "nodeChild");
+        checkRange(oNodeWord, 4L * (nNodes + 1L), cap, "nodeWord");
+        checkRange(oLen, 8L * (maxLen + 2L), cap, "len");
+        checkRange(oWords, 0L, cap, "words");
+        checkRange(oBiA, 4L * nBiA + 4L * (nBiA + 1L), cap, "biA");
+        checkRange(oBi, 4L * nBi, cap, "bi");
         nodeSyl = new char[nNodes];
         nodeChild = new int[nNodes + 1];
         nodeWord = new int[nNodes + 1];
@@ -45,6 +61,9 @@ final class PinyinDict {
         v.position(oNodeSyl); v.slice().order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().get(nodeSyl);
         v.position(oNodeChild); v.slice().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(nodeChild);
         v.position(oNodeWord); v.slice().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(nodeWord);
+        if (nodeChild[0] < 0 || nodeChild[nNodes] > nNodes || nodeWord[0] < 0 || nodeWord[nNodes] > nWords) {
+            throw new IllegalArgumentException("invalid VPY1 trie bounds");
+        }
         syl = new char[nSyl][];
         for (int i = 0; i < nSyl; i++) {
             int n = 0;
@@ -55,6 +74,14 @@ final class PinyinDict {
         lenFirst = new int[maxLen + 2];
         lenOff = new int[maxLen + 2];
         for (int i = 0; i < maxLen + 2; i++) { lenFirst[i] = b.getInt(oLen + 8 * i); lenOff[i] = b.getInt(oLen + 8 * i + 4); }
+        if (lenFirst[1] < 0 || lenFirst[maxLen + 1] > nWords) throw new IllegalArgumentException("invalid VPY1 len table");
+        for (int l = 1; l <= maxLen; l++) {
+            if (lenFirst[l] < 0 || lenFirst[l] > lenFirst[l + 1] || lenOff[l] < 0) {
+                throw new IllegalArgumentException("invalid VPY1 len entry");
+            }
+            long end = oWords + (long) lenOff[l] + (long) (lenFirst[l + 1] - lenFirst[l]) * (2L * l + 3L);
+            if (end > cap) throw new IllegalArgumentException("VPY1 word table truncated");
+        }
         start = nWords;
     }
 
@@ -174,7 +201,9 @@ final class PinyinDict {
         if (id < 0 || id >= nWords) return id;
         int len = wordLen(id), o = rec(id, len), tail = b.get(o + 2 * len + 2) & 0xff;
         if (tail == 0 || tail >= len) return id;
-        int[] p = path(nodeOf(id)), syls = new int[tail];
+        int[] p = path(nodeOf(id));
+        if (p.length < len) return id;
+        int[] syls = new int[tail];
         char[] c = new char[tail];
         for (int i = 0; i < tail; i++) { syls[i] = p[len - tail + i]; c[i] = b.getChar(o + 2 * (len - tail + i)); }
         return find(syls, new String(c));
@@ -192,11 +221,20 @@ final class PinyinDict {
 
     /** syllable ids of a node, root first */
     int[] path(int node) {
+        if (node <= 0 || node >= nNodes) return new int[0];
+        int limit = Math.min(maxLen, nNodes);
+        int[] rev = new int[limit];
         int d = 0;
-        for (int n = node; n != 0; n = parent(n)) d++;
-        int[] p = new int[d];
-        for (int n = node; n != 0; n = parent(n)) p[--d] = nodeSyl(n);
-        return p;
+        for (int n = node; n > 0; ) {
+            if (d >= limit) return new int[0];
+            rev[d++] = nodeSyl(n);
+            int p = parent(n);
+            if (p < 0 || p >= n) return new int[0];
+            n = p;
+        }
+        int[] res = new int[d];
+        for (int i = 0; i < d; i++) res[i] = rev[d - 1 - i];
+        return res;
     }
 
     /** id of the word with these syllables and this text, or -1 */
