@@ -2,7 +2,7 @@
 
 本文列出 VeraDroid 的安装包和本仓库里带有、链接或分发的第三方组件，以及它们的许可和源码获取方式。
 VeraDroid 自己的代码是 GPL-3.0-or-later（见 `LICENSE`）。
-本仓库只含源码：预编译二进制、APK、字体和系统镜像不入库，下表“在哪里”一栏指安装包里的位置（安装包版本：PW6 0.92 / k49 1.00 / legacy 0.8.5）。
+本仓库只含源码：预编译二进制、APK、字体和系统镜像不入库，下表“在哪里”一栏指安装包里的位置（安装包版本：PW6 1.48 / k49 1.56 / legacy 0.8.57）。
 
 标注“未确认”的条目是维护者还没核实的信息，不要当作结论。发现错误请提 issue。
 
@@ -17,7 +17,7 @@ VeraDroid 自己的代码是 GPL-3.0-or-later（见 `LICENSE`）。
 | AOSP | android-7.1.1_r61 | 主要是 Apache-2.0，另有多种许可 | `rootfs.tar.gz`、`libandroid_runtime.so` | 编译产物（带本项目补丁） |
 | Mozilla 根证书 | 构建时的版本 | MPL-2.0 | 补进 rootfs 的 `/system/etc/security/cacerts` | 数据文件 |
 | 霞鹜文楷 LXGW WenKai | 1.510 | SIL OFL 1.1 | `fonts/LXGWWenKai-Regular.ttf`（构建时从上游下载） | 字体文件，未修改 |
-| pinyin-data、phrase-pinyin-data、jieba 词频 | 构建时的版本 | MIT | `android/packages/VeraIME/assets/pinyin.tsv` | 提取后的数据 |
+| libime / fcitx5 拼音词库与语言模型 | dict-20260907 / lm_sc.arpa-20260629 | LGPL-2.1-or-later | `VeraIME.apk` 内 `assets/pinyin.dat`（由 `tools/ime/gen_pinyin_dict.py` 生成） | 转换后的二进制词库 |
 | Dropbear SSH | 2026.92（KOReader 构建） | MIT 式（含少量其他宽松许可） | 单独发布的 SSH 调试包 | 预编译二进制 |
 | e2fsprogs（e2fsck、resize2fs） | 1.47.1 | GPL-2.0-only（库部分 LGPL-2.1 / BSD / MIT） | `bin/e2fsck`、`bin/resize2fs`（调整系统镜像大小） | 官方源码 tarball 的静态编译，未修改；构建脚本 `tools/cross/build-e2fs.sh` |
 | Linux binder 驱动及其头文件 | AOSP `kernel/common` `deprecated/android-3.0`；NXP `rel_imx_3.0.35_4.1.0_ga_caf` | GPL-2.0-only | 老机型的外挂内核模块（由 `tools/kmod/` 构建，未入库） | 内核模块 |
@@ -83,15 +83,15 @@ glibc 源码可从 Ubuntu 的源码包获取（`apt-get source glibc`，对应�
 - 上游：https://github.com/lxgw/LxgwWenKai ，字体内名称表写明版本 1.510（2025-01-16）。它基于 Klee One（同为 OFL 1.1）。
 - 许可文本：`fonts/OFL.txt`（安装包里在 `fonts/OFL.txt`）。字体未修改，按 OFL 要求和许可文本一起分发；本仓库不带字体文件本身，构建时从上游下载。
 
-### VeraIME 拼音数据（MIT）
+### VeraIME 拼音数据（LGPL-2.1-or-later）
 
-`android/packages/VeraIME/assets/pinyin.tsv` 由 `tools/gen_dict.py` 从以下 MIT 项目提取字、词、拼音和词频生成，说明见 `assets/NOTICE-pinyin.txt`：
+`VeraIME.apk` 内的词库 `assets/pinyin.dat` 由 `tools/ime/gen_pinyin_dict.py` 从以下数据转换生成（说明见 `android/packages/VeraIME/assets/NOTICE-pinyin.txt`）：
 
-- https://github.com/mozillazg/pinyin-data
-- https://github.com/mozillazg/phrase-pinyin-data
-- https://github.com/fxsjy/jieba
+- libime / fcitx5 拼音词库 `dict-20260907.tar.zst`（`dict_sc.txt`）：https://download.fcitx-im.org/data/dict-20260907.tar.zst （SHA-256 `fb75a179065e690dfc4559ce1807cbaf4fbe4f0111a5005615be9f435e6b9d76`）
+- libime / fcitx5 语言模型 `lm_sc.arpa-20260629.tar.zst`（`lm_sc.arpa`，源自 sunpinyin / open-gram）：https://download.fcitx-im.org/data/lm_sc.arpa-20260629.tar.zst （SHA-256 `06808333b9173e5374cf2cb5afc12d08f5625bf9abb536489cac376fc05f2e7f`）
+- 上游许可说明：https://github.com/fcitx/libime （`REUSE.toml` 及 `LICENSES/LGPL-2.1-or-later.txt`，Copyright 2002-2005 Yuking, 2014-2026 CSSlayer 及 libime / sunpinyin / open-gram 贡献者）
 
-MIT 许可要求保留版权声明：发布 APK 时应把这三个项目的 LICENSE 文本放进 `NOTICE-pinyin.txt` 或单独的文件（目前只列了项目地址，待补全）。
+`pinyin.dat` 按 LGPL-2.1-or-later 分发；可通过 `python3 tools/ime/gen_pinyin_dict.py` 重新生成或替换为任意兼容格式文件。
 
 ### Dropbear（MIT 式）
 

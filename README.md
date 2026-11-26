@@ -7,7 +7,7 @@
 - 作者：ajie
 - 许可：GPL-3.0-or-later（见 [`LICENSE`](LICENSE)、[`THIRD_PARTY.md`](THIRD_PARTY.md)）
 
-> 本项目与 Amazon 没有任何关联，也未获得其认可或赞助。“Kindle”是 Amazon.com, Inc. 或其关联公司的商标。
+> 本项目为独立开源项目，与 Amazon 没有任何关联，也未获得其认可或赞助；与 Véra 越狱项目及其作者亦无关联。“Kindle”是 Amazon.com, Inc. 或其关联公司的商标。
 > 仓库里没有 Amazon 的固件、内核镜像、内核模块或从 Amazon 软件中提取的任何文件。越狱、安装第三方软件有风险，请自行判断。
 
 ## 支持的机型
@@ -146,4 +146,4 @@ not modified, so you can always return to the stock Kindle UI.
 - Build: see "构建" above (Docker image `tools/build/Dockerfile.aosp`, `tools/build/build_rootfs.sh`, ARM cross-compilation of
   the host programs). Install instructions: <https://veradroid.wenjin.jp>.
 - License: GPL-3.0-or-later. Third-party components: `THIRD_PARTY.md`. Author: ajie.
-- Not affiliated with, endorsed or sponsored by Amazon. "Kindle" is a trademark of Amazon.com, Inc. or its affiliates.
+- Not affiliated with, endorsed or sponsored by Amazon, nor by the Véra jailbreak project or its authors. "Kindle" is a trademark of Amazon.com, Inc. or its affiliates.

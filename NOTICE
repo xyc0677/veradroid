@@ -9,9 +9,10 @@ licence decision, see THIRD_PARTY.md. This repository contains source code
 only; prebuilt binaries, APKs, fonts and system images are not included.
 
 VeraDroid is an independent project. It is not affiliated with, endorsed by or
-sponsored by Amazon. "Kindle" is a trademark of Amazon.com, Inc. or its
-affiliates. This repository contains no Amazon firmware, kernel image, kernel
-module or other file extracted from Amazon software.
+sponsored by Amazon, nor by the Véra jailbreak project or its authors. "Kindle"
+is a trademark of Amazon.com, Inc. or its affiliates. This repository contains
+no Amazon firmware, kernel image, kernel module or other file extracted from
+Amazon software.
 
 Third-party components that are bundled, linked or built from, with their
 licences, versions and the place to get the corresponding source:
@@ -32,8 +33,10 @@ licences, versions and the place to get the corresponding source:
       LGPL-2.1-or-later / GPL-3.0-or-later with the GCC runtime library exception
   LXGW WenKai 1.510 (fonts/LXGWWenKai-Regular.ttf in the packages, see fonts/OFL.txt)
       SIL OFL 1.1        https://github.com/lxgw/LxgwWenKai
-  pinyin-data, phrase-pinyin-data, jieba (data extracted into VeraIME's pinyin.tsv)
-      MIT                see android/packages/VeraIME/assets/NOTICE-pinyin.txt
+  libime / fcitx5 pinyin dictionary (dict-20260907) and language model (lm_sc.arpa-20260629,
+  derived from sunpinyin / open-gram), converted into VeraIME's assets/pinyin.dat
+      LGPL-2.1-or-later  https://github.com/fcitx/libime   (see android/packages/VeraIME/assets/NOTICE-pinyin.txt;
+                         regenerate with tools/ime/gen_pinyin_dict.py)
   Chromium WebView 119.0.6045.194 (optional web engine, downloaded on demand, not in the packages;
   com.embrith.webview, built from source without Google Play services by community user Embrith余烬)
       BSD-3-Clause and the third-party licences listed in its webview_licenses.notice
