@@ -8,20 +8,20 @@
 
 ## 一览
 
-| 组件 | 版本 | 许可 | 在哪里 | 形式 |
-|---|---|---|---|---|
-| FBInk | v1.25.0-543-g886f25f + 本地补丁 | GPL-3.0-or-later | `bin/fbink`；静态链接进 `veradroid-epd` | 静态二进制 |
-| slirp4netns | v1.3.7 | GPL-2.0-or-later | `bin/slirp4netns`（来源见 `third_party/README.md`） | 官方静态二进制，未修改 |
-| GNU C 库（glibc） | 2.23（Ubuntu 16.04）/ 2.19（Ubuntu 14.04） | LGPL-2.1-or-later | 静态链接进全部自编宿主程序 | 静态链接 |
-| GCC 运行库（libgcc） | GCC 5.4 / 4.8 | GPL-3.0-or-later + GCC 运行库例外 | 同上 | 静态链接 |
-| AOSP | android-7.1.1_r61 | 主要是 Apache-2.0，另有多种许可 | `rootfs.tar.gz`、`libandroid_runtime.so` | 编译产物（带本项目补丁） |
-| Mozilla 根证书 | 构建时的版本 | MPL-2.0 | 补进 rootfs 的 `/system/etc/security/cacerts` | 数据文件 |
-| 霞鹜文楷 LXGW WenKai | 1.510 | SIL OFL 1.1 | `fonts/LXGWWenKai-Regular.ttf`（构建时从上游下载） | 字体文件，未修改 |
-| libime / fcitx5 拼音词库与语言模型 | dict-20260907 / lm_sc.arpa-20260629 | LGPL-2.1-or-later | `VeraIME.apk` 内 `assets/pinyin.dat`（由 `tools/ime/gen_pinyin_dict.py` 生成） | 转换后的二进制词库 |
-| Dropbear SSH | 2026.92（KOReader 构建） | MIT 式（含少量其他宽松许可） | 单独发布的 SSH 调试包 | 预编译二进制 |
-| e2fsprogs（e2fsck、resize2fs） | 1.47.1 | GPL-2.0-only（库部分 LGPL-2.1 / BSD / MIT） | `bin/e2fsck`、`bin/resize2fs`（调整系统镜像大小） | 官方源码 tarball 的静态编译，未修改；构建脚本 `tools/cross/build-e2fs.sh` |
-| Linux 内核外挂模块源码及头文件（`binder`、`tun`、`uinput`、`zram` / `zsmalloc`） | Linux 主线（kernel.org）；AOSP `kernel/common` `deprecated/android-3.0`；NXP `rel_imx_3.0.35_4.1.0_ga_caf`；Amazon 公开 GPL 内核源码包 | GPL-2.0-only | 老机型的外挂内核模块（由 `tools/kmod/` 构建，未入库） | 内核模块 |
-| Chromium WebView（可选的新网页内核，`com.embrith.webview`） | 119.0.6045.194 | BSD-3-Clause + 第三方组件各自的许可 | 不在安装包里：用户在“显示与刷新”打开时单独下载 `webview-alt-119.0.6045.194.tar.gz`，装到 `veradroid/webview-alt/` | 社区贡献者从源码编译（去掉 Google Play 服务客户端库），贡献者签名，未修改 |
+| 组件 | 原作者 / 维护团队 | 版本 | 许可 | 在哪里 | 形式 |
+|---|---|---|---|---|---|
+| FBInk | [@NiLuJe](https://github.com/NiLuJe) | v1.25.0-543-g886f25f + 本地补丁 | GPL-3.0-or-later | `bin/fbink`；静态链接进 `veradroid-epd` | 静态二进制 |
+| slirp4netns | [@AkihiroSuda](https://github.com/AkihiroSuda) / [@rootless-containers](https://github.com/rootless-containers) | v1.3.7 | GPL-2.0-or-later | `bin/slirp4netns`（来源见 `third_party/README.md`） | 官方静态二进制，未修改 |
+| GNU C 库（glibc） | GNU Project（FSF） | 2.23（Ubuntu 16.04）/ 2.19（Ubuntu 14.04） | LGPL-2.1-or-later | 静态链接进全部自编宿主程序 | 静态链接 |
+| GCC 运行库（libgcc） | GNU Project（FSF） | GCC 5.4 / 4.8 | GPL-3.0-or-later + GCC 运行库例外 | 同上 | 静态链接 |
+| AOSP | Android Open Source Project | android-7.1.1_r61 | 主要是 Apache-2.0，另有多种许可 | `rootfs.tar.gz`、`libandroid_runtime.so` | 编译产物（带本项目补丁） |
+| Mozilla 根证书包（caextract） | Mozilla / [@bagder](https://github.com/bagder)（curl 项目整理） | 构建时的版本 | MPL-2.0 | 补进 rootfs 的 `/system/etc/security/cacerts` | 数据文件 |
+| 霞鹜文楷 LXGW WenKai | [@lxgw](https://github.com/lxgw)（基于 [@fontworks-fonts](https://github.com/fontworks-fonts) Klee One） | 1.510 | SIL OFL 1.1 | `fonts/LXGWWenKai-Regular.ttf`（构建时从上游下载） | 字体文件，未修改 |
+| libime / fcitx5 拼音词库与语言模型 | [@wengxt](https://github.com/wengxt)（CSSlayer）/ [@fcitx](https://github.com/fcitx) / [@sunpinyin](https://github.com/sunpinyin) | dict-20260907 / lm_sc.arpa-20260629 | LGPL-2.1-or-later | `VeraIME.apk` 内 `assets/pinyin.dat`（由 `tools/ime/gen_pinyin_dict.py` 生成） | 转换后的二进制词库 |
+| Dropbear SSH | [@mkj](https://github.com/mkj)（Matt Johnston）/ [@koreader](https://github.com/koreader) 构建 | 2026.92（KOReader 构建） | MIT 式（含少量其他宽松许可） | 单独发布的 SSH 调试包 | 预编译二进制 |
+| e2fsprogs（e2fsck、resize2fs） | [@tytso](https://github.com/tytso)（Theodore Ts'o） | 1.47.1 | GPL-2.0-only（库部分 LGPL-2.1 / BSD / MIT） | `bin/e2fsck`、`bin/resize2fs`（调整系统镜像大小） | 官方源码 tarball 的静态编译，未修改；构建脚本 `tools/cross/build-e2fs.sh` |
+| Linux 内核外挂模块源码及头文件（`binder`、`tun`、`uinput`、`zram` / `zsmalloc`） | Linux Kernel 贡献者 / AOSP / NXP | Linux 主线（kernel.org）；AOSP `kernel/common` `deprecated/android-3.0`；NXP `rel_imx_3.0.35_4.1.0_ga_caf`；Amazon 公开 GPL 内核源码包 | GPL-2.0-only | 老机型的外挂内核模块（由 `tools/kmod/` 构建，未入库） | 内核模块 |
+| Chromium WebView（可选的新网页内核，`com.embrith.webview`） | Chromium Project（社区用户 Embrith余烬 编译） | 119.0.6045.194 | BSD-3-Clause + 第三方组件各自的许可 | 不在安装包里：用户在“显示与刷新”打开时单独下载 `webview-alt-119.0.6045.194.tar.gz`，装到 `veradroid/webview-alt/` | 社区贡献者从源码编译（去掉 Google Play 服务客户端库），贡献者签名，未修改 |
 
 不随安装包分发、只在开发时使用的：eink-emulator（QEMU，测试用）、Docker 构建镜像里的 Ubuntu 软件包（以各自的许可为准）。
 
@@ -129,16 +129,16 @@ glibc 源码可从 Ubuntu 的源码包获取（`apt-get source glibc`，对应�
 
 以下项目或规范未将代码打包进 VeraDroid，但本项目的系统互操作接口、容器架构、墨水屏交互设计或开发测试流程参考了这些公开开源成果，特此完整标注来源：
 
-| 项目 / 规范 | 许可 / 性质 | 上游地址 | 本项目参考或互操作之处 |
-|---|---|---|---|
-| **openlipc** | MIT / 公开接口文档 | https://github.com/Arkq/openlipc | `tools/vdkaf/vdkaf.c` 声明的 3 个 `liblipc` 公开 C 函数原型（运行时动态链接设备自带库，不带固件文件） |
-| **KOReader** | AGPL-3.0-only | https://github.com/koreader/koreader | 墨水屏经典的左右边缘滑动调光/色温、四角长按与双指快捷手势交互范式、EPUB 目录回退思路，以及 `VeraHome` 书库调用外部 KOReader 打开书籍的 Intent 联动 |
-| **Waydroid / Anbox** | GPL-3.0 | https://github.com/waydroid/waydroid 、https://github.com/anbox/anbox | 在宿主 Linux 内核上利用 namespaces（`mnt`/`pid`/`net`/`uts`/`ipc`）、`cgroup freezer` 与 `binder` 运行完整 Android 根文件系统的开源容器架构路线 |
-| **EinkBro** | GPL-3.0 | https://github.com/plateaukao/einkbro | 墨水屏无惯性整页翻页滚动、高对比度黑白线框 UI、WebView 正文加粗与加深增强思路参考 |
-| **KUAL / MRPI / SH_Integration / KPM** | GPL / MIT / 社区公开规范 | https://www.mobileread.com/forums/forumdisplay.php?f=150 | Kindle 越狱生态通用的书库启动脚本注释头（`# Name:`、`# DontUseFBInk`）、KUAL 扩展 `menu.json` / `config.xml` 与 KPM 仓库 `manifest.v2.json` 接口格式（本项目不分发越狱程序） |
-| **eink-emulator & QEMU** | GPL-2.0 | https://github.com/katadelos/eink-emulator 、https://www.qemu.org/ | 仅在开发调试与回归测试阶段使用的墨水屏模拟器环境，不随安装包分发 |
-| **Open-Meteo** | AGPL-3.0（服务端）/ CC BY 4.0（数据） | https://github.com/open-meteo/open-meteo | `VeraHome` 桌面可选天气卡片按需请求的公开免密钥天气接口 |
-| **通用墨水屏 Android View 反射接口** | 公开 API 签名互操作 | 见 `android/eink-patches.py`、`android/overlay/.../android/eink/` | 为兼容第三方墨水屏阅读应用通过反射调用的 `View.EINK_*` 常量与 `EPDCDevice` 桩类，由本项目基于 `/dev/kfb/epd.fifo` 独立从零实现 |
+| 项目 / 规范 | 原作者 / 维护团队 | 许可 / 性质 | 上游地址 | 本项目参考或互操作之处 |
+|---|---|---|---|---|
+| **openlipc** | [@arkq](https://github.com/arkq)（Arkadiusz Bokowy） | MIT / 公开接口文档 | https://github.com/Arkq/openlipc | `tools/vdkaf/vdkaf.c` 声明的 3 个 `liblipc` 公开 C 函数原型（运行时动态链接设备自带库，不带固件文件） |
+| **KOReader** | [@koreader](https://github.com/koreader) 社区团队 | AGPL-3.0-only | https://github.com/koreader/koreader | 墨水屏经典的左右边缘滑动调光/色温、四角长按与双指快捷手势交互范式、EPUB 目录回退思路，以及 `VeraHome` 书库调用外部 KOReader 打开书籍的 Intent 联动 |
+| **Waydroid / Anbox** | [@waydroid](https://github.com/waydroid) / [@anbox](https://github.com/anbox) | GPL-3.0 | https://github.com/waydroid/waydroid 、https://github.com/anbox/anbox | 在宿主 Linux 内核上利用 namespaces（`mnt`/`pid`/`net`/`uts`/`ipc`）、`cgroup freezer` 与 `binder` 运行完整 Android 根文件系统的开源容器架构路线 |
+| **EinkBro** | [@plateaukao](https://github.com/plateaukao)（Daniel Kao） | GPL-3.0 | https://github.com/plateaukao/einkbro | 墨水屏无惯性整页翻页滚动、高对比度黑白线框 UI、WebView 正文加粗与加深增强思路参考 |
+| **KUAL / MRPI / SH_Integration / KPM** | [@NiLuJe](https://github.com/NiLuJe) / [@KindleModding](https://github.com/KindleModding) / [@hackerdude](https://github.com/hackerdude) 及 MobileRead 社区 | GPL / MIT / 社区公开规范 | https://github.com/KindleModding 、https://www.mobileread.com/forums/forumdisplay.php?f=150 | Kindle 越狱生态通用的书库启动脚本注释头（`# Name:`、`# DontUseFBInk`）、KUAL 扩展 `menu.json` / `config.xml` 与 KPM 仓库 `manifest.v2.json` 接口格式（本项目不分发越狱程序） |
+| **eink-emulator & QEMU** | [@katadelos](https://github.com/katadelos) / [@qemu](https://github.com/qemu) | GPL-2.0 | https://github.com/katadelos/eink-emulator 、https://www.qemu.org/ | 仅在开发调试与回归测试阶段使用的墨水屏模拟器环境，不随安装包分发 |
+| **Open-Meteo** | [@patrick-zippenfenig](https://github.com/patrick-zippenfenig) / [@open-meteo](https://github.com/open-meteo) | AGPL-3.0（服务端）/ CC BY 4.0（数据） | https://github.com/open-meteo/open-meteo | `VeraHome` 桌面可选天气卡片按需请求的公开免密钥天气接口 |
+| **通用墨水屏 Android View 反射接口** | 公开 API 签名互操作（本项目自研实现） | GPL-3.0-or-later | 见 `android/eink-patches.py`、`android/overlay/.../android/eink/` | 为兼容第三方墨水屏阅读应用通过反射调用的 `View.EINK_*` 常量与 `EPDCDevice` 桩类，由本项目基于 `/dev/kfb/epd.fifo` 独立从零实现 |
 
 ## 其他自有资源
 

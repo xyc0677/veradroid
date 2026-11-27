@@ -17,31 +17,31 @@ Amazon software.
 Third-party components that are bundled, linked or built from, with their
 licences, versions and the place to get the corresponding source:
 
-  FBInk (v1.25.0-543-g886f25f + patches/fbink-state-dump-args.patch)
+  FBInk by @NiLuJe (v1.25.0-543-g886f25f + patches/fbink-state-dump-args.patch)
       GPL-3.0-or-later   https://github.com/NiLuJe/FBInk
-  slirp4netns v1.3.7 (unmodified static binary; contains libslirp, BSD-3-Clause)
+  slirp4netns v1.3.7 by @AkihiroSuda / @rootless-containers (unmodified static binary; contains libslirp, BSD-3-Clause)
       GPL-2.0-or-later   https://github.com/rootless-containers/slirp4netns
-  e2fsprogs 1.47.1 (e2fsck, resize2fs; unmodified)
+  e2fsprogs 1.47.1 by @tytso (e2fsck, resize2fs; unmodified)
       GPL-2.0-only       https://e2fsprogs.sourceforge.net/
-  Dropbear SSH (KOReader build, debugging package only)
+  Dropbear SSH by @mkj (@koreader build, debugging package only)
       MIT-style          https://github.com/mkj/dropbear
   Android Open Source Project, android-7.1.1_r61 (system image, libandroid_runtime.so)
       Apache-2.0 and others   https://source.android.com/
-  Linux binder driver (external module for old kernels, built on demand, not shipped)
-      GPL-2.0-only       https://android.googlesource.com/kernel/common
-  glibc / libgcc (statically linked into the host programs)
+  Linux kernel drivers & headers (binder, tun, uinput, zram; external modules for old kernels, built on demand, not shipped)
+      GPL-2.0-only       https://www.kernel.org/   https://android.googlesource.com/kernel/common
+  glibc / libgcc by the GNU Project (statically linked into the host programs)
       LGPL-2.1-or-later / GPL-3.0-or-later with the GCC runtime library exception
-  LXGW WenKai 1.510 (fonts/LXGWWenKai-Regular.ttf in the packages, see fonts/OFL.txt)
+  LXGW WenKai 1.510 by @lxgw, based on Klee One by @fontworks-fonts (fonts/LXGWWenKai-Regular.ttf, see fonts/OFL.txt)
       SIL OFL 1.1        https://github.com/lxgw/LxgwWenKai
   libime / fcitx5 pinyin dictionary (dict-20260907) and language model (lm_sc.arpa-20260629,
-  derived from sunpinyin / open-gram), converted into VeraIME's assets/pinyin.dat
+  derived from @sunpinyin / open-gram) by @wengxt (CSSlayer) / @fcitx, converted into VeraIME's assets/pinyin.dat
       LGPL-2.1-or-later  https://github.com/fcitx/libime   (see android/packages/VeraIME/assets/NOTICE-pinyin.txt;
                          regenerate with tools/ime/gen_pinyin_dict.py)
   Chromium WebView 119.0.6045.194 (optional web engine, downloaded on demand, not in the packages;
-  com.embrith.webview, built from source without Google Play services by community user Embrith余烬)
+  com.embrith.webview, built from Chromium source without Google Play services by community contributor Embrith余烬)
       BSD-3-Clause and the third-party licences listed in its webview_licenses.notice
       https://chromium.googlesource.com/chromium/src/+/refs/tags/119.0.6045.194
-  Mozilla CA certificate bundle (added to the Android image)
+  Mozilla CA certificate bundle (curated via curl caextract by @bagder, added to the Android image)
       MPL-2.0            https://curl.se/docs/caextract.html
 
 Full details, build recipes and source offers: THIRD_PARTY.md.
@@ -51,10 +51,10 @@ exclusively from open-source projects.
 
 Open-source specifications, ecosystem interoperability and design references
 (no third-party code copied or bundled):
-  openlipc (public liblipc C prototypes used by vdkaf.c)   https://github.com/Arkq/openlipc
-  KOReader (e-ink edge/corner/two-finger gesture UX & external reader intent)   https://github.com/koreader/koreader
-  Waydroid / Anbox (Linux namespace + cgroup + binder Android container model)  https://github.com/waydroid/waydroid
-  EinkBro (e-ink page-turn scrolling & WebView contrast/bold UX ideas)          https://github.com/plateaukao/einkbro
-  KUAL / SH_Integration / KPM (public launcher header & manifest conventions)   https://www.mobileread.com/forums/forumdisplay.php?f=150
-  eink-emulator / QEMU (development & regression testing only, not shipped)     https://github.com/katadelos/eink-emulator
-  Open-Meteo API (optional weather widget data source, CC BY 4.0)               https://github.com/open-meteo/open-meteo
+  openlipc by @arkq (public liblipc C prototypes used by vdkaf.c)                https://github.com/Arkq/openlipc
+  KOReader by @koreader (e-ink edge/corner/two-finger gesture UX & reader link)  https://github.com/koreader/koreader
+  Waydroid / Anbox by @waydroid & @anbox (Linux namespace + binder container)    https://github.com/waydroid/waydroid
+  EinkBro by @plateaukao (e-ink page-turn scrolling & WebView contrast ideas)    https://github.com/plateaukao/einkbro
+  KUAL / MRPI / SH_Integration / KPM (@NiLuJe, @KindleModding, @hackerdude)      https://github.com/KindleModding
+  eink-emulator by @katadelos & @qemu (dev & regression testing only)            https://github.com/katadelos/eink-emulator
+  Open-Meteo API by @patrick-zippenfenig / @open-meteo (weather widget, CC BY)   https://github.com/open-meteo/open-meteo
