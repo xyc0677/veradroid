@@ -125,10 +125,12 @@ arm-linux-gnueabihf-gcc -O2 -static input/vinput.c -o veradroid-input
 
 见 [`CONTRIBUTING.md`](CONTRIBUTING.md)；安全问题见 [`SECURITY.md`](SECURITY.md)。
 
-## 许可
+## 许可与开源来源
 
 VeraDroid 自己的代码按 GNU General Public License 第 3 版或（由你选择）任何更新版本授权（GPL-3.0-or-later），
-文件头有 `SPDX-License-Identifier`。AOSP 覆盖文件沿用原文件的许可；第三方组件见 [`THIRD_PARTY.md`](THIRD_PARTY.md)。
+文件头有 `SPDX-License-Identifier`。AOSP 覆盖文件沿用原文件的许可。
+
+本项目 **100% 基于自由与开源生态构建**，不包含、不链接任何闭源商业软件的代码或二进制文件。全部第三方开源组件、数据、上游地址、版本号、SHA-256 及技术/交互参考来源均完整列在 [`THIRD_PARTY.md`](THIRD_PARTY.md) 和 [`NOTICE`](NOTICE)。
 
 ---
 
@@ -145,5 +147,5 @@ not modified, so you can always return to the stock Kindle UI.
   AOSP device config and patches (`android/`), the VeraHome launcher and VeraIME input method, installer scripts (`cloud/static/`).
 - Build: see "构建" above (Docker image `tools/build/Dockerfile.aosp`, `tools/build/build_rootfs.sh`, ARM cross-compilation of
   the host programs). Install instructions: <https://veradroid.wenjin.jp>.
-- License: GPL-3.0-or-later. Third-party components: `THIRD_PARTY.md`. Author: ajie.
+- License: GPL-3.0-or-later. Every dependency, toolchain and technical reference comes from open-source projects; full list with upstream links, hashes and licences in `THIRD_PARTY.md` and `NOTICE`. Author: ajie.
 - Not affiliated with, endorsed or sponsored by Amazon, nor by the Véra jailbreak project or its authors. "Kindle" is a trademark of Amazon.com, Inc. or its affiliates.

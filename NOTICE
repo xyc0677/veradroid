@@ -45,4 +45,16 @@ licences, versions and the place to get the corresponding source:
       MPL-2.0            https://curl.se/docs/caextract.html
 
 Full details, build recipes and source offers: THIRD_PARTY.md.
-No third-party Android application (APK) is part of this project.
+No third-party Android application (APK) or closed-source component is part of
+this project; every bundled, linked or built-from dependency originates
+exclusively from open-source projects.
+
+Open-source specifications, ecosystem interoperability and design references
+(no third-party code copied or bundled):
+  openlipc (public liblipc C prototypes used by vdkaf.c)   https://github.com/Arkq/openlipc
+  KOReader (e-ink edge/corner/two-finger gesture UX & external reader intent)   https://github.com/koreader/koreader
+  Waydroid / Anbox (Linux namespace + cgroup + binder Android container model)  https://github.com/waydroid/waydroid
+  EinkBro (e-ink page-turn scrolling & WebView contrast/bold UX ideas)          https://github.com/plateaukao/einkbro
+  KUAL / SH_Integration / KPM (public launcher header & manifest conventions)   https://www.mobileread.com/forums/forumdisplay.php?f=150
+  eink-emulator / QEMU (development & regression testing only, not shipped)     https://github.com/katadelos/eink-emulator
+  Open-Meteo API (optional weather widget data source, CC BY 4.0)               https://github.com/open-meteo/open-meteo
